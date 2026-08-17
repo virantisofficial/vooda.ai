@@ -1,0 +1,35 @@
+# Pre-commit hook configuration.
+#
+# Install once per clone:   pip install pre-commit && pre-commit install
+# Manual run across repo:   pre-commit run --all-files
+#
+# Hooks run automatically on ``git commit`` after install. If a hook
+# fails, the commit is aborted and the error is shown. To commit
+# anyway in a real emergency, ``git commit --no-verify`` bypasses.
+
+repos:
+  # D1 — verifier non-destructive audit.
+  #
+  # Static AST analysis of services/secret_verification/verifier.py.
+  # Fails if any HTTP call uses PUT/DELETE/PATCH, or if a POST targets
+  # a URL not on the explicit allowlist inside the test. Runs in <2s
+  # on every commit that touches verifier code or the test itself,
+  # and is skipped on unrelated commits (see ``files:`` filter).
+  #
+  # The same test also runs in CI via .github/workflows/d1-audit.yml
+  # as a belt-and-braces gate for devs who haven't installed the hook.
+  - repo: local
+    hooks:
+      - id: verifier-non-destructive-audit
+        name: D1 — verifier non-destructive audit
+        description: >
+          Reject any PUT/DELETE/PATCH or non-allowlisted POST in
+          services/secret_verification/verifier.py. Static AST only;
+          no network calls, no credentials, no state.
+        entry: python3 tests/test_verifier_non_destructive.py
+        language: system
+        # Only re-run the hook when files it cares about change. The
+        # test itself is included so that changes to the allowlist
+        # also re-trigger validation.
+        files: ^(services/secret_verification/verifier\.py|tests/test_verifier_non_destructive\.py)$
+        pass_filenames: false

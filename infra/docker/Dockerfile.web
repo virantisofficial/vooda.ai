@@ -1,0 +1,146 @@
+# Multi-stage build for the Next.js 15 web app.
+#
+# Three stages:
+#   1. `deps`    — install npm packages (cached on package*.json hash)
+#   2. `builder` — run `next build` to produce the standalone server
+#   3. `runner`  — minimal runtime image with only the standalone
+#                  output (~150 MB vs ~1.2 GB for a full node_modules
+#                  copy)
+#
+# Why standalone output (next.config.mjs sets `output: "standalone"`):
+#   Next.js 15's standalone build copies only the npm packages
+#   actually used by the server runtime — typically 3-5 MB of
+#   node_modules vs the 800+ MB the dev install pulls in. The
+#   resulting image starts in <2s and runs as a single `node` process.
+#
+# Build-time vs runtime args:
+#   Next.js evaluates rewrites() / `process.env.X_PUBLIC_*` at BUILD
+#   time, baking the values into the route map and the client bundle.
+#   API_INTERNAL_URL has to be available during `next build` (passed
+#   via --build-arg in docker-compose.yml) — setting it only at
+#   runtime would have no effect on the rewrite rules.
+
+# ─────────────────────────────────────────────────────────────
+# Stage 1: dependencies
+# ─────────────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+
+# libc6-compat: some npm packages (sharp, etc.) are linked against
+# glibc; alpine ships musl. Adding the compat shim avoids cryptic
+# "module not found" errors at runtime.
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app/apps/web
+
+# Layer-cache: lockfile-only copy + install. Source code changes
+# don't bust this expensive layer.
+COPY apps/web/package.json apps/web/package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage 2: build
+# ─────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app/apps/web
+
+# Pull installed node_modules from the deps stage.
+COPY --from=deps /app/apps/web/node_modules ./node_modules
+
+# Copy source. .dockerignore keeps node_modules / .next / build
+# artefacts out of the context.
+COPY apps/web ./
+
+# API_INTERNAL_URL must be set at build time — Next.js bakes the
+# rewrites() destination into the route map. docker-compose.yml
+# passes this via --build-arg.
+ARG API_INTERNAL_URL=http://api:8000
+ENV API_INTERNAL_URL=${API_INTERNAL_URL}
+
+# NEXT_TELEMETRY_DISABLED=1 stops Next.js from phoning home during
+# the build — speeds up CI by ~5s and avoids a network round-trip.
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage 3: runtime
+# ─────────────────────────────────────────────────────────────
+FROM node:20-alpine AS runner
+
+# wget is alpine-default; we use it for the docker healthcheck. No
+# other system deps needed — the standalone bundle includes
+# everything node needs.
+RUN apk add --no-cache wget
+
+# WORKDIR must be /app (the outer root), NOT /app/apps/web.
+#
+# Next.js 15's standalone output preserves the monorepo path
+# structure inside the bundle: when the source lives at
+# `apps/web/`, the standalone tree contains `apps/web/server.js`,
+# not `server.js` at the bundle root. So:
+#
+#   .next/standalone/
+#     ├── apps/web/server.js     ← entrypoint
+#     ├── apps/web/.next/...     ← server chunks
+#     └── node_modules/          ← only what server.js needs (~3 MB)
+#
+# The COPY lines below stage the standalone tree into `/app/`, the
+# static assets into `/app/apps/web/.next/static`, and `public` into
+# `/app/apps/web/public`. CMD then runs `node apps/web/server.js`
+# resolved relative to `/app` — i.e. `/app/apps/web/server.js`.
+#
+# An earlier version had WORKDIR=/app/apps/web which made the CMD
+# resolve to `/app/apps/web/apps/web/server.js` (double-nested) and
+# crashed every container with `Cannot find module`. Caught
+# 2026-05-04 by the isolated prod-build smoke before any redeploy.
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+# Run as a non-root user. Next.js's standalone output is happy to
+# run as any UID as long as it owns the .next/cache directory.
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser  --system --uid 1001 nextjs
+
+# `output: "standalone"` produces three pieces we copy into the
+# runner image:
+#   .next/standalone — the minimal server (~3 MB) that re-exports
+#                      a Node http server with our routes
+#   .next/static     — the immutable static asset bundle
+#   public           — public/ files (favicon, robots, etc.)
+#
+# CRITICAL — destination paths matter:
+# The standalone `server.js` (at `/app/server.js` after the first
+# COPY below) serves `/_next/static/*` requests from
+# `<cwd>/.next/static/*` and `/<asset>` from `<cwd>/public/`. Both
+# are relative to the WORKDIR (`/app`), NOT the original monorepo
+# source layout. So `.next/static` MUST land at `/app/.next/static`
+# and `public` MUST land at `/app/public` — not under
+# `/app/apps/web/.next/static` or `/app/apps/web/public`. The
+# earlier version copied them to the monorepo paths and every
+# static asset (JS chunks, CSS, favicon, logo) returned 404. The
+# HTML loaded but the page rendered blank because no JS/CSS could
+# execute. Fix verified 2026-05-04 against curl probes of every
+# /_next/static/chunks/*.js URL the rendered HTML referenced.
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/static     ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/apps/web/public           ./public
+
+USER nextjs
+
+EXPOSE 3000
+
+# server.js is the standalone entrypoint emitted at the ROOT of the
+# standalone bundle (next build with `output: "standalone"` puts it
+# at `/app/server.js` even on a monorepo source layout — verified
+# 2026-05-04 by inspecting the built image). The static + public
+# trees mirror the source path (`apps/web/.next/static`,
+# `apps/web/public`) but server.js does NOT.
+CMD ["node", "server.js"]

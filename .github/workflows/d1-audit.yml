@@ -1,0 +1,58 @@
+# D1 — verifier non-destructive audit (CI gate)
+#
+# Runs the AST-based audit on every push / PR that touches the
+# verifier or the audit test itself. Fails the build if any HTTP call
+# in services/secret_verification/verifier.py uses PUT/DELETE/PATCH
+# or POSTs to a URL not on the explicit allowlist.
+#
+# This is the CI-side belt for devs who commit from a machine where
+# ``pre-commit install`` hasn't been run yet. Same test script as the
+# local hook — same invocation, same pass/fail contract.
+
+name: D1 Verifier Safety Audit
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'services/secret_verification/verifier.py'
+      - 'tests/test_verifier_non_destructive.py'
+      - '.github/workflows/d1-audit.yml'
+  pull_request:
+    paths:
+      - 'services/secret_verification/verifier.py'
+      - 'tests/test_verifier_non_destructive.py'
+      - '.github/workflows/d1-audit.yml'
+
+# Cancel older runs of the same PR/branch if a new push arrives.
+concurrency:
+  group: d1-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: verifier-non-destructive
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No external deps — the audit is pure stdlib (ast, pathlib).
+      # Skipping pip install keeps the job under 30 seconds end-to-end.
+      - name: Run D1 audit (script form)
+        run: python3 tests/test_verifier_non_destructive.py
+
+      # Also run via pytest to validate both the assertion-based test
+      # and the allowlist-documentation test. Fast enough that doing
+      # both is trivial, and catches the case where the script form
+      # and pytest form diverge in the future.
+      - name: Run D1 audit (pytest form)
+        run: |
+          python3 -m pip install --quiet pytest
+          python3 -m pytest tests/test_verifier_non_destructive.py -v

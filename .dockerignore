@@ -1,0 +1,100 @@
+# Root .dockerignore — applies to every `docker build` issued from
+# the project root (both Dockerfile.api and Dockerfile.web).
+#
+# Goal: keep the build context small (faster uploads to the daemon)
+# AND keep developer-machine artefacts out of the image (which cause
+# nondeterministic builds and leak local paths into shipped binaries).
+
+# ─── Version control ──────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+.github
+
+# ─── Python build artefacts ───────────────────────────────────
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+*.egg
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+
+# ─── Python virtualenvs (host-local — NEVER ship these) ───────
+.venv
+venv
+env
+ENV
+
+# ─── Node / Next.js artefacts ─────────────────────────────────
+# node_modules MUST be excluded — the builder stage installs them
+# from package-lock.json into the image. Shipping the host's
+# node_modules would conflict with the builder's install AND ship a
+# multi-hundred-MB tree we'd then ignore.
+**/node_modules
+**/.next
+**/.turbo
+**/out
+**/build
+**/dist
+
+# tsconfig.tsbuildinfo bakes ABSOLUTE local paths into JSON — copying
+# it into the image makes the TypeScript compiler think files exist
+# at the developer's local paths and breaks `tsc` inside the build.
+**/tsconfig.tsbuildinfo
+**/*.tsbuildinfo
+
+# ─── Editor / IDE state ───────────────────────────────────────
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Local secrets / env files ────────────────────────────────
+# Never bake secrets into the image. Compose passes them at runtime.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# ─── Test / sample data ───────────────────────────────────────
+sample_data/large_files
+test_repos
+.benchmarks
+benchmarks/results
+
+# ─── Logs / runtime state ─────────────────────────────────────
+*.log
+logs/
+storage/
+pgdata/
+redis_data/
+
+# ─── Claude Code / AI tooling state ───────────────────────────
+.claude
+.cursor
+.aider*
+
+# ─── Documentation source we don't need at runtime ────────────
+docs
+*.md
+!README.md
+
+# ─── The Dockerfiles themselves don't need to be in the context ──
+infra/docker/Dockerfile.*
+docker-compose*.yml
+docker-compose.override*.yml

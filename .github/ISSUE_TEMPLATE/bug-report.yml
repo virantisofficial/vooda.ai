@@ -1,0 +1,85 @@
+name: Bug report
+description: Something is broken
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A reproduction is worth more than a description — if you can give us steps, we can usually fix it same-week.
+
+        **Found a security vulnerability?** Don't file it here. See [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      options:
+        - Scan engine / detectors
+        - Secret verification
+        - CLI
+        - Pre-commit hook / push protection
+        - Web UI
+        - API
+        - Worker / background jobs
+        - Integrations (GitHub, GitLab, Jira, Slack, …)
+        - Deployment / Docker Compose
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "e.g. v0.1.0, or the commit SHA you're running"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "e.g. macOS 15 / Docker Compose, Ubuntu 24.04 / k8s"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "`docker compose logs api worker` is usually the useful bit. Redact any secrets."
+      render: shell
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have redacted all credentials from logs and output
+          required: true
+        - label: I checked this isn't already reported
+          required: true

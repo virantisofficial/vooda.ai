@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest something Vooda should do
+title: "[feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us the problem before the solution — we may know a different way to solve it, or find that several requests share a root cause.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: What are you doing today, and where does it hurt?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Vooda to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried or considered instead?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area?
+      options:
+        - Detection rules / coverage
+        - Secret verification
+        - AI triage
+        - CLI / developer workflow
+        - CI/CD integration
+        - Reporting / compliance
+        - Integrations
+        - Web UI
+        - Deployment / operations
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Would you like to build it?
+      options:
+        - label: I'd be interested in contributing this myself

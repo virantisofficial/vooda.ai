@@ -1,0 +1,98 @@
+# Web framework
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart==0.0.18
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+greenlet==3.1.1
+
+# Redis / Celery
+redis==5.2.1
+celery[redis]==5.4.0
+
+# Rate limiting (Sprint 1 of API-key audit).  slowapi is the de-facto
+# FastAPI rate-limit lib; `limits` is its storage backend layer.
+# Configured with Redis storage in apps/api/app/core/rate_limit.py so
+# all uvicorn workers share one bucket per principal — not separate
+# in-process buckets per worker.
+slowapi==0.1.9
+limits==3.13.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+
+# Validation / Serialization
+pydantic==2.10.3
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# AI providers
+anthropic==0.42.0
+openai==1.58.1
+tiktoken==0.8.0
+
+# Parsing
+defusedxml==0.7.1
+lxml==5.3.0
+jsonschema==4.23.0
+
+# Code analysis
+tree-sitter==0.23.2
+pygments==2.18.0
+
+# Storage
+boto3==1.35.86
+
+# File I/O
+aiofiles==24.1.0
+
+# Export formats
+openpyxl==3.1.5
+fpdf2==2.8.2
+
+# Utilities
+httpx==0.28.1
+tenacity==9.0.0
+# Circuit breaker for outbound LLM calls (Sprint B-1). Wraps each
+# provider call so repeated 5xx/timeouts trip the breaker and the
+# batch fails fast instead of wedging on a stuck call. Replaces the
+# home-grown adaptive Semaphore(1) swap that deadlocked. Using
+# `purgatory` (async-native) instead of `pybreaker` because the
+# latter's `call_async` actually requires Tornado, not asyncio.
+purgatory==3.0.1
+structlog==24.4.0
+python-dotenv==1.0.1
+pyyaml==6.0.2
+orjson==3.10.12
+
+# Git
+gitpython==3.1.43
+
+# Secret-scanner regex engines.  google-re2 is the non-backtracking
+# fast path (ReDoS-immune by design) that compiles 92.6% of the rule
+# pack.  The third-party `regex` library is the fallback for the
+# remaining 7.4% (lookahead / large-repetition patterns) and supports
+# a per-match timeout= kwarg as a defensive layer.  Track-A 2026-05-24.
+regex>=2024.5.10
+google-re2>=1.1.20251105
+
+# The GCP Secret Manager vault provider mints its access token from a
+# service-account JWT; every call after that is plain httpx, so
+# google-auth alone suffices and the full google-cloud SDK stays out.
+# Without it the provider raised ImportError inside a broad `except`
+# and reported "check the URL and credentials" — sending users to
+# re-check credentials that were never the problem.
+google-auth>=2.35.0
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.1
+factory-boy==3.3.1

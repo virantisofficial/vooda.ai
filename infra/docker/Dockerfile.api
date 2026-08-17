@@ -1,0 +1,115 @@
+# Multi-stage build for the API / worker / beat services.
+#
+# Why multi-stage:
+#   - Stage 1 (`deps`) installs Python packages with pip's cache mount
+#     so subsequent rebuilds skip already-built wheels.
+#   - Stage 2 (`runtime`) starts from a clean slim base, copies only
+#     the installed site-packages + app code, and drops every build
+#     artefact. Final image is ~150 MB smaller than a single-stage
+#     equivalent and contains zero compilers (smaller attack surface).
+#
+# Runtime requirements:
+#   - git: the worker shells out to it for repository cloning + git-
+#     history scanning (services/secret_scan/git_history.py and
+#     apps/worker/tasks.py both call subprocess.run(["git", ...])).
+#   - curl: used by the docker-compose healthcheck to hit /healthz.
+#   - postgresql-client: used by the API entrypoint to apply
+#     infra/scripts/add_indexes.sql via psql AFTER alembic upgrade
+#     (CONCURRENT indexes can't run inside an Alembic transaction).
+#   - libpq5 (NOT libpq-dev): runtime shared lib that psycopg2-binary
+#     would normally bundle, but having the system version avoids a
+#     surprise on alpine-based dependents.
+#
+# What we deliberately do NOT install:
+#   - build-essential / gcc / libpq-dev: every dependency in
+#     requirements.txt has a pre-built manylinux wheel for python:3.12
+#     (psycopg2-binary, asyncpg, bcrypt, cryptography, etc.). Adding
+#     these compilers used ~250 MB and ~2 minutes of build time for
+#     zero actual builds.
+#   - dev tools (pytest, mypy): tests run against the same image but
+#     are invoked via `docker compose exec`, not as a separate stage.
+#     If you want a tests-only image, add a `tests` stage that pip-
+#     installs requirements-dev.txt.
+
+# ─────────────────────────────────────────────────────────────
+# Stage 1: dependency installation
+# ─────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS deps
+
+WORKDIR /app
+
+# Install only what's needed to PULL pre-built wheels — no compilers.
+# `--no-install-recommends` keeps the image lean.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer-cache: install Python deps before copying source so a code
+# change doesn't bust the (large, slow) pip layer.
+COPY requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage 2: runtime
+# ─────────────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+# Match the upstream Python image's HOME path so pip-installed CLIs
+# resolve correctly under whichever UID we end up running as.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Runtime-only system packages.
+#   git              — repo cloning + git-history scanning
+#   curl             — docker healthcheck against /healthz
+#   postgresql-client— psql for applying performance indexes after
+#                      alembic upgrade (CONCURRENT indexes can't run
+#                      inside the Alembic transaction)
+#   libpq5           — runtime postgres client lib (psycopg2 ships
+#                      its own but having the system version is a
+#                      cheap belt + braces)
+#   ca-certificates  — TLS verification for outbound calls (the 252
+#                      verifiers all use httpx → OpenSSL → CAs)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        postgresql-client \
+        libpq5 \
+        ca-certificates \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+# procps adds pgrep + ps, used by the docker-compose beat healthcheck
+# (`pgrep -f 'celery.*beat'`) and useful for in-container debugging.
+# Adds ~700 KB to the image. Without it the beat container reports
+# `Health: unhealthy` forever even when celery-beat is running fine
+# because the healthcheck sh exits 127 (`pgrep: not found`).
+
+# Copy the installed Python packages from the deps stage. site-
+# packages contains everything pip put down; bin/ has the entrypoint
+# scripts (alembic, celery, uvicorn).
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin /usr/local/bin
+
+# App source. .dockerignore keeps node_modules, .next, .git, tests
+# data, etc. out of the build context so we don't ship cruft.
+COPY . .
+
+# Storage volume mountpoint. Compose mounts a named volume here so
+# uploaded files / scan artefacts survive container restarts.
+RUN mkdir -p /app/storage
+
+# Inform Coolify (and any other proxy) which port the API serves on.
+EXPOSE 8000
+
+# Default command runs the API. The worker / beat services in
+# docker-compose.yml override this with the appropriate celery
+# invocation.
+CMD ["uvicorn", "apps.api.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,7 @@
+- id: vooda-secret-scan
+  name: Vooda AI Secret Scanner
+  description: Scan staged files for hardcoded secrets, API keys, and credentials
+  entry: python cli/vooda_cli.py scan --staged
+  language: python
+  types: [text]
+  stages: [commit]

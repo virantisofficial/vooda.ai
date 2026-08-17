@@ -1,0 +1,29 @@
+# Lean dependency set for the distributable Vooda CLI image
+# (infra/docker/Dockerfile.cli) — the client-side scan engine + CLI ONLY.
+#
+# This is deliberately a TINY subset of the platform requirements.txt. It was
+# derived empirically: a trace of every CLI scan path (scan_directory,
+# scan_file, scan_history, scan_staged, scan_git_history, redact_with_scanner,
+# the 946-rule registry, branding, entropy) loads only the packages below.
+#
+# Everything in the full requirements.txt that the CLI does NOT use is omitted
+# on purpose — most of the image's CRITICAL/HIGH CVEs lived in server-only deps
+# (python-jose, python-multipart, GitPython, boto3, lxml, the AI SDKs, the
+# FastAPI/SQLAlchemy/Celery stack). Dropping them removes the CVEs AND shrinks
+# the image. If a future engine change pulls a new runtime dep, the CLI image
+# E2E (build → vooda monitor against the platform) will fail and surface it.
+#
+# Keep these version-pinned in lockstep with requirements.txt.
+
+# Secret-scanner regex engines: google-re2 is the ReDoS-immune fast path that
+# compiles ~92.6% of the rule pack; `regex` is the lookahead/large-repetition
+# fallback with a per-match timeout. Both are mandatory for the engine.
+regex>=2024.5.10
+google-re2>=1.1.20251105
+
+# Structured logging — the engine logs via structlog.get_logger().
+structlog==24.4.0
+
+# greenlet is observed in the CLI's runtime import closure; pin it so the lean
+# image matches the traced set rather than relying on transitive resolution.
+greenlet==3.1.1

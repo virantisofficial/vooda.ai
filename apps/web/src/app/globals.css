@@ -1,0 +1,485 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* ── Base backgrounds ── */
+  --bg-base: #07091a;
+  --bg-deep: #050714;
+  --bg-surface: rgba(255, 255, 255, 0.025);
+  --bg-surface-hover: rgba(255, 255, 255, 0.04);
+  --bg-elevated: rgba(255, 255, 255, 0.035);
+
+  /* ── Glass ── */
+  --glass-bg: rgba(14, 18, 40, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.07);
+  --glass-border-strong: rgba(255, 255, 255, 0.12);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* ── Red-orange accent (primary) ── */
+  --red: #ef4444;
+  --red-dim: rgba(239, 68, 68, 0.1);
+  --red-glow: rgba(239, 68, 68, 0.2);
+  --red-border: rgba(239, 68, 68, 0.25);
+
+  /* ── Semantic accents ── */
+  --accent-orange: #f97316;
+  --accent-yellow: #fbbf24;
+  --accent-green: #34d399;
+  --accent-cyan: #22d3ee;
+  --accent-blue: #60a5fa;
+  --accent-purple: #a855f7;
+  --accent-pink: #f472b6;
+
+  /* ── Text ── */
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #475569;
+  --text-ghost: #2d3a52;
+
+  /* ── Sidebar ── */
+  --sidebar-collapsed: 56px;
+  --sidebar-expanded: 220px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  color: var(--text-primary);
+  background: var(--bg-base);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(239, 68, 68, 0.07) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 80%, rgba(249, 115, 22, 0.04) 0%, transparent 50%);
+  /* background-attachment: fixed; — removed for scroll performance */
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(239, 68, 68, 0.15); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(239, 68, 68, 0.3); }
+
+/* ── Selection ── */
+::selection { background: rgba(239, 68, 68, 0.3); color: white; }
+
+@layer components {
+
+  /* ══════════════════════════════
+     GLASS CARDS
+     ══════════════════════════════ */
+  .glass {
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+  }
+
+  .card {
+    @apply rounded-xl p-5;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .card-hover {
+    @apply transition-all duration-200 cursor-pointer;
+  }
+  .card-hover:hover {
+    border-color: var(--glass-border-strong);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(239, 68, 68, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    transform: translateY(-1px);
+  }
+
+  .card-glow {
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 40px rgba(239, 68, 68, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  /* ══════════════════════════════
+     BUTTONS
+     ══════════════════════════════ */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-all duration-200 select-none;
+    background: linear-gradient(135deg, #dc2626 0%, #ef4444 50%, #f97316 100%);
+    box-shadow: 0 2px 12px rgba(220, 38, 38, 0.35), inset 0 1px 0 rgba(255,255,255,0.1);
+  }
+  .btn-primary:hover:not(:disabled) {
+    box-shadow: 0 4px 20px rgba(239, 68, 68, 0.5), inset 0 1px 0 rgba(255,255,255,0.15);
+    transform: translateY(-1px);
+  }
+  .btn-primary:active:not(:disabled) { transform: translateY(0); }
+  .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /*
+   * Compact primary — for header bands and tight rows.
+   *
+   * The full .btn-primary uses a heavy red→orange gradient + a 12px
+   * glow shadow that, while striking on a hero CTA (modal submit,
+   * dashboard "Create" tile), competes for attention when placed in
+   * the sticky header alongside a page title, search, notifications,
+   * and avatar.  Industry pattern (Linear "New Issue", Stripe
+   * Dashboard primary actions, GitHub Enterprise) keeps the primary
+   * in the header visually quiet: solid colour, no gradient, no glow,
+   * smaller padding.
+   *
+   * Same brand red as the full button so it still reads as "the
+   * primary action" — just refined for chrome contexts.
+   */
+  .btn-primary-sm {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-white transition-all duration-200 select-none;
+    background: #dc2626;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+  .btn-primary-sm:hover:not(:disabled) {
+    background: #ef4444;
+  }
+  .btn-primary-sm:active:not(:disabled) {
+    background: #b91c1c;
+  }
+  .btn-primary-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /*
+   * Secondary button — low-emphasis but UNAMBIGUOUSLY a button.
+   *
+   * Contrast levels aligned with what mature dark-mode design systems
+   * actually ship (measured against their canvas backgrounds):
+   *   GitHub Primer  bg ≈ 12% white, border ≈ 10% white, text #c9d1d9
+   *   Microsoft Fluent NeutralBackground3 ≈ 14% on neutral canvas
+   *   Stripe Dashboard secondary ≈ 14% bg, white text
+   *   Linear         bg ≈ 12-14% white on near-black
+   *
+   * The Vooda canvas is #07091a (very dark), so we sit at the upper
+   * end of that range — 12% bg + 18% border + full-white text — to
+   * make the button read as a clear interactive surface rather than
+   * a faint outline.  Previously this token was at 3-6%, which left
+   * the button visually camouflaged on the dark canvas.
+   */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 select-none;
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.26);
+  }
+  .btn-secondary:active:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /*
+   * Compact size for tight contexts (inline form actions like
+   * "Test Connection", row-level actions, in-table buttons).
+   * Same contrast language as .btn-secondary — only padding +
+   * font-size differ.  Keeping the colour identical is the whole
+   * point of a design system: every secondary button reads the
+   * same regardless of size.
+   */
+  .btn-secondary-sm {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all duration-200 select-none;
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+  }
+  .btn-secondary-sm:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.18);
+    border-color: rgba(255, 255, 255, 0.26);
+  }
+  .btn-secondary-sm:active:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .btn-secondary-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /*
+   * Ghost button — lowest emphasis (link-like actions, table row
+   * toggles, "Show more").  Resting state has no bg / no border —
+   * just slate-200 text, which still reads clearly on the dark
+   * canvas.  On hover it gains a subtle bg so the user gets feedback
+   * the action is interactive.
+   */
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 select-none;
+    color: var(--text-primary);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    color: #ffffff;
+    background: rgba(255,255,255,0.08);
+  }
+  .btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 select-none;
+    color: #f87171;
+    background: rgba(248, 113, 113, 0.06);
+    border: 1px solid rgba(248, 113, 113, 0.2);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(248, 113, 113, 0.12);
+    border-color: rgba(248, 113, 113, 0.35);
+    box-shadow: 0 0 12px rgba(248, 113, 113, 0.15);
+  }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-success {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 select-none;
+    color: #34d399;
+    background: rgba(52, 211, 153, 0.06);
+    border: 1px solid rgba(52, 211, 153, 0.2);
+  }
+  .btn-success:hover:not(:disabled) {
+    background: rgba(52, 211, 153, 0.12);
+    border-color: rgba(52, 211, 153, 0.35);
+  }
+
+  /* ══════════════════════════════
+     FORM INPUTS
+     ══════════════════════════════ */
+  .input-dark {
+    @apply w-full px-3 py-2.5 rounded-lg text-sm transition-all duration-200;
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+  .input-dark::placeholder { color: var(--text-ghost); }
+  .input-dark:hover { border-color: rgba(255, 255, 255, 0.1); }
+  .input-dark:focus {
+    outline: none;
+    border-color: rgba(239, 68, 68, 0.4);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.08);
+    background: rgba(239, 68, 68, 0.02);
+  }
+
+  .select-dark {
+    @apply px-3 py-2.5 rounded-lg text-sm transition-all duration-200 appearance-none cursor-pointer;
+    color: var(--text-primary);
+    color-scheme: dark;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 0.5rem center;
+    background-repeat: no-repeat;
+    background-size: 1.5em 1.5em;
+    padding-right: 2.5rem;
+  }
+  .select-dark:focus {
+    outline: none;
+    border-color: rgba(239, 68, 68, 0.4);
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.08);
+  }
+
+  /* ══════════════════════════════
+     SEVERITY BADGES
+     ══════════════════════════════ */
+  .severity-badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold tracking-wide uppercase;
+  }
+  .severity-critical {
+    background: rgba(248, 113, 113, 0.12);
+    color: #fca5a5;
+    border: 1px solid rgba(248, 113, 113, 0.25);
+  }
+  .severity-high {
+    background: rgba(251, 146, 60, 0.12);
+    color: #fdba74;
+    border: 1px solid rgba(251, 146, 60, 0.25);
+  }
+  .severity-medium {
+    background: rgba(251, 191, 36, 0.1);
+    color: #fcd34d;
+    border: 1px solid rgba(251, 191, 36, 0.2);
+  }
+  .severity-low {
+    background: rgba(52, 211, 153, 0.1);
+    color: #6ee7b7;
+    border: 1px solid rgba(52, 211, 153, 0.2);
+  }
+  .severity-info {
+    background: rgba(148, 163, 184, 0.08);
+    color: #94a3b8;
+    border: 1px solid rgba(148, 163, 184, 0.15);
+  }
+
+  /* ══════════════════════════════
+     CLASSIFICATION BADGES
+     ══════════════════════════════ */
+  .classification-badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold tracking-wide;
+  }
+  .classification-likely_true_positive {
+    background: rgba(248, 113, 113, 0.1);
+    color: #fca5a5;
+    border: 1px solid rgba(248, 113, 113, 0.2);
+  }
+  .classification-likely_false_positive {
+    background: rgba(52, 211, 153, 0.1);
+    color: #6ee7b7;
+    border: 1px solid rgba(52, 211, 153, 0.2);
+  }
+  .classification-needs_review {
+    background: rgba(251, 191, 36, 0.1);
+    color: #fcd34d;
+    border: 1px solid rgba(251, 191, 36, 0.2);
+  }
+  .classification-confirmed_true_positive {
+    background: rgba(248, 113, 113, 0.18);
+    color: #fca5a5;
+    border: 1px solid rgba(248, 113, 113, 0.3);
+  }
+  .classification-confirmed_false_positive {
+    background: rgba(52, 211, 153, 0.18);
+    color: #6ee7b7;
+    border: 1px solid rgba(52, 211, 153, 0.3);
+  }
+  .classification-accepted_risk {
+    background: rgba(251, 146, 60, 0.1);
+    color: #fdba74;
+    border: 1px solid rgba(251, 146, 60, 0.2);
+  }
+
+  /* ══════════════════════════════
+     TABLES
+     ══════════════════════════════ */
+  .glass-table {
+    @apply w-full text-sm;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+  .glass-table thead th {
+    @apply px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest;
+    color: var(--text-muted);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  .glass-table tbody tr {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    transition: background 0.15s;
+  }
+  .glass-table tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+  .glass-table tbody td { @apply px-4 py-3; }
+
+  /* ══════════════════════════════
+     METRIC ICON CONTAINERS
+     ══════════════════════════════ */
+  .metric-icon {
+    @apply w-11 h-11 rounded-xl flex items-center justify-center;
+    background: var(--red-dim);
+    border: 1px solid var(--red-border);
+  }
+
+  /* ══════════════════════════════
+     GLOW EFFECTS
+     ══════════════════════════════ */
+  .red-glow { box-shadow: 0 0 20px rgba(239, 68, 68, 0.2); }
+  .red-glow-sm { box-shadow: 0 0 10px rgba(239, 68, 68, 0.15); }
+
+  /* ══════════════════════════════
+     STATUS DOTS
+     ══════════════════════════════ */
+  .status-dot { @apply w-2 h-2 rounded-full shrink-0; }
+  .status-dot-active { background: #34d399; box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
+  .status-dot-warning { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.5); }
+  .status-dot-danger { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.5); }
+  .status-dot-muted { background: #475569; }
+
+  /* ══════════════════════════════
+     GLASS DROPDOWN / PANEL
+     ══════════════════════════════ */
+  .glass-panel {
+    @apply rounded-xl overflow-hidden;
+    background: rgba(10, 13, 30, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(239, 68, 68, 0.05);
+  }
+}
+
+/* ── Toast animation ── */
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-slide-up { animation: slide-up 0.2s cubic-bezier(0.34, 1.56, 0.64, 1); }
+
+/* ── Skeleton shimmer ──
+   Used for the loading-state placeholders that mirror the final page
+   layout while data loads.  The gradient sweep matches Stripe / Linear /
+   Vercel — subtle white-on-near-black so the shimmer reads as "this
+   block is loading" without grabbing attention away from anything that
+   has already painted. */
+@keyframes skeleton-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.035);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0)    0%,
+    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0)    100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* ── Sidebar transition ── */
+.sidebar-root {
+  width: var(--sidebar-collapsed);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: width;
+}
+.sidebar-root:hover { width: var(--sidebar-expanded); }
+
+.sidebar-label {
+  opacity: 0;
+  width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: opacity 0.2s ease, width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-root:hover .sidebar-label { opacity: 1; width: auto; }
+
+.sidebar-logo-text {
+  opacity: 0;
+  width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: opacity 0.15s ease 0s, width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-root:hover .sidebar-logo-text {
+  opacity: 1;
+  width: auto;
+  transition: opacity 0.2s ease 0.1s, width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Main content shifts with sidebar ── */
+.main-content {
+  margin-left: var(--sidebar-collapsed);
+  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Pulse glow animation ── */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 6px rgba(239, 68, 68, 0.4); }
+  50%       { box-shadow: 0 0 14px rgba(239, 68, 68, 0.7); }
+}
+.pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+
+/* ── Drawer animations (Sources page configure/edit drawer) ── */
+@keyframes vooda-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes vooda-slide-in-right {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.vooda-fade-in   { animation: vooda-fade-in 0.18s ease-out both; }
+.vooda-slide-in  { animation: vooda-slide-in-right 0.24s cubic-bezier(0.4, 0, 0.2, 1) both; }

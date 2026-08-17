@@ -1,0 +1,273 @@
+name: vooda-ai
+
+# Production-ready Docker Compose for Coolify (or any docker-compose host).
+#
+# Design choices:
+#   - Internal services (db, redis) use `expose:` not `ports:` so they
+#     are only reachable on the Docker network — Coolify's proxy
+#     routes the public-facing services (api, web).
+#   - All inter-service URLs use docker service names (db, redis,
+#     api) — never localhost — so containers talk over the bridge
+#     network, not via the host loopback (which doesn't exist inside
+#     a container).
+#   - No source-code bind mounts. The image is the source of truth in
+#     production. For local dev, drop a `docker-compose.override.yml`
+#     next to this file (committed example: docker-compose.override.example.yml)
+#     to layer in `volumes:` and the `--reload` uvicorn flag.
+#   - Required secrets (POSTGRES_PASSWORD, SECRET_KEY) use plain ${VAR}.
+#     Coolify enforces their presence in its UI. The ${VAR:?msg} shell
+#     validation syntax caused Coolify to misname the env var.
+#   - `alembic upgrade heads` (plural) — the migration tree has merge
+#     branches, so `head` (singular) would refuse to advance.
+#   - Healthchecks on every service so Coolify's restart logic + the
+#     `depends_on: condition: service_healthy` ordering both work.
+
+x-api-base: &api-base
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.api
+  image: vooda-ai/api:latest
+  restart: unless-stopped
+  environment: &api-env
+    # ${VAR:-default} syntax is used for optional vars with safe fallbacks.
+    # Required secrets (POSTGRES_PASSWORD, SECRET_KEY) use plain ${VAR} —
+    # Coolify enforces their presence via its UI; the :?error syntax
+    # caused Coolify to create env vars literally named
+    # "SECRET_KEY:?SECRET_KEY_is_required" instead of "SECRET_KEY".
+    DATABASE_URL: 'postgresql+asyncpg://${POSTGRES_USER:-vooda}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vooda}'
+    DATABASE_URL_SYNC: 'postgresql://${POSTGRES_USER:-vooda}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vooda}'
+    REDIS_URL: 'redis://redis:6379/0'
+    SECRET_KEY: '${SECRET_KEY}'
+    AI_PROVIDER: '${AI_PROVIDER:-claude}'
+    ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
+    OPENAI_API_KEY: '${OPENAI_API_KEY:-}'
+    AI_MODEL: '${AI_MODEL:-claude-sonnet-4-20250514}'
+    STORAGE_BACKEND: '${STORAGE_BACKEND:-local}'
+    STORAGE_PATH: '/app/storage'
+    LOG_LEVEL: '${LOG_LEVEL:-INFO}'
+    # CORS / public URLs — set these to the customer's deployed
+    # hostname so OAuth callbacks land + the SPA can call the API.
+    CORS_ORIGINS: '${CORS_ORIGINS:-http://localhost:3000}'
+    WEB_BASE_URL: '${WEB_BASE_URL:-http://localhost:3000}'
+    OAUTH_REDIRECT_BASE: '${OAUTH_REDIRECT_BASE:-http://localhost:8000/api/v1/integrations/oauth}'
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: vooda-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vooda}
+      POSTGRES_USER: ${POSTGRES_USER:-vooda}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    expose:
+      - "5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vooda} -d ${POSTGRES_DB:-vooda}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: vooda-redis
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    <<: *api-base
+    container_name: vooda-api
+    # Coolify proxies the public hostname to this port; locally,
+    # publish 8000 with the override file if you need direct access.
+    expose:
+      - "8000"
+    volumes:
+      - storage_data:/app/storage
+    healthcheck:
+      # The /healthz endpoint is registered in apps/api/app/main.py
+      # and returns 200 when the FastAPI app is up. We curl over the
+      # docker-internal address so the check works without exposing
+      # the port to the host.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Migrations run inline before uvicorn so a fresh DB or pending
+    # schema change is applied automatically. `heads` (plural) handles
+    # the merge-branch tree — after migration j7k8l9m0n1o2 there is
+    # exactly one head, but we leave it as `heads` so future merges
+    # don't break this command. The performance indexes
+    # (CREATE INDEX CONCURRENTLY) are applied by that same migration
+    # via autocommit_block — no separate psql step required.
+    #
+    # Continuation lines MUST sit at the same indent as `sh -c` above.
+    # In a YAML folded scalar (`>`), lines indented deeper than the
+    # first are "more-indented" and keep their newlines instead of
+    # being folded to spaces. That put a literal \n inside the
+    # `sh -c "..."` string, so the shell saw three commands rather than
+    # one: `exec uvicorn ...` terminated at `--port 8000` and the flags
+    # on the next line ran as their own command
+    # (`sh: 3: --timeout-graceful-shutdown: not found`). The net effect
+    # was that API_WORKERS and the graceful-shutdown timeout were
+    # silently dropped and uvicorn always ran single-worker.
+    command: >
+      sh -c "alembic -c apps/api/alembic.ini upgrade heads &&
+      exec uvicorn apps.api.app.main:app --host 0.0.0.0 --port 8000
+      --timeout-graceful-shutdown 10 --workers ${API_WORKERS:-2}"
+
+  worker:
+    <<: *api-base
+    container_name: vooda-worker
+    # Sprint G-4 — auto-restart the worker container on any non-clean
+    # exit (process crash, OOM, manual `docker kill`). Pairs with the
+    # task_reject_on_worker_lost + acks_late settings in celery_app.py
+    # so in-flight tasks are requeued onto the fresh worker after a
+    # crash, not silently lost. Matches the api / web / db / redis
+    # services which all set this.
+    restart: unless-stopped
+    volumes:
+      - storage_data:/app/storage
+    healthcheck:
+      # Celery's `inspect ping` tells us the worker is alive and the
+      # broker is reachable. Runs inside the container against the
+      # local broker URL, no extra network surface needed.
+      #
+      # Earlier version had `-d celery@$$HOSTNAME` to scope the ping
+      # to this specific worker, but `$HOSTNAME` is unset in
+      # docker's healthcheck shell (no exported env), so the
+      # destination resolved to `celery@` and the ping returned
+      # "No nodes replied". Bug fix 2026-05-04: drop `-d`,
+      # broadcast-ping all online workers (matches single-node dev
+      # + multi-node prod equally well).
+      test: ["CMD", "celery", "-A", "apps.worker.celery_app", "inspect", "ping", "--timeout", "5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # `--queues=celery,scans`: this default worker drains the default
+    # `celery` queue (all background + maintenance tasks) AND also
+    # consumes `scans` as a SAFETY-NET. Scans are routed to `scans`
+    # (celery_app.py task_routes) and normally picked up by the
+    # dedicated `worker-scans` pool below; listing `scans` here too means
+    # a routed scan can never pile up unconsumed even if worker-scans is
+    # down or misconfigured — worst case it runs here (today's
+    # behaviour). worker-scans, doing nothing but scans, still provides
+    # the guaranteed slot that fixes background-job starvation.
+    command: >
+      celery -A apps.worker.celery_app worker
+        --loglevel=${CELERY_LOG_LEVEL:-info}
+        --concurrency=${CELERY_CONCURRENCY:-4}
+        --queues=celery,scans
+        --hostname=default@%h
+
+  # Dedicated scan worker pool (scan-slot isolation). Consumes ONLY the
+  # `scans` queue, so user-facing scans always have reserved prefork
+  # slots that a backlog of generate_remediation / PR / ticket /
+  # notification jobs (which live on the default `celery` queue) can
+  # never occupy. This is the fix for the live starvation where two
+  # generate_remediation tasks pinned both worker slots and a queued
+  # scan sat PENDING at 0%. Scale horizontally by raising replicas for
+  # more concurrent-scan throughput; SCANS_CONCURRENCY tunes per-pod
+  # parallelism independently of the background worker's CELERY_CONCURRENCY.
+  worker-scans:
+    <<: *api-base
+    container_name: vooda-worker-scans
+    restart: unless-stopped
+    volumes:
+      # Needs the repo storage volume — scans clone/read repos here.
+      - storage_data:/app/storage
+    healthcheck:
+      # Same broadcast `inspect ping` as the default worker (a dead
+      # celery process exits the container, which restart:unless-stopped
+      # then recreates). Queue-consumption is verified out-of-band via
+      # `celery inspect active_queues` at deploy time.
+      test: ["CMD", "celery", "-A", "apps.worker.celery_app", "inspect", "ping", "--timeout", "5"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: >
+      celery -A apps.worker.celery_app worker
+        --loglevel=${CELERY_LOG_LEVEL:-info}
+        --concurrency=${SCANS_CONCURRENCY:-4}
+        --queues=scans
+        --hostname=scans@%h
+
+  beat:
+    <<: *api-base
+    container_name: vooda-beat
+    # Beat doesn't need persistent storage — schedules live in code
+    # (apps/worker/celery_app.py beat_schedule) and the schedule file
+    # is fine in /tmp.  No volumes: key here; x-api-base doesn't
+    # define one either, so omitting it is a clean no-op.
+    healthcheck:
+      # Beat doesn't expose a query endpoint; we check that the
+      # process is alive by looking for the celery beat pidfile.
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    command: >
+      celery -A apps.worker.celery_app beat
+        --loglevel=${CELERY_LOG_LEVEL:-info}
+        --schedule=/tmp/celerybeat-schedule
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+      # API_INTERNAL_URL must be available at BUILD time because
+      # Next.js's rewrites() in next.config.mjs is evaluated when
+      # `next build` runs (it gets baked into the route map). Setting
+      # it as a runtime env var alone wouldn't take effect.
+      args:
+        API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
+    image: vooda-ai/web:latest
+    container_name: vooda-web
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      # API_INTERNAL_URL is also passed at runtime so any code path
+      # that re-evaluates it (route handlers, server-side API calls)
+      # gets the docker-network value instead of the build-time
+      # fallback.
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
+      # NEXT_PUBLIC_* vars are exposed to the browser. Empty value
+      # makes the SPA call same-origin /api/... which Next.js then
+      # proxies to API_INTERNAL_URL via rewrites().
+      NEXT_PUBLIC_API_URL: ""
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  pgdata:
+  redis_data:
+  storage_data:

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/virantisofficial/vooda.ai/security/advisories/new
+    about: Please report vulnerabilities privately — never in a public issue. See SECURITY.md.
+  - name: 💬 Question or idea
+    url: https://github.com/virantisofficial/vooda.ai/discussions
+    about: Ask questions and share ideas in Discussions.
+  - name: 🏢 Enterprise, hosting, or commercial licensing
+    url: https://vooda.ai
+    about: Managed hosting, SLA support, or a commercial license for reselling.

@@ -1,0 +1,42 @@
+<svg width="1280" height="300" viewBox="0 0 1280 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vooda — AI secret scanner">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#DC2626"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </linearGradient>
+    <filter id="glowSoft">
+      <feGaussianBlur stdDeviation="1.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glowStrong">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Mark. Geometry verbatim from the original asset; scaled and recoloured only. -->
+  <g transform="translate(181.79 4.17) scale(2.1258)">
+    <circle cx="65" cy="62" r="37" fill="none" stroke="url(#g1)" stroke-width="5.5"/>
+    <line x1="91" y1="88" x2="114" y2="111" stroke="url(#g1)" stroke-width="7.5" stroke-linecap="round"/>
+    <ellipse cx="65" cy="62" rx="18" ry="11" fill="none" stroke="#DC2626" stroke-width="2"/>
+    <circle cx="65" cy="62" r="6" fill="url(#g1)" filter="url(#glowStrong)"/>
+    <circle cx="65" cy="62" r="2.5" fill="transparent"/>
+    <line x1="38" y1="62" x2="45" y2="62" stroke="#DC2626" stroke-width="2" stroke-linecap="round"/>
+    <line x1="85" y1="62" x2="92" y2="62" stroke="#EA580C" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="65" cy="25" r="2.5" fill="#DC2626" opacity="0.9" filter="url(#glowSoft)"/>
+    <circle cx="65" cy="99" r="2.5" fill="#EA580C" opacity="0.9" filter="url(#glowSoft)"/>
+    <circle cx="28" cy="62" r="2.5" fill="#DC2626" opacity="0.9" filter="url(#glowSoft)"/>
+    <circle cx="102" cy="62" r="2.5" fill="#EA580C" opacity="0.9" filter="url(#glowSoft)"/>
+  </g>
+
+  <!-- Product name — dominant -->
+  <text x="478" y="167" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', Roboto, Arial, sans-serif"
+        font-size="132" font-weight="800" fill="#0F172A" letter-spacing="-4">Vooda</text>
+
+  <!-- Brand-tinted hairline (a rule, not a frame) -->
+  <rect x="478" y="196" width="566" height="1.5" fill="#EA580C" opacity="0.28"/>
+
+  <!-- Category line -->
+  <text x="478" y="228" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', Roboto, Arial, sans-serif"
+        font-size="27" font-weight="600" fill="#C2410C" letter-spacing="5">AI SECRET SCANNER</text>
+</svg>

@@ -1,0 +1,99 @@
+# Local development overrides — copy to docker-compose.override.yml
+# (which is git-ignored) to layer dev-friendly settings on top of the
+# production docker-compose.yml without modifying it.
+#
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#   docker compose up
+#
+# Compose auto-merges any file named docker-compose.override.yml that
+# sits next to the base compose file — no -f flag needed.
+#
+# What this override does:
+#   - Mounts source code so changes don't require a rebuild
+#   - Publishes internal service ports to localhost for direct access
+#     (psql against 5433, redis-cli against 6380, curl against 8001)
+#   - Switches uvicorn to --reload mode so API changes hot-reload
+#   - Reduces worker concurrency to 2 so a dev laptop isn't burning
+#     CPU on idle workers
+#   - Switches the web service to `next dev` (with HMR) instead of
+#     the production build
+
+services:
+  db:
+    ports:
+      - "5433:5432"
+
+  redis:
+    ports:
+      - "6380:6379"
+
+  api:
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./apps/worker:/app/apps/worker
+      - ./services:/app/services
+      - ./packages:/app/packages
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
+      - ./sample_data:/app/sample_data
+    command: >
+      sh -c "alembic -c apps/api/alembic.ini upgrade heads &&
+             uvicorn apps.api.app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  worker:
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./apps/worker:/app/apps/worker
+      - ./services:/app/services
+      - ./packages:/app/packages
+      - ./tests:/app/tests
+    command: >
+      celery -A apps.worker.celery_app worker --loglevel=info --concurrency=2
+        --queues=celery,scans --hostname=default@%h
+
+  # Dedicated scan worker pool (mirrors the production worker-scans) —
+  # consumes only the `scans` queue so background jobs can't starve
+  # scans. Same source mounts so code hot-loads on restart.
+  worker-scans:
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./apps/worker:/app/apps/worker
+      - ./services:/app/services
+      - ./packages:/app/packages
+      - ./tests:/app/tests
+    command: >
+      celery -A apps.worker.celery_app worker --loglevel=info --concurrency=2
+        --queues=scans --hostname=scans@%h
+
+  beat:
+    volumes:
+      - ./apps/api:/app/apps/api
+      - ./apps/worker:/app/apps/worker
+      - ./services:/app/services
+      - ./packages:/app/packages
+
+  web:
+    ports:
+      - "3001:3000"
+    # Override the production multi-stage Dockerfile target so we get
+    # the dev image with `next dev` + HMR instead of the standalone
+    # production server.
+    build:
+      target: deps
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./apps/web/src:/app/apps/web/src
+      - ./apps/web/public:/app/apps/web/public
+      - ./apps/web/next.config.mjs:/app/apps/web/next.config.mjs
+      # tsconfig.json defines the "@/*" path alias; without it mounted,
+      # `next dev` regenerates a default tsconfig with no alias and every
+      # "@/..." import (e.g. @/components/ui/Toast in the root layout)
+      # fails to resolve — so the whole app 500s. postcss + tailwind
+      # configs are needed too: globals.css uses @tailwind directives.
+      - ./apps/web/tsconfig.json:/app/apps/web/tsconfig.json
+      - ./apps/web/postcss.config.mjs:/app/apps/web/postcss.config.mjs
+      - ./apps/web/tailwind.config.ts:/app/apps/web/tailwind.config.ts
+    command: sh -c "cd /app/apps/web && npm run dev -- --hostname 0.0.0.0 --port 3000"

@@ -1,0 +1,38 @@
+# Per-app .dockerignore for apps/web. The root .dockerignore already
+# excludes most of these; this file is a defence-in-depth so a stray
+# `docker build apps/web` (without going through the root) still does
+# the right thing.
+
+# Build / runtime artefacts
+node_modules
+.next
+.turbo
+out
+build
+dist
+
+# tsconfig.tsbuildinfo bakes local absolute paths
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Local env files — secrets must come at runtime
+.env
+.env.local
+.env.*.local
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea
+.vscode
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test reports
+coverage
+playwright-report
+test-results

@@ -1,0 +1,69 @@
+<svg width="480" height="140" viewBox="0 0 480 140" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444"/>
+      <stop offset="100%" stop-color="#F97316"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#DC2626"/>
+      <stop offset="100%" stop-color="#EA580C"/>
+    </linearGradient>
+    <filter id="glowSoft">
+      <feGaussianBlur stdDeviation="1.2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowStrong">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Magnifying glass ring -->
+  <circle cx="65" cy="62" r="37" fill="none" stroke="url(#g1)" stroke-width="5.5"/>
+
+  <!-- Handle -->
+  <line x1="91" y1="88" x2="114" y2="111" stroke="url(#g1)" stroke-width="7.5" stroke-linecap="round"/>
+
+  <!-- Eye shape inside lens -->
+  <ellipse cx="65" cy="62" rx="18" ry="11" fill="none" stroke="#F87171" stroke-width="2"/>
+
+  <!-- Iris -->
+  <circle cx="65" cy="62" r="6" fill="url(#g1)" filter="url(#glowStrong)"/>
+  <!-- Pupil -->
+  <circle cx="65" cy="62" r="2.5" fill="transparent"/>
+
+  <!-- Scan lines -->
+  <line x1="38" y1="62" x2="45" y2="62" stroke="#EF4444" stroke-width="2" stroke-linecap="round"/>
+  <line x1="85" y1="62" x2="92" y2="62" stroke="#F97316" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Circuit dots on lens ring -->
+  <circle cx="65" cy="25" r="2.5" fill="#EF4444" opacity="0.9" filter="url(#glowSoft)"/>
+  <circle cx="65" cy="99" r="2.5" fill="#F97316" opacity="0.9" filter="url(#glowSoft)"/>
+  <circle cx="28" cy="62" r="2.5" fill="#EF4444" opacity="0.9" filter="url(#glowSoft)"/>
+  <circle cx="102" cy="62" r="2.5" fill="#F97316" opacity="0.9" filter="url(#glowSoft)"/>
+
+  <!-- VOODA wordmark -->
+  <text x="140" y="76"
+        font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Segoe UI', sans-serif"
+        font-size="50" font-weight="800" fill="#FFFFFF" letter-spacing="-2">Vooda</text>
+
+  <!-- Thin divider -->
+  <rect x="140" y="86" width="305" height="1" fill="rgba(255,255,255,0.06)"/>
+
+  <!-- AI badge -->
+  <rect x="140" y="96" width="32" height="19" rx="5" fill="#DC2626"/>
+  <text x="146" y="110"
+        font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="11" font-weight="700" fill="#FFFFFF">AI</text>
+
+  <!-- Secret Scanner label -->
+  <text x="181" y="110"
+        font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+        font-size="12" font-weight="500" fill="rgba(239,68,68,0.4)" letter-spacing="3">SECRET SCANNER</text>
+</svg>
