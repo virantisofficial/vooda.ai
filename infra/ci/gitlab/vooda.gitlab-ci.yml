@@ -1,0 +1,30 @@
+# Vooda Secret Scan — GitLab CI template
+# =================================================================
+# Include in your .gitlab-ci.yml:
+#
+#   include:
+#     - local: 'vooda.gitlab-ci.yml'      # or remote/project include
+#
+# Set masked CI/CD variables (Settings → CI/CD → Variables):
+#   VOODA_SERVER   = https://vooda.acme.com
+#   VOODA_API_KEY  = <key with ONLY the findings:import scope>   (Masked)
+#
+# Air-gapped: mirror the CLI image to your registry and change `image.name`.
+#
+# Runs `vooda monitor` inside the CLI image: scans the cloned code, syncs
+# masked findings to Vooda (provenance auto-detected from GitLab CI env),
+# and fails the job on any finding at/above --fail-on.
+vooda_secret_scan:
+  stage: test
+  image:
+    name: registry.gitlab.com/virantisofficial/vooda-cli:latest # → your mirror
+    entrypoint: [""] # let GitLab run the script shell, not the image ENTRYPOINT
+  variables:
+    GIT_DEPTH: "0" # full clone — required if you add --history
+  script:
+    # The engine + CLI live at /app; the project is cloned at $CI_PROJECT_DIR (CWD).
+    - python /app/cli/main.py monitor --wait --fail-on high
+    # - python /app/cli/main.py monitor --history --fail-on high   # full-history sweep
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'

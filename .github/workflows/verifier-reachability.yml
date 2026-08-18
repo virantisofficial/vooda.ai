@@ -1,0 +1,103 @@
+# Weekly reachability check for all secret verifiers
+#
+# Each Monday at 06:00 UTC, this workflow extracts the probe URL from
+# every `async def verify_*` in services/secret_verification/verifier.py
+# and hits it unauthenticated.  Outcomes:
+#
+#   • 401/403 — endpoint alive, correctly requires auth (ideal)
+#   • 200/204 — endpoint alive, public health-check style
+#   • DNS_FAIL / CONNECT_FAIL / TIMEOUT / TLS_FAIL — provider may have
+#     sunset, changed hosts, or be experiencing an outage
+#
+# Catches silent breakage like the Fauna + Xata sunset (2026-05-19,
+# where verifiers were probing dead endpoints for months without any
+# customer-visible signal — verifiers just returned status="error" on
+# every finding for those providers).
+#
+# Placeholder URLs (per-customer subdomains for Okta, ServiceNow,
+# Mattermost, etc.) are allowlisted in
+# scripts/verifier-audit/check_verifier_reachability.py
+# (see PLACEHOLDER_HOSTS).
+#
+# Trigger:
+#   - schedule: every Monday 06:00 UTC
+#   - workflow_dispatch: manual run from Actions tab
+#   - push to master: if the audit scripts themselves change, run once
+#     to make sure the change didn't accidentally hide a real failure.
+
+name: Verifier Reachability
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - 'scripts/verifier-audit/**'
+      - '.github/workflows/verifier-reachability.yml'
+
+concurrency:
+  group: verifier-reachability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reachability:
+    name: probe-all-verifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Extract verifier probe URLs
+        run: python3 scripts/verifier-audit/extract_verifier_urls.py
+
+      - name: Run reachability check (fails if any real endpoint is dead)
+        run: python3 scripts/verifier-audit/check_verifier_reachability.py
+
+      - name: Publish reachability report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifier-reachability-report
+          path: |
+            /tmp/verifier_urls.json
+            /tmp/verifier_reachability.json
+            /tmp/verifier_broken.json
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Verifier Reachability Report"
+            echo ""
+            python3 -c "
+          import json
+          from collections import Counter
+          r = json.loads(open('/tmp/verifier_reachability.json').read())
+          t = Counter(x['status'] for x in r)
+          print('| Outcome | Count |')
+          print('|---|---|')
+          for k in ['OK_AUTH','OK_PUBLIC','REDIRECT','OK_OTHER_4XX','WARN_5XX','DNS_FAIL','CONNECT_FAIL','TIMEOUT','TLS_FAIL','OTHER_FAIL']:
+              if t.get(k, 0):
+                  print(f'| {k} | {t[k]} |')
+          "
+            echo ""
+            if [ -s /tmp/verifier_broken.json ]; then
+              echo "### Broken verifiers (review)"
+              echo ""
+              python3 -c "
+          import json
+          for b in json.loads(open('/tmp/verifier_broken.json').read()):
+              flag = ' (placeholder — OK)' if b.get('is_placeholder') else ' **investigate**'
+              print(f\"- \`{b['verifier']}\` → \`{b.get('tested_url') or b['url']}\` — {b['status']}{flag}\")
+          "
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

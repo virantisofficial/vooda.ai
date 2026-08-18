@@ -1,0 +1,82 @@
+name: Missed detection or false positive
+description: Vooda missed a secret it should have caught, or flagged something that isn't one
+title: "[detection]: "
+labels: ["detector", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These are the most valuable reports we get — detection quality is the product.
+
+        **Never paste a live credential.** Redact it, or replace the random part with `X`s while keeping the prefix and length intact (e.g. `ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX`). If you can only demonstrate the issue with a real key, stop and email security@vooda.ai instead.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened?
+      options:
+        - Missed detection — Vooda did not find a real secret
+        - False positive — Vooda flagged something that isn't a secret
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider or secret type
+      placeholder: "e.g. Stripe restricted key, GCP service account, internal JWT"
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Redacted sample
+      description: The string, with the secret portion replaced. Keep the prefix and character count.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: filetype
+    attributes:
+      label: File type / context
+      placeholder: "e.g. .env, values.yaml, Dockerfile, inline in a .py comment"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: input
+    id: docs
+    attributes:
+      label: Link to the provider's credential format docs
+      description: Speeds up review a lot if the format is documented anywhere.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did you hit this?
+      options:
+        - CLI (vooda scan)
+        - Pre-commit hook
+        - CI gate
+        - Web UI / platform scan
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed or redacted every real credential from this report
+          required: true
+        - label: I checked this isn't already reported
+          required: true

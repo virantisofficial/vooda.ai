@@ -1,0 +1,30 @@
+# Production-style local run — publishes ports on the REAL production build.
+#
+# Unlike docker-compose.override.example.yml (development: `next dev` +
+# source bind-mounts + hot reload on :3001), this override runs the
+# standalone production images and simply exposes them on the host, so
+# what you exercise locally is what actually ships.
+#
+# Copy it to docker-compose.override.yml to run in production mode:
+#
+#   cp docker-compose.override.prod.example.yml docker-compose.override.yml
+#   docker compose up -d --build
+#
+# The install.sh / install.bat scripts do this for you when you pick "prod".
+
+services:
+  db:
+    ports:
+      - "5433:5432"
+
+  redis:
+    ports:
+      - "6380:6379"
+
+  api:
+    ports:
+      - "8000:8000"
+
+  web:
+    ports:
+      - "3000:3000"

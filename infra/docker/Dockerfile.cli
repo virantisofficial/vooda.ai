@@ -1,0 +1,98 @@
+# ─────────────────────────────────────────────────────────────
+# Distributable Vooda CLI image — `vooda scan` / `vooda monitor`
+# ─────────────────────────────────────────────────────────────
+# This is the CLIENT image enterprises run in CI/CD (and on dev
+# laptops). It bundles the secret-scan engine (946 rules) + the CLI,
+# and NOTHING from the API/worker server tier — so a runner can scan
+# its checked-out code and sync masked findings to a (self-hosted)
+# Vooda without holding any server credentials.
+#
+# Usage:
+#   docker build -f infra/docker/Dockerfile.cli -t vooda/cli:dev .
+#   docker run --rm \
+#     -e VOODA_SERVER=https://vooda.acme.com \
+#     -e VOODA_API_KEY=$VOODA_API_KEY \      # findings:import scope only
+#     -v "$PWD:/work" -w /work \
+#     vooda/cli:dev monitor --wait --fail-on high
+#
+# Design notes:
+#   * Source is TRIMMED to cli/ + services/ + packages/ — the client
+#     image deliberately ships no apps/ (API/worker) code. Verified:
+#     the CLI's entire import closure loads with `apps` unavailable
+#     (the only apps imports in the engine are lazy, behind the
+#     custom-detector DB path the CLI never calls).
+#   * Deps come from the LEAN requirements-cli.txt (engine + CLI only) —
+#     derived from an empirical trace of every CLI scan path. This drops the
+#     server-only stack (FastAPI/SQLAlchemy/Celery, python-jose, GitPython,
+#     boto3, lxml, the AI SDKs, …) which carried the image's CRITICAL/HIGH
+#     CVEs and most of its bulk. The CLI image E2E catches any missed dep.
+#   * git is required at runtime: provenance autodetect (commit/branch/
+#     remote) + `--staged` / `--history` scans shell out to it.
+#   * `safe.directory=*` defuses Git's "dubious ownership" refusal when
+#     the CI workspace (owned by an arbitrary UID) is bind-mounted into
+#     the container — the single most common CI-container git gotcha.
+
+# ── Stage 1: dependency installation ─────────────────────────
+FROM python:3.12-slim AS deps
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer-cache deps before source so a CLI code change doesn't bust the
+# (large, slow) pip layer. Uses the LEAN requirements-cli.txt (engine + CLI
+# only) — see that file for why.
+COPY requirements-cli.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements-cli.txt
+
+
+# ── Stage 2: runtime ─────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# git  → provenance autodetect + --staged/--history scans
+# ca-certificates → TLS to the (self-hosted) Vooda platform
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*'
+
+# Installed Python packages + console scripts from the deps stage.
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin /usr/local/bin
+
+# CLIENT source ONLY — the CLI + the scan engine, never the server tier.
+WORKDIR /app
+COPY cli/ ./cli/
+COPY services/ ./services/
+COPY packages/ ./packages/
+
+# Run as a non-root user (defense in depth — a scanner shouldn't run as root).
+# COPY leaves the source world-readable, and the primary CI path (`vooda
+# monitor`) only READS the bind-mounted workspace + writes temp files under
+# /tmp, so an unprivileged UID is sufficient. The rare in-container
+# `scan --staged` (which writes .git) can override with `docker run --user 0`.
+# git's safe.directory=* is set system-wide above, so it applies to this user.
+RUN useradd --create-home --uid 10001 vooda
+USER vooda
+
+# OCI metadata (helps registry browsing + provenance).
+LABEL org.opencontainers.image.title="Vooda CLI" \
+      org.opencontainers.image.description="Vooda secret-scan CLI for CI/CD (vooda scan / vooda monitor)" \
+      org.opencontainers.image.source="https://github.com/virantisofficial/vooda-project"
+
+# The CI repo is bind-mounted here; the CLI scans '.' relative to it.
+WORKDIR /work
+
+# `docker run vooda/cli <subcommand> …` → `python /app/cli/main.py <subcommand> …`
+ENTRYPOINT ["python", "/app/cli/main.py"]
+CMD ["--help"]

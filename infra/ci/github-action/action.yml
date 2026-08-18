@@ -1,0 +1,70 @@
+# Vooda Secret Scan — reusable GitHub Action
+# =================================================================
+# Runs `vooda monitor` inside the official CLI container: scans the
+# checked-out code, syncs MASKED findings to your (self-hosted) Vooda
+# platform, and gates the build. Provenance (commit / branch / actor /
+# pipeline URL) is auto-detected from the GitHub Actions environment.
+#
+# Publish this as its own repo (e.g. vooda-ai/scan-action) and consumers
+# reference it as `uses: vooda-ai/scan-action@v1`. Until then it works
+# from a local path: `uses: ./infra/ci/github-action`.
+#
+# Air-gapped / regulated orgs: mirror the CLI image into your internal
+# registry and override `image:` — no egress to a public registry, no
+# long-lived platform credentials on the runner beyond the import key.
+name: "Vooda Secret Scan"
+description: "Scan code, sync masked findings to Vooda, and gate the build (vooda monitor)."
+branding:
+  icon: "shield"
+  color: "red"
+
+inputs:
+  server:
+    description: "Vooda server URL, e.g. https://vooda.acme.com (sets VOODA_SERVER)."
+    required: true
+  api-key:
+    description: "Vooda API key with ONLY the findings:import scope (store as a repo/org secret)."
+    required: true
+  image:
+    description: "CLI image ref. Override to your internal-registry mirror for air-gapped runners."
+    required: false
+    default: "ghcr.io/virantisofficial/vooda-cli:latest"
+  fail-on:
+    description: "Minimum severity that fails the build: critical | high | medium | low | info | none."
+    required: false
+    default: "high"
+  wait:
+    description: "Wait for the platform import to finish and report created/updated counts."
+    required: false
+    default: "true"
+  args:
+    description: "Extra args appended to `vooda monitor` (e.g. --history --all-branches)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Vooda scan + sync + gate
+      shell: bash
+      # All inputs are passed via env (never interpolated into the shell
+      # body) so a crafted input can't inject shell. The GITHUB_* vars are
+      # forwarded into the container so the CLI auto-detects provenance.
+      env:
+        VOODA_SERVER: ${{ inputs.server }}
+        VOODA_API_KEY: ${{ inputs.api-key }}
+        VOODA_IMAGE: ${{ inputs.image }}
+        VOODA_FAIL_ON: ${{ inputs.fail-on }}
+        VOODA_WAIT: ${{ inputs.wait }}
+        VOODA_ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        wait_flag=""
+        [ "${VOODA_WAIT}" = "true" ] && wait_flag="--wait"
+        docker run --rm \
+          -e VOODA_SERVER -e VOODA_API_KEY \
+          -e GITHUB_ACTIONS -e GITHUB_SHA -e GITHUB_REF_NAME -e GITHUB_HEAD_REF \
+          -e GITHUB_ACTOR -e GITHUB_SERVER_URL -e GITHUB_REPOSITORY -e GITHUB_RUN_ID \
+          -v "${GITHUB_WORKSPACE}:/work" -w /work \
+          "${VOODA_IMAGE}" \
+          monitor ${wait_flag} --fail-on "${VOODA_FAIL_ON}" ${VOODA_ARGS}

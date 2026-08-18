@@ -1,0 +1,38 @@
+# Example consumer workflow — copy to .github/workflows/vooda.yml in your repo.
+#
+# Prerequisites:
+#   1. The repository is onboarded in Vooda (its git remote is registered).
+#   2. Repo/org secret VOODA_API_KEY  → an API key with ONLY findings:import scope.
+#   3. Repo/org variable VOODA_SERVER → https://vooda.your-company.com
+#
+# On a PR this scans the checked-out code and FAILS the check on any
+# high/critical secret; on push to main it also records the scan in Vooda
+# (deduped against server scans), with full commit/branch/actor provenance.
+name: Vooda Secret Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes at scale.
+concurrency:
+  group: vooda-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vooda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — required if you pass `args: --history`
+
+      - name: Vooda Secret Scan
+        uses: vooda-ai/scan-action@v1 # or: ./infra/ci/github-action (local)
+        with:
+          server: ${{ vars.VOODA_SERVER }}
+          api-key: ${{ secrets.VOODA_API_KEY }}
+          fail-on: high
+          # args: --history          # scan full git history (main merges / nightly)
+          # image: registry.internal.acme.com/vooda/cli:1.0.0   # air-gapped mirror

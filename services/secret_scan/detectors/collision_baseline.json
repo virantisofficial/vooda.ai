@@ -1,0 +1,4 @@
+{
+  "_doc": "Frozen snapshot of known same-rule_id collisions across detector modules. Originally discovered 2026-05-22 by the Track-A collision audit (72 collisions). Tracked downward by Phase 1+ cleanup work. The CI test tests/secret_scan/test_no_new_collisions.py uses this as the tolerance list.",
+  "collisions": {}
+}
