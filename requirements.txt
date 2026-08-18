@@ -20,7 +20,7 @@ celery[redis]==5.4.0
 # all uvicorn workers share one bucket per principal — not separate
 # in-process buckets per worker.
 slowapi==0.1.9
-limits==3.13.0
+limits==5.8.0
 
 # Auth
 python-jose[cryptography]==3.4.0
