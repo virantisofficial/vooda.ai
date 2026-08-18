@@ -1,7 +1,7 @@
 # Web framework
 fastapi>=0.115.6
 uvicorn[standard]>=0.34.0
-python-multipart==0.0.18
+python-multipart==0.0.31
 
 # Database
 sqlalchemy[asyncio]==2.0.36
@@ -23,7 +23,7 @@ slowapi==0.1.9
 limits==3.13.0
 
 # Auth
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.4.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
 
@@ -39,12 +39,11 @@ tiktoken==0.8.0
 
 # Parsing
 defusedxml==0.7.1
-lxml==5.3.0
 jsonschema==4.23.0
 
 # Code analysis
 tree-sitter==0.23.2
-pygments==2.18.0
+pygments==2.20.0
 
 # Storage
 boto3==1.35.86
@@ -67,12 +66,11 @@ tenacity==9.0.0
 # latter's `call_async` actually requires Tornado, not asyncio.
 purgatory==3.0.1
 structlog==24.4.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 pyyaml==6.0.2
-orjson==3.10.12
+orjson==3.11.6
 
 # Git
-gitpython==3.1.43
 
 # Secret-scanner regex engines.  google-re2 is the non-backtracking
 # fast path (ReDoS-immune by design) that compiles 92.6% of the rule
