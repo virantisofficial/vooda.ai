@@ -86,7 +86,7 @@ google-re2>=1.1.20251105
 # Without it the provider raised ImportError inside a broad `except`
 # and reported "check the URL and credentials" — sending users to
 # re-check credentials that were never the problem.
-google-auth>=2.35.0
+google-auth>=2.56.3
 
 # Testing
 pytest==9.0.3
