@@ -13,7 +13,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "@tanstack/react-query": "^5.62.0",
-    "axios": "^1.7.9",
+    "axios": "^1.18.0",
     "zustand": "^5.0.2",
     "react-diff-viewer-continued": "^4.0.3",
     "react-syntax-highlighter": "^15.6.1",
