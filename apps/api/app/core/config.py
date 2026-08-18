@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 class Settings(BaseSettings):
     # App
     APP_NAME: str = "Vooda AI"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "0.1.1"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
 
