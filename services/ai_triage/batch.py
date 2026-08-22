@@ -50,6 +50,7 @@ class _NullBreaker:
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Any
 
+from packages.common.cancellation import ScanCancelled
 from services.ai_triage.engine import TriageEngine
 
 logger = structlog.get_logger()
@@ -181,39 +182,82 @@ class BatchTriageProcessor:
 
         logger.info("batch_triage_start", total=total, batch_size=self.config.batch_size)
 
-        # Process in batches to control memory and provide progress updates
-        for batch_start in range(0, total, self.config.batch_size):
-            batch = findings[batch_start:batch_start + self.config.batch_size]
+        # ── Completion-order dispatch (replaces fixed batches) ────────
+        # The previous implementation sliced findings into fixed batches
+        # and awaited `gather` on each, so the next batch could not start
+        # until the SLOWEST call in the current one returned. With LLM
+        # latency variance that idles most slots most of the time: four
+        # calls finishing in 1s wait on a fifth taking 4s, repeated for
+        # every batch. It also caps real parallelism at `batch_size`,
+        # putting `max_concurrent` out of reach whenever batch_size is
+        # the smaller of the two.
+        #
+        # Now every finding is scheduled at once and the ONLY limits are
+        # the ones that are actually meaningful: the `max_concurrent`
+        # semaphore and the rpm token bucket, both already enforced
+        # inside `_process_single`. As soon as any call finishes the next
+        # one starts. `as_completed` also lets progress fire on real
+        # completions rather than at batch boundaries.
+        #
+        # The credential verifier already worked this way; this brings
+        # triage in line with it.
+        index_by_task = {}
+        pending = []
+        for idx, f in enumerate(findings):
+            coro = self._process_single(
+                finding=f,
+                code_context=code_contexts.get(f.get("id", ""), {}),
+                repo_context=repo_context,
+            )
+            task = asyncio.ensure_future(coro)
+            index_by_task[task] = idx
+            pending.append(task)
 
-            tasks = [
-                self._process_single(
-                    finding=f,
-                    code_context=code_contexts.get(f.get("id", ""), {}),
-                    repo_context=repo_context,
-                )
-                for f in batch
-            ]
-
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for i, result in enumerate(batch_results):
-                if isinstance(result, Exception):
-                    finding_id = batch[i].get("id", f"unknown-{batch_start + i}")
+        # ScanCancelled means an operator cancelled the scan; it must reach
+        # the caller instead of being absorbed as a per-finding fault. It
+        # can surface from either await point below, so the whole loop is
+        # wrapped: on the way out every still-pending call is cancelled so
+        # a cancelled scan stops spending AI budget immediately.
+        try:
+            for finished in asyncio.as_completed(pending):
+                try:
+                    result = await finished
+                    results.append(result)
+                except ScanCancelled:
+                    raise
+                except Exception as exc:
+                    # One failed finding never aborts the run, and the
+                    # finding id is still reported.
+                    idx = next(
+                        (i for t, i in index_by_task.items() if t.done() and t is finished),
+                        None,
+                    )
+                    finding_id = (
+                        findings[idx].get("id", f"unknown-{idx}")
+                        if idx is not None else "unknown"
+                    )
                     results.append(TriageResult(
                         finding_id=finding_id,
                         success=False,
-                        error=str(result)[:500],
+                        error=str(exc)[:500],
                     ))
-                    logger.error("batch_triage_exception", finding_id=finding_id, error=str(result)[:200])
-                else:
-                    results.append(result)
+                    logger.error("batch_triage_exception", finding_id=finding_id, error=str(exc)[:200])
 
                 completed += 1
                 if on_progress:
                     try:
                         await on_progress(completed, total) if asyncio.iscoroutinefunction(on_progress) else on_progress(completed, total)
+                    except ScanCancelled:
+                        raise
                     except Exception:
                         pass
+        except ScanCancelled:
+            for _t in pending:
+                if not _t.done():
+                    _t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.info("batch_triage_cancelled", completed=completed, total=total)
+            raise
 
         succeeded = sum(1 for r in results if r.success)
         failed = sum(1 for r in results if not r.success)

@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from apps.worker.celery_app import celery_app
+from apps.worker.celery_app import (
+    celery_app,
+    SCAN_TASK_TIME_LIMIT,
+    SCAN_TASK_SOFT_TIME_LIMIT,
+)
 from apps.api.app.core.config import settings
 
 logger = structlog.get_logger()
@@ -649,6 +653,48 @@ async def _stamp_heartbeat_main(job, db, *, commit: bool, force: bool = False, m
         await db.commit()
     except Exception as _hbe:
         logger.debug("heartbeat_commit_failed", error=str(_hbe)[:120])
+    # Cooperative-cancellation checkpoint (see ScanCancelled). Piggybacks
+    # on the throttled heartbeat commit so it costs one indexed PK read
+    # per ~30s, and it runs at exactly the points where the scan is doing
+    # real work — including the multi-minute AI-triage batch.
+    await _raise_if_cancelled(job, db)
+
+
+# Defined in packages.common so service-layer code (AI triage) can let it
+# propagate without importing the worker. Re-exported here because this is
+# where the cancellation checkpoint lives.
+from packages.common.cancellation import ScanCancelled  # noqa: E402
+
+
+async def _raise_if_cancelled(job, db) -> None:
+    """Abort the scan if a user cancelled it in the API.
+
+    Cancellation cannot rely on ``celery_app.control.revoke`` alone:
+
+      * the cancel endpoint can only revoke when ``celery_task_id`` is
+        recorded, so every dispatch site must persist it;
+      * revoke is a best-effort broadcast — it can be missed if the
+        worker reconnects, runs on another host, or the task has not been
+        picked up yet.
+
+    Cooperative cancellation is the signal-independent backstop: the
+    worker asks the database whether it should still be running. Reads
+    the status column directly (not ``db.refresh``) so no other in-memory
+    attribute of the live job object is clobbered mid-scan.
+    """
+    try:
+        from apps.api.app.models.scan import ScanJob as _SJ, ScanStatus as _SS
+        current = await db.scalar(select(_SJ.status).where(_SJ.id == job.id))
+    except Exception as e:  # never let the check itself break a scan
+        logger.debug("cancel_check_failed", error=str(e)[:120])
+        return
+    if current == _SS.CANCELLED:
+        logger.info(
+            "scan_cancelled_cooperatively",
+            scan_job_id=str(job.id),
+            detail="row marked CANCELLED by an operator; aborting work",
+        )
+        raise ScanCancelled(str(job.id))
 
 
 async def _scan_with_cpu_budget(scanner, repo_path, scan_job_id, **scan_kwargs):
@@ -706,8 +752,13 @@ async def _scan_with_cpu_budget(scanner, repo_path, scan_job_id, **scan_kwargs):
     # a 5-min window to land a useful FAILED row before the hard kill.
     # Genuinely longer scans can opt in to a bigger budget via per-job
     # time_limit overrides on apply_async.
-    time_limit=14400,
-    soft_time_limit=14100,
+    # Imported from celery_app, NOT repeated as a literal: the broker's
+    # visibility_timeout is derived from this value, and the two silently
+    # drifting apart is precisely what caused hourly duplicate executions
+    # of long scans. Change it in one place; the invariant test enforces
+    # that the broker ceiling still clears it.
+    time_limit=SCAN_TASK_TIME_LIMIT,
+    soft_time_limit=SCAN_TASK_SOFT_TIME_LIMIT,
 )
 def run_scan_job(self, scan_job_id: str):
     """Execute a standalone scan job.
@@ -725,6 +776,16 @@ def run_scan_job(self, scan_job_id: str):
     logger.info("scan_job_started", scan_job_id=scan_job_id)
     try:
         run_async(_run_scan_job(scan_job_id))
+    except ScanCancelled:
+        # Requested stop, not a failure. The row is ALREADY CANCELLED
+        # (the API set it); deliberately don't touch status here so the
+        # operator's "Scan cancelled by <user>" message survives. The
+        # repo lock is released by the context manager as the exception
+        # unwinds, which is what frees the repository for a new scan —
+        # without it the next Run Scan silently coalesces and the button
+        # looks broken.
+        logger.info("scan_job_cancelled", scan_job_id=scan_job_id)
+        return
     except SoftTimeLimitExceeded:
         # Soft-limit handler — Celery has signalled that we're past
         # the configured budget.  We have ~15 min (gap to hard limit)
@@ -748,6 +809,80 @@ def run_scan_job(self, scan_job_id: str):
         # observability / Flower / retry metrics).  Don't retry —
         # the same scan with the same input will hit the same limit.
         raise
+    except Exception as exc:
+        # ── Last-resort terminal-state guarantee ─────────────────────
+        # Every inner handler is expected to stamp the row itself. This
+        # exists for the paths that CANNOT: an error raised before `job`
+        # is loaded, inside the failure handler, or from a poisoned
+        # session. Without it the row could stay RUNNING/ANALYZING until
+        # the stall watchdog notices, and the UI would report a scan as
+        # in progress after the task had already stopped.
+        #
+        # Writes on a fresh session and never masks the original error.
+        try:
+            run_async(_force_terminal_failure(
+                scan_job_id,
+                f"{type(exc).__name__}: {exc}",
+                message="Scan failed — worker error (see error detail)",
+            ))
+        except Exception as mark_err:
+            logger.error(
+                "scan_job_terminal_guarantee_failed",
+                scan_job_id=scan_job_id, error=str(mark_err)[:300],
+            )
+        raise
+
+
+async def _force_terminal_failure(scan_job_id: str, detail: str, message: str | None = None) -> bool:
+    """Record a scan as FAILED on a FRESH session. Never raises.
+
+    A failure handler must not write through the session that just
+    failed. After a flush error SQLAlchemy poisons the transaction:
+    every subsequent statement raises PendingRollbackError until the
+    caller rolls back. Writing ``job.status = FAILED`` through that same
+    session would therefore re-raise on commit and never persist the
+    terminal state.
+
+    Without this last-resort write a task can die with its row left
+    mid-flight, so the UI keeps reporting a scan that is no longer
+    running until the stall watchdog eventually clears it.
+
+    Opening an independent session is the standard compensating-write
+    pattern: the new connection has no poisoned transaction, so the
+    terminal state lands even when the scan's own session is unusable.
+
+    Returns True if a row was stamped. Swallows every exception — this
+    runs on the error path and must never mask the original failure.
+    """
+    try:
+        from apps.api.app.models.scan import ScanJob, ScanStatus
+        from sqlalchemy import select
+        from uuid import UUID
+
+        async with await _get_db_session() as fresh:
+            res = await fresh.execute(select(ScanJob).where(ScanJob.id == UUID(scan_job_id)))
+            job = res.scalar_one_or_none()
+            if job is None:
+                return False
+            # Don't clobber a terminal state — the scan may have been
+            # cancelled by an operator, or genuinely completed in the gap.
+            if job.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+                return False
+            job.status = ScanStatus.FAILED
+            job.error_detail = (detail or "unknown error")[:2000]
+            if message:
+                job.status_message = message[:500]
+            await fresh.commit()
+            logger.info("scan_forced_terminal_failure", scan_job_id=scan_job_id)
+            return True
+    except Exception as e:
+        logger.error(
+            "scan_force_terminal_failure_failed",
+            scan_job_id=scan_job_id,
+            error=str(e)[:200],
+            detail="scan row may remain non-terminal until the stall watchdog reaps it",
+        )
+        return False
 
 
 async def _mark_scan_failed_with_timeout(scan_job_id: str) -> None:
@@ -2855,6 +2990,58 @@ def _should_suppress_inactive(rd: dict) -> bool:
     return provider in SUPPRESSION_ALLOWLIST and provider not in SUPPRESSION_DENYLIST
 
 
+def _is_duplicate_live_execution(status, heartbeat_at, threshold_seconds, now=None):
+    """Is another execution of this scan job still alive?
+
+    Returns ``(is_duplicate, heartbeat_age_seconds_or_None)``.
+
+    Every distributed queue delivers AT LEAST once, so a second copy of
+    the same task can arrive legitimately: the broker reclaimed a slow
+    message, a worker was SIGKILLed and ``task_reject_on_worker_lost``
+    requeued it, a container was redeployed, or an operator retried by
+    hand. Exactly-once is a fallacy; the standard answer is to make the
+    duplicate a no-op while the original is alive.
+
+    Liveness deliberately reuses the stale-scan watchdog's own threshold
+    rather than inventing a second definition:
+
+      * job not in a running state  -> not a duplicate (fresh start)
+      * no heartbeat recorded yet   -> not a duplicate (never ran; a
+                                       redelivery that beat the first
+                                       heartbeat should proceed rather
+                                       than deadlock the scan forever)
+      * heartbeat fresher than the threshold -> DUPLICATE, skip
+      * heartbeat older than the threshold   -> original is dead, this
+                                       delivery is the legitimate retry
+    """
+    from apps.api.app.models.scan import ScanStatus as _ScanStatus
+
+    if status not in (_ScanStatus.RUNNING, _ScanStatus.ANALYZING):
+        return False, None
+    if heartbeat_at is None:
+        return False, None
+    _now = now or datetime.now(timezone.utc)
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+    age = (_now - heartbeat_at).total_seconds()
+    return age < threshold_seconds, round(age)
+
+
+def _triage_coverage_warning(untriaged_count: int):
+    """Completion-banner warning when a scan finished with gaps.
+
+    A scan must not report clean success while findings it was supposed
+    to triage carry no AI verdict, so any shortfall is surfaced on the
+    completion banner rather than left for the operator to notice.
+    """
+    if untriaged_count and untriaged_count > 0:
+        return (
+            f"⚠ {untriaged_count} findings not triaged "
+            f"(AI incomplete — re-run AI analysis)"
+        )
+    return None
+
+
 async def _run_scan_job(scan_job_id: str):
     from sqlalchemy import func as sa_func
     # Import ALL models to ensure FK metadata is registered before session creation
@@ -2974,6 +3161,44 @@ async def _run_scan_job(scan_job_id: str):
         job = result.scalar_one_or_none()
         if not job:
             logger.error("scan_job_not_found", scan_job_id=scan_job_id)
+            return
+
+        # ── Duplicate-execution guard (at-least-once delivery) ───────
+        # Every distributed queue delivers AT LEAST once. A second copy
+        # of this exact task can legitimately arrive because the broker
+        # reclaimed a slow message, a worker was SIGKILLed mid-run and
+        # `task_reject_on_worker_lost` requeued it, a container was
+        # redeployed, or an operator retried by hand. Chasing
+        # exactly-once is a fallacy; the standard answer is to make the
+        # second copy a no-op when the first is still alive.
+        #
+        # Liveness deliberately reuses the SAME definition the stale-scan
+        # watchdog uses (`_stale_scan_threshold_seconds`) rather than
+        # inventing a second one. If the watchdog would still consider
+        # this scan alive, then a second execution of it is a duplicate
+        # and must bail; if the heartbeat is stale, the original is dead
+        # and this delivery is the legitimate retry that should proceed.
+        #
+        # The row is left completely untouched on the duplicate path —
+        # no status write, no progress reset — so a duplicate delivery
+        # can never move progress backwards or overwrite the state the
+        # live execution is maintaining.
+        _dup, _hb_age = _is_duplicate_live_execution(
+            status=job.status,
+            heartbeat_at=getattr(job, "heartbeat_at", None),
+            threshold_seconds=_stale_scan_threshold_seconds(),
+        )
+        if _dup:
+            logger.warning(
+                "scan_job_duplicate_execution_skipped",
+                scan_job_id=scan_job_id,
+                status=job.status.value,
+                heartbeat_age_s=_hb_age,
+                detail=(
+                    "another execution of this scan job is alive; "
+                    "this delivery is a duplicate and was skipped"
+                ),
+            )
             return
 
         # Pull repo + branch up FIRST so the concurrency lock can be
@@ -3271,8 +3496,9 @@ async def _run_scan_job(scan_job_id: str):
             from services.secret_scan.detectors.registry import get_all_rules_with_custom
             all_rules = await get_all_rules_with_custom(job.tenant_id, db)
 
-            # Load scan_scope from engine settings
+            # Load scan_scope + test-file handling from engine settings
             scan_scope = "standard"
+            test_file_handling = "normal"   # no-op default; never hides findings
             es = None  # initialised here so the stats block at the
                         # end of the scan can read it even if the load
                         # below raises (e.g. brand new tenant with no
@@ -3287,9 +3513,24 @@ async def _run_scan_job(scan_job_id: str):
                 es = es_result.scalar_one_or_none()
                 if es and hasattr(es, 'scan_scope') and es.scan_scope:
                     scan_scope = es.scan_scope
+                # "Test File Handling".
+                # Legacy rows may hold a bool (older schema); anything not
+                # recognised falls back to "normal", which is a no-op.
+                _raw_tfh = getattr(es, "deprioritize_test_files", None) if es else None
+                if isinstance(_raw_tfh, bool):
+                    _raw_tfh = "deprioritize" if _raw_tfh else "normal"
+                if _raw_tfh in ("normal", "deprioritize", "exclude"):
+                    test_file_handling = _raw_tfh
             except Exception:
                 pass
 
+            if test_file_handling != "normal":
+                logger.info("test_file_handling_active",
+                            scan_job_id=scan_job_id, mode=test_file_handling)
+            # NOTE: detection is deliberately NOT affected by this setting.
+            # `deprioritize` lowers severity after detection and `exclude`
+            # only skips AI triage — matching what the UI promises and
+            # guaranteeing the scanner never loses recall.
             scanner = SecretScanner(rules=all_rules, scan_scope=scan_scope)
 
             # Determine the new checkpoint commit BEFORE scanning so a
@@ -3373,6 +3614,7 @@ async def _run_scan_job(scan_job_id: str):
             from services.secret_scan.file_cache import warm_cache as _warm_cache
             from services.secret_scan.file_cache import flush_cache as _flush_cache
             from services.secret_scan.file_cache import FileScanCacheView
+
             file_cache_view = None
             try:
                 if force_full:
@@ -3710,6 +3952,35 @@ async def _run_scan_job(scan_job_id: str):
                 )
                 detection_engine = "secret_scan"
 
+            # ── Test File Handling: "deprioritize" ───────────────────
+            # Lowers severity to LOW for findings in test/spec files, as
+            # the UI describes: "They remain visible in the findings list
+            # but won't trigger high-priority alerts."
+            #
+            # Applied HERE — after detection, before persistence — for
+            # three reasons:
+            #   * detection is untouched, so recall is identical to
+            #     `normal` and no real credential can ever be hidden;
+            #   * it sits after every scan path (full, incremental, diff)
+            #     converges, so one implementation covers all of them;
+            #   * the file cache stores raw scanner output, so changing
+            #     this setting needs no cache invalidation — the override
+            #     is re-applied on every scan regardless of cache hits.
+            if test_file_handling == "deprioritize" and raw_findings:
+                from services.secret_scan.engine import _classify_file_context as _cfc
+                _lowered = 0
+                for _pf in raw_findings:
+                    try:
+                        if _cfc(_pf.file_path or "") == "test_file" and _pf.severity != "low":
+                            _pf.severity = "low"
+                            _lowered += 1
+                    except Exception:
+                        continue
+                if _lowered:
+                    logger.info("test_file_findings_deprioritized",
+                                scan_job_id=scan_job_id, lowered=_lowered,
+                                total=len(raw_findings))
+
             # ── File-cache stats + flush ──────────────────────────────
             # Pull the counters before flushing (flush doesn't reset
             # them but is allowed to clear the writes buffer).
@@ -3771,9 +4042,36 @@ async def _run_scan_job(scan_job_id: str):
                 from services.secret_verification.blast_radius import analyze_blast_radius
                 import asyncio
 
+                # ── "Credential Verification" setting (per tenant) ──────
+                # Controls whether outbound verification runs.
+                # Precedence, most specific first:
+                #   1. tenant setting `auto_verify_credentials` (this UI toggle)
+                #   2. global `VERIFICATION_ENABLED` env kill-switch, which
+                #      is enforced inside verify_finding() and remains the
+                #      documented air-gapped control.
+                # Turning it off is never an error: findings simply stay
+                # `not_validated`, exactly as the env kill-switch behaves.
+                _auto_verify = True
+                try:
+                    from apps.api.app.models.ai_engine_settings import AIEngineSettings as _AES
+                    _aes = (await db.execute(
+                        select(_AES).where(_AES.tenant_id == job.tenant_id).limit(1)
+                    )).scalar_one_or_none()
+                    if _aes is not None and _aes.auto_verify_credentials is not None:
+                        _auto_verify = bool(_aes.auto_verify_credentials)
+                except Exception as _ave:
+                    logger.debug("auto_verify_setting_read_failed", error=str(_ave)[:120])
+
                 verifiable = [pf for pf in raw_findings
                               if (pf.raw_data or {}).get("_raw_value_for_verification")
                               and (pf.raw_data or {}).get("provider", "unknown").lower() in SUPPORTED_PROVIDERS]
+
+                if verifiable and not _auto_verify:
+                    logger.info(
+                        "credential_verification_disabled_by_setting",
+                        scan_job_id=scan_job_id, skipped=len(verifiable),
+                    )
+                    verifiable = []
 
                 if verifiable:
                     _vtotal = len(verifiable)
@@ -4532,6 +4830,29 @@ async def _run_scan_job(scan_job_id: str):
                     )
                     all_findings = findings_for_cache.scalars().all()
 
+                    # ── Test File Handling: "exclude" ────────────────
+                    # The AI decision cache runs BEFORE _run_ai_triage and
+                    # stamps ai_explanation / classification straight from
+                    # a previous verdict, so filtering the triage list
+                    # alone is not enough — the cache has to honour
+                    # `exclude` as well.
+                    #
+                    # These findings remain stored and visible; they
+                    # simply carry no AI verdict.
+                    if test_file_handling == "exclude" and all_findings:
+                        from services.secret_scan.engine import _classify_file_context as _cfc3
+                        _pre = len(all_findings)
+                        all_findings = [
+                            f for f in all_findings
+                            if _cfc3(f.file_path or "") != "test_file"
+                        ]
+                        if _pre != len(all_findings):
+                            logger.info(
+                                "test_file_findings_excluded_from_decision_cache",
+                                scan_job_id=scan_job_id,
+                                skipped=_pre - len(all_findings),
+                            )
+
                     for f in all_findings:
                         # Only compute stability ID if not already set
                         if not f.stability_id:
@@ -4703,6 +5024,11 @@ async def _run_scan_job(scan_job_id: str):
                     except Exception as sig_err:
                         logger.warning("triage_health_signal_failed", error=str(sig_err)[:200])
 
+                except ScanCancelled:
+                    # A cancel is a requested stop, not an AI failure —
+                    # "continue with unreviewed findings" is the wrong
+                    # response to it.
+                    raise
                 except Exception as ai_err:
                     logger.error("ai_triage_failed_continuing", scan_job_id=scan_job_id, error=str(ai_err)[:300])
                     job.status_message = f"[7/8] AI analysis encountered errors — continuing with {created_count} unreviewed findings"
@@ -4855,6 +5181,21 @@ async def _run_scan_job(scan_job_id: str):
                 logger.warning("metrics_snapshot_failed", error=str(me)[:200])
 
             # ── Step 9: Complete ──────────────────────────────────
+            # Re-read the status before claiming success: an operator may
+            # have cancelled while the last phase was running, and a
+            # cancelled scan must not be reported as COMPLETED. This is
+            # the final guard — cooperative cancellation normally aborts
+            # long before here — so it only has to be correct, not fast.
+            _final_status = await db.scalar(
+                select(ScanJob.status).where(ScanJob.id == job.id)
+            )
+            if _final_status == ScanStatus.CANCELLED:
+                logger.info(
+                    "scan_completion_suppressed_by_cancel",
+                    scan_job_id=str(job.id),
+                )
+                raise ScanCancelled(str(job.id))
+
             job.status = ScanStatus.COMPLETED
             fp_count = fp_count_result.scalar() or 0
             ai_classified_count = ai_classified_result.scalar() or 0
@@ -4876,9 +5217,49 @@ async def _run_scan_job(scan_job_id: str):
             # and erodes trust ("why is the message telling me to
             # configure something I already configured?").  Emit the
             # right label per case.
+            # ── Triage-coverage assertion ────────────────────────────
+            # A scan must not report clean success while findings it
+            # was supposed to triage carry no AI verdict. `triaged > 0`
+            # is not sufficient on its own: partial coverage would
+            # otherwise be indistinguishable from total coverage, so the
+            # count is asserted explicitly and surfaced to the UI.
+            #
+            # Counted from the DB rather than in-memory counters, so it
+            # reflects what a user actually sees in the findings list.
+            # NB: named distinctly from the pre-triage `untriaged_count`
+            # above (which is repo-wide and decides WHETHER to run
+            # triage). This one is scan-scoped and measures what THIS
+            # scan actually covered — so a previous scan's deliberate
+            # skip_ai is never blamed on this run. `ai_explanation IS
+            # NULL` also excludes genuine AI abstentions (the model
+            # answered "needs a human"), leaving only findings that
+            # never got a verdict at all.
+            untriaged_after_count = 0
+            if has_ai and not skip_ai:
+                untriaged_after_q = await db.execute(
+                    select(sa_func.count(NormalizedFinding.id)).where(
+                        NormalizedFinding.scan_job_id == job.id,
+                        NormalizedFinding.classification == Classification.NEEDS_REVIEW,
+                        NormalizedFinding.ai_explanation.is_(None),
+                    )
+                )
+                untriaged_after_count = untriaged_after_q.scalar() or 0
+
             parts = [f"[8/8] Complete — {created_count} findings"]
             if triaged > 0:
                 parts.append(f"{fp_count} FP removed")
+            _coverage_warning = _triage_coverage_warning(untriaged_after_count)
+            if _coverage_warning:
+                # Surfaced in the completion banner, not buried in logs —
+                # the operator must see that coverage was incomplete.
+                parts.append(_coverage_warning)
+                logger.warning(
+                    "scan_completed_with_incomplete_triage",
+                    scan_job_id=str(job.id),
+                    untriaged=untriaged_after_count,
+                    triaged=triaged,
+                    findings_total=created_count,
+                )
             if auto_remediated > 0:
                 parts.append(f"{auto_remediated} fixes generated")
             if created_count > 0 and triaged == 0:
@@ -4908,6 +5289,11 @@ async def _run_scan_job(scan_job_id: str):
                 "findings_existing": updated_count,
                 "findings_by_severity": severity_counts,
                 "false_positives": fp_count,
+                # Machine-readable coverage signal: >0 means the scan
+                # completed with findings that never received an AI
+                # verdict. Lets the API/UI flag an incomplete scan
+                # instead of relying on operators parsing the message.
+                "untriaged_findings": untriaged_after_count,
                 # ── Credential verification funnel (S1–S3) ──
                 # How many findings were live-verified this scan, the
                 # active/dead split, and how many dead ones were auto-
@@ -5057,6 +5443,11 @@ async def _run_scan_job(scan_job_id: str):
             except Exception:
                 pass  # Don't fail the scan if ticketing dispatch fails
 
+        except ScanCancelled:
+            # Not a failure. Let it reach run_scan_job, which leaves the
+            # row CANCELLED with the operator's own message and releases
+            # the repository lock as the exception unwinds.
+            raise
         except Exception as e:
             # WS-3′ — guarantee a non-empty, machine-useful error_detail.
             # ``str(asyncio.TimeoutError())`` is the EMPTY STRING, which
@@ -5076,9 +5467,32 @@ async def _run_scan_job(scan_job_id: str):
                     detail = type(e).__name__  # never empty
             logger.error("scan_job_failed", scan_job_id=scan_job_id,
                          error_type=type(e).__name__, error=detail[:200])
-            job.status = ScanStatus.FAILED
-            job.error_detail = detail[:2000]
-            await db.commit()
+            # Recording the failure must itself be failure-proof.
+            #
+            # If `e` came from a flush, this session is already poisoned
+            # and EVERY statement on it — including the commit below —
+            # raises PendingRollbackError — which would leave the row
+            # stuck at ANALYZING (see _force_terminal_failure).
+            #
+            # 1) roll back so the session is usable again,
+            # 2) write the terminal state,
+            # 3) if anything still fails, stamp it from a FRESH session.
+            _stamped = False
+            try:
+                await db.rollback()
+                job = await db.get(type(job), job.id)  # re-attach after rollback
+                if job is not None:
+                    job.status = ScanStatus.FAILED
+                    job.error_detail = detail[:2000]
+                    await db.commit()
+                    _stamped = True
+            except Exception as _persist_err:
+                logger.warning(
+                    "scan_failure_write_on_own_session_failed",
+                    scan_job_id=scan_job_id, error=str(_persist_err)[:200],
+                )
+            if not _stamped:
+                await _force_terminal_failure(scan_job_id, detail)
             # WS-9 — emit a scan.failed notification so the same dispatch
             # path that fires on scan_complete (Slack / Teams / PagerDuty /
             # outbound webhook, per the tenant's notification rules) also
@@ -5659,6 +6073,44 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
 
     findings_result = await db.execute(select(NormalizedFinding).where(*conditions))
     findings = findings_result.scalars().all()
+
+    # ── Test File Handling: "exclude" (from AI) ──────────────────────
+    # The UI is explicit: "Skip AI false positive analysis for test file
+    # findings entirely. Saves AI tokens — findings are still detected
+    # and stored but not AI-classified."
+    #
+    # So this filters the TRIAGE list only. The findings exist in the
+    # database and appear in the UI exactly as with `normal`; they simply
+    # never reach the model. Detection is untouched, so this setting can
+    # never hide a real credential — it only declines to spend tokens
+    # classifying a corpus the operator already knows is synthetic.
+    if findings:
+        try:
+            from apps.api.app.models.ai_engine_settings import AIEngineSettings as _AES2
+            _aes2 = (await db.execute(
+                select(_AES2).where(_AES2.tenant_id == job.tenant_id).limit(1)
+            )).scalar_one_or_none()
+            _tfh = getattr(_aes2, "deprioritize_test_files", None) if _aes2 else None
+            if isinstance(_tfh, bool):
+                _tfh = "deprioritize" if _tfh else "normal"
+            if _tfh == "exclude":
+                from services.secret_scan.engine import _classify_file_context as _cfc2
+                _before = len(findings)
+                findings = [
+                    f for f in findings
+                    if _cfc2(f.file_path or "") != "test_file"
+                ]
+                _skipped = _before - len(findings)
+                if _skipped:
+                    logger.info(
+                        "test_file_findings_excluded_from_ai",
+                        scan_job_id=str(job.id), skipped=_skipped,
+                        still_triaged=len(findings),
+                        detail="findings remain stored and visible; only AI triage was skipped",
+                    )
+        except Exception as _tfhe:
+            logger.debug("test_file_handling_read_failed", error=str(_tfhe)[:120])
+
     if not findings:
         return 0, 0, {}
 
@@ -5753,12 +6205,43 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if (_hb_i + 1) % 50 == 0:
             await _stamp_heartbeat_main(job, db, commit=True)
 
-    # ── Pre-AI Deduplication ──
-    # Group same CWE + file + rule findings — triage ONE, apply to all
-    from services.ai_triage.dedup import group_findings_for_triage, apply_group_results
-    deduped_list, groups_map = group_findings_for_triage(finding_data_list)
-    dedup_saved = len(finding_data_list) - len(deduped_list)
-    logger.info("pre_ai_dedup_applied", original=len(finding_data_list), deduped=len(deduped_list), saved=dedup_saved)
+    # ── Pre-AI Deduplication (honours the "Finding Analysis" setting) ──
+    # `batch_similar` groups same CWE + file + rule findings — triage ONE,
+    # apply the verdict to all members. `individual` gives every finding
+    # its own AI call, which is what the UI promises for that option.
+    #
+    # This gate is the fix for a dead control: `analysis_mode` was read
+    # from the database and logged, but nothing ever branched on it, so
+    # grouping ran unconditionally and choosing "Individual" changed
+    # nothing. A setting that silently does nothing is worse than no
+    # setting — the operator believes they made a decision.
+    from services.ai_triage.dedup import (
+        group_findings_for_triage, apply_group_results, FindingGroup,
+    )
+
+    _analysis_mode = (ai_settings.get("analysis_mode") or "batch_similar").lower()
+    if _analysis_mode == "individual":
+        # One AI call per finding: every finding is its own single-member
+        # group. Must be real FindingGroup objects — apply_group_results
+        # reads `group.member_ids`, so a plain list would raise here.
+        deduped_list = list(finding_data_list)
+        groups_map = {}
+        for _f in finding_data_list:
+            _fid = str(_f.get("id"))
+            groups_map[_fid] = FindingGroup(
+                representative_id=_fid,
+                member_ids=[_fid],
+                group_key=f"individual:{_fid}",
+                cwe=_f.get("cwe", "") or "",
+                file_path=_f.get("file_path", "") or "",
+                rule_id=_f.get("scanner_rule_id", "") or "",
+            )
+        dedup_saved = 0
+    else:
+        deduped_list, groups_map = group_findings_for_triage(finding_data_list)
+        dedup_saved = len(finding_data_list) - len(deduped_list)
+    logger.info("pre_ai_dedup_applied", analysis_mode=_analysis_mode,
+                original=len(finding_data_list), deduped=len(deduped_list), saved=dedup_saved)
 
     # Collect security evidence from the repo
     related_context = ""
@@ -5873,6 +6356,56 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
     # empty response vs invalid JSON). Keyed by the `_parse_failure` value
     # set by engine._parse_response() / the upstream-error handler.
     failure_summary: dict[str, int] = {}
+    # Verdicts held at NEEDS_REVIEW because the model's confidence fell
+    # below the tenant's "AI Confidence Level" threshold.
+    below_threshold_count = 0
+
+    # ── Stale-row guard before applying verdicts ─────────────────────
+    # `finding_map` holds ORM objects loaded BEFORE the AI phase, which
+    # runs for minutes (13 min on a fast model, 52 on a slow one). Rows
+    # can disappear in that window — a re-scan deletes and recreates
+    # findings, an operator deletes one, a suppression sweep runs.
+    #
+    # Mutating an ORM object whose row is gone makes the flush emit
+    # `UPDATE ... expected to update 1 row(s); 0 were matched`, which
+    # poisons the whole transaction: every OTHER verdict in the batch
+    # would be lost too and the scan would die, over a single row that
+    # went away during a long AI phase.
+    #
+    # One indexed id-only query re-validates the set, so a vanished
+    # finding is skipped instead of destroying the batch.
+    _candidate_ids = [
+        tr.finding_id for tr in results
+        if tr.success and tr.result and finding_map.get(tr.finding_id) is not None
+    ]
+    _alive_ids: set[str] = set()
+    if _candidate_ids:
+        try:
+            from uuid import UUID as _UUID
+            _uuids = []
+            for _cid in _candidate_ids:
+                try:
+                    _uuids.append(_cid if isinstance(_cid, _UUID) else _UUID(str(_cid)))
+                except (ValueError, AttributeError, TypeError):
+                    continue
+            if _uuids:
+                _alive_rows = await db.execute(
+                    select(NormalizedFinding.id).where(NormalizedFinding.id.in_(_uuids))
+                )
+                _alive_ids = {str(r) for r in _alive_rows.scalars().all()}
+        except Exception as _av_err:
+            # If the probe itself fails, fall through and apply as before
+            # rather than dropping every verdict.
+            logger.warning("triage_apply_liveness_probe_failed", error=str(_av_err)[:160])
+            _alive_ids = {str(c) for c in _candidate_ids}
+        _vanished = len(_candidate_ids) - len(_alive_ids)
+        if _vanished > 0:
+            logger.warning(
+                "triage_apply_skipped_deleted_findings",
+                scan_job_id=str(job.id), vanished=_vanished,
+                total_verdicts=len(_candidate_ids),
+                detail="findings deleted during the AI phase; verdicts skipped to protect the batch",
+            )
 
     for triage_result in results:
         if not triage_result.success or not triage_result.result:
@@ -5882,6 +6415,10 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if not finding:
             continue
 
+        # Row vanished mid-scan — skip rather than poison the transaction.
+        if _alive_ids and str(triage_result.finding_id) not in _alive_ids:
+            continue
+
         result = triage_result.result
         # G1b — the AI is given the secret value to triage and echoes it back
         # into its free-text reasoning / TP-FP reasons. Scrub secret shapes
@@ -5889,11 +6426,31 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         # served via API/UI — same at-rest guarantee as code_snippet.
         from services.secret_scan.engine import scrub_secrets_in_obj as _scrub_obj
         result = _scrub_obj(result)
-        finding.classification = classification_map.get(
+        # ── "AI Confidence Level" setting ────────────────────────────
+        # A verdict the model is not confident about must not silently
+        # become a decision. Below the tenant's threshold the finding is
+        # held at NEEDS_REVIEW (a human looks at it) while the model's
+        # reasoning and score are still persisted, so the operator sees
+        # WHAT the AI thought and WHY it was not accepted.
+        _ai_conf = result.get("confidence_score")
+        _proposed = classification_map.get(
             result.get("classification", "needs_review"),
             Classification.NEEDS_REVIEW,
         )
-        finding.ai_confidence = result.get("confidence_score")
+        try:
+            _conf_threshold = float(ai_settings.get("ai_confidence_threshold", 0.6) or 0.0)
+        except (TypeError, ValueError):
+            _conf_threshold = 0.6
+        if (
+            _proposed is not Classification.NEEDS_REVIEW
+            and _ai_conf is not None
+            and float(_ai_conf) < _conf_threshold
+        ):
+            finding.classification = Classification.NEEDS_REVIEW
+            below_threshold_count += 1
+        else:
+            finding.classification = _proposed
+        finding.ai_confidence = _ai_conf
         finding.ai_explanation = result.get("reasoning_summary")
         finding.exploitability_score = result.get("exploitability_score")
         finding.true_positive_reasons = result.get("true_positive_reasons", [])
@@ -6001,6 +6558,16 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 logger.warning("cache_store_failed", finding_id=str(finding.id), error=str(cache_err)[:100])
 
     await db.commit()
+    if below_threshold_count:
+        # Makes the threshold's effect observable: how many verdicts it
+        # held back on this scan.
+        logger.info(
+            "ai_triage_confidence_threshold_applied",
+            scan_job_id=str(job.id),
+            threshold=ai_settings.get("ai_confidence_threshold", 0.6),
+            held_for_review=below_threshold_count,
+            triaged=triaged,
+        )
     return triaged, dedup_saved, failure_summary
 
 
@@ -6414,7 +6981,10 @@ async def _run_weekly_source_full_sweep() -> dict:
             # is already running for this source (the sweep gets
             # CANCELLED with a clear status_message; the next sweep
             # cycle catches up).
-            run_source_scan.delay(str(job.id), str(src_id))
+            # Store celery_task_id so this sweep scan stays cancellable —
+            # the cancel endpoint no-ops without it.
+            _sweep_task = run_source_scan.delay(str(job.id), str(src_id))
+            job.celery_task_id = _sweep_task.id
             dispatched += 1
             logger.info(
                 "source_full_sweep_dispatched",

@@ -945,7 +945,7 @@ function AIModelsFullSection() {
                     </button>
                   </div>
                   {!needsKey && !form.api_key && (
-                    <p className="text-[10px] text-slate-600 mt-1.5">Leave blank if your endpoint doesn&apos;t require authentication</p>
+                    <p className="text-[10px] text-slate-600 mt-1.5">Leave blank if your endpoint doesn't require authentication</p>
                   )}
                 </div>
               </div>
@@ -3926,14 +3926,23 @@ function RichSelect({ label, description, value, options, onChange }: {
   }, [open]);
 
   return (
-    <div className="relative">
+    /* h-full + flex-col with the trigger pushed down by `mt-auto`.
+       The help text above runs anywhere from one to four lines, so
+       without this the two controls in a grid row started their
+       dropdowns at different heights and the panel looked ragged.
+       Now every trigger aligns along the bottom of its row regardless
+       of how long the copy is. */
+    <div className="relative h-full flex flex-col">
       <label className="block text-xs font-medium text-slate-400 mb-1">{label}</label>
-      <p className="text-[10px] text-slate-600 mb-2 leading-relaxed">{description}</p>
+      <p className="text-[10px] text-slate-600 mb-2.5 leading-relaxed">{description}</p>
       <button type="button" onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:border-white/[0.15] transition-all text-left">
+        className="mt-auto w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg bg-white/[0.03] border border-white/[0.08] hover:border-white/[0.15] transition-all text-left">
         <div className="min-w-0">
           <span className="text-sm text-slate-200 block">{selected.label}</span>
-          <span className="text-[10px] text-slate-600 block mt-0.5 truncate">{selected.desc}</span>
+          {/* line-clamp instead of `truncate`: truncate cut mid-word
+              ("Savings de…", "regardl…"). This breaks on a word boundary,
+              and the full text is still shown in the open dropdown. */}
+          <span className="text-[10px] text-slate-600 mt-0.5 line-clamp-1">{selected.desc}</span>
         </div>
         <svg className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -3973,12 +3982,9 @@ function RichSelect({ label, description, value, options, onChange }: {
 // the TS errors we hit in 2026-04 (undeclared keys on inferred
 // type).
 type AIEngineSettings = {
-  context_mode: string;
   analysis_mode: string;
   skip_ai_for_info: boolean;
   ai_confidence_threshold: number;
-  max_tokens_per_finding: number;
-  batch_size: number;
   max_concurrent: number;
   rate_limit_rpm: number;
   auto_verify_credentials?: boolean;
@@ -3988,9 +3994,11 @@ type AIEngineSettings = {
 
 function AIEngineSettingsSection() {
   const [settings, setSettings] = useState<AIEngineSettings>({
-    context_mode: "smart", analysis_mode: "batch_similar", skip_ai_for_info: true,
-    ai_confidence_threshold: 0.6, max_tokens_per_finding: 4096,
-    batch_size: 5, max_concurrent: 10, rate_limit_rpm: 60,
+    analysis_mode: "batch_similar", skip_ai_for_info: true,
+    ai_confidence_threshold: 0.6,
+    // Balanced preset — must match the API defaults and the option
+    // flagged "recommended", so a first-run install is self-consistent.
+    max_concurrent: 10, rate_limit_rpm: 300,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -4013,31 +4021,25 @@ function AIEngineSettingsSection() {
         )}
       </div>
 
-      {/* Row 1: Context + Finding Analysis */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-        <RichSelect label="Context Extraction"
-          description="Controls how much surrounding code is sent to the AI model when analyzing each finding. More context helps the AI understand whether a secret is in production code, test fixtures, or documentation — but increases token usage and cost per finding."
-          value={settings.context_mode} onChange={(v) => update("context_mode", v)}
-          options={[
-            { value: "smart", label: "Smart", desc: "Extracts the enclosing function body, imports, and decorators. Gives AI enough context to judge intent while using 30-40% fewer tokens than Full mode.", recommended: true },
-            { value: "full", label: "Full", desc: "Sends up to 500 lines of the file plus related file context. Maximum accuracy for complex codebases, but uses significantly more tokens per finding." },
-            { value: "minimal", label: "Minimal", desc: "Only the code snippet around the finding (10-20 lines). Fastest and cheapest, but the AI may miss surrounding context like sanitization or safe API usage." },
-          ]}
-        />
+      {/* Row 1: Finding Analysis + AI Confidence
+          "Context Extraction" removed. Smart/Full/Minimal were offered
+          but `extract_rich_context()` takes no mode argument, so all
+          three did exactly the same thing. A dropdown whose options are
+          indistinguishable is worse than no dropdown: it invites the
+          operator to tune something that cannot be tuned. Vooda always
+          sends the enclosing function plus imports — documented rather
+          than presented as a choice. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Finding Analysis"
           description="Determines how multiple secrets of the same type in the same file are processed by the AI. Batching groups similar findings into a single AI call, reducing API usage without sacrificing accuracy — since the AI sees all related findings together."
           value={settings.analysis_mode} onChange={(v) => update("analysis_mode", v)}
           options={[
-            { value: "batch_similar", label: "Batch Similar", desc: "Groups findings with the same CWE and file into one AI prompt. Saves 30-50% API calls while maintaining the same classification accuracy.", recommended: true },
-            { value: "individual", label: "Individual", desc: "Every finding gets its own dedicated AI call with full context. Most thorough analysis but uses the most tokens and takes longer to complete." },
+            { value: "batch_similar", label: "Batch Similar", desc: "Findings sharing a rule, file and code snippet are triaged once and the verdict applied to the whole group. Savings depend on the repository: large where one rule repeats within a file, near zero where findings are spread across many files.", recommended: true },
+            { value: "individual", label: "Individual", desc: "Every finding gets its own dedicated AI call. Most thorough, but uses the most tokens and takes the longest — on a large repository this means one call per finding.", },
           ]}
         />
-      </div>
-
-      {/* Row 2: Confidence + Severity Filter */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
         <RichSelect label="AI Confidence Level"
-          description="Sets the minimum confidence threshold for AI decisions. When the AI&apos;s confidence falls below this level, the finding is automatically marked as &apos;Needs Review&apos; and routed to a human analyst for manual verification. Higher thresholds mean more human review but fewer incorrect classifications."
+          description="Sets the minimum confidence threshold for AI decisions. When the AI's confidence falls below this level, the finding is automatically marked as 'Needs Review' and routed to a human analyst for manual verification. Higher thresholds mean more human review but fewer incorrect classifications."
           value={[0.8, 0.6, 0.4].includes(settings.ai_confidence_threshold) ? String(settings.ai_confidence_threshold) : "custom"}
           onChange={(v) => { if (v !== "custom") update("ai_confidence_threshold", parseFloat(v)); }}
           options={[
@@ -4046,52 +4048,88 @@ function AIEngineSettingsSection() {
             { value: "0.4", label: "Aggressive (0.4)", desc: "Accepts most AI decisions (40%+). Minimizes human review workload but increases the risk of incorrect true/false positive classifications." },
           ]}
         />
+
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Severity Filter"
           description="Controls which severity levels are sent to the AI for false positive analysis. Skipping low-severity and informational findings saves tokens and processing time on items that rarely require AI judgment — they can still be reviewed manually."
           value={settings.skip_ai_for_info ? "skip_low" : "all"}
           onChange={(v) => update("skip_ai_for_info", v === "skip_low")}
           options={[
-            { value: "skip_low", label: "Skip Low & Info", desc: "Only analyze Critical, High, and Medium severity findings. Low and Info severity findings remain as &apos;Needs Review&apos; for manual triage.", recommended: true },
+            { value: "skip_low", label: "Skip Low & Info", desc: "Only analyze Critical, High, and Medium severity findings. Low and Info severity findings remain as 'Needs Review' for manual triage.", recommended: true },
             { value: "all", label: "Analyze All", desc: "AI reviews every finding regardless of severity. Uses more tokens but provides complete automated classification across all severity levels." },
           ]}
         />
-      </div>
 
-      {/* Row 3: Max Tokens + Credential Verification */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-        <RichSelect label="Max Tokens per Finding"
-          description="Sets the maximum number of AI tokens allocated for analyzing each individual finding. Higher values allow the AI to produce more detailed reasoning and evidence, but increase cost and processing time per finding. Most findings are adequately analyzed within 4096 tokens."
-          value={[2048, 4096, 8192].includes(settings.max_tokens_per_finding) ? String(settings.max_tokens_per_finding) : "custom"}
-          onChange={(v) => { if (v !== "custom") update("max_tokens_per_finding", parseInt(v)); }}
+        {/* "Max Tokens per Finding" was removed from this panel: it
+            duplicated ai_model_configs.max_tokens and only the per-model
+            value was ever honoured. Throughput takes its place — the
+            control operators actually need, since triage speed was
+            pinned at 60 requests/minute with no way to see or change it. */}
+        <RichSelect label="Throughput"
+          description="How aggressively Vooda calls your AI provider during triage. Higher settings finish large repositories faster but send more requests per minute — match this to your provider plan. Local models are usually happiest on Conservative."
+          value={
+            settings.rate_limit_rpm >= 600 ? "aggressive"
+            : settings.rate_limit_rpm >= 300 ? "balanced"
+            : settings.rate_limit_rpm <= 60 ? "conservative"
+            : "custom"
+          }
+          onChange={(v) => {
+            if (v === "conservative") { update("rate_limit_rpm", 60); update("max_concurrent", 5); }
+            else if (v === "balanced") { update("rate_limit_rpm", 300); update("max_concurrent", 10); }
+            else if (v === "aggressive") { update("rate_limit_rpm", 600); update("max_concurrent", 20); }
+          }}
           options={[
-            { value: "2048", label: "Light (2048)", desc: "Concise analysis — sufficient for straightforward findings like known placeholder patterns. Fastest processing with lowest token cost." },
-            { value: "4096", label: "Standard (4096)", desc: "Balanced depth — enough for detailed reasoning, evidence references, and remediation suggestions. Suitable for most codebases.", recommended: true },
-            { value: "8192", label: "Deep (8192)", desc: "Thorough analysis with extensive evidence gathering and multi-factor reasoning. Best for complex codebases with nuanced security patterns." },
+            { value: "conservative", label: "Conservative (60/min)", desc: "Up to 60 AI calls per minute, 5 at a time. Safest for free tiers, strict rate limits and self-hosted models on modest hardware. A 250-finding repository takes roughly 4–5 minutes of triage." },
+            { value: "balanced", label: "Balanced (300/min)", desc: "Up to 300 calls per minute, 10 at a time. Suits most paid API plans and comfortably faster on large repositories.", recommended: true },
+            { value: "aggressive", label: "Aggressive (600/min)", desc: "Up to 600 calls per minute, 20 at a time. For high-limit paid plans scanning big monorepos. Watch for provider 429s — Vooda backs off automatically, but a throttled provider is slower than a well-matched setting." },
+            { value: "custom", label: "Custom", desc: "Values set outside this panel (via the API) are preserved and shown here as Custom." },
           ]}
         />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Credential Verification"
-          description="When enabled, Vooda automatically tests detected secrets against their provider APIs during the scan (e.g., calling GitHub&apos;s /user endpoint with a found token). This determines whether credentials are still active or have been revoked — critical for prioritizing remediation of live exposures."
+          description="When enabled, Vooda automatically tests detected secrets against their provider APIs during the scan (e.g., calling GitHub's /user endpoint with a found token). This determines whether credentials are still active or have been revoked — critical for prioritizing remediation of live exposures."
           value={settings.auto_verify_credentials !== false ? "enabled" : "disabled"}
           onChange={(v) => update("auto_verify_credentials", v === "enabled")}
           options={[
-            { value: "enabled", label: "Enabled", desc: "Verify each detected credential inline during scan. Findings show &apos;Active&apos; or &apos;Inactive&apos; status with blast radius analysis for active secrets.", recommended: true },
-            { value: "disabled", label: "Disabled", desc: "Skip credential verification. Scans complete faster but you won&apos;t know which secrets are still live until manually verified." },
+            { value: "enabled", label: "Enabled", desc: "Verify each detected credential inline during scan. Findings show 'Active' or 'Inactive' status with blast radius analysis for active secrets.", recommended: true },
+            { value: "disabled", label: "Disabled", desc: "Skip credential verification. Scans complete faster but you won't know which secrets are still live until manually verified." },
+          ]}
+        />
+
+        <RichSelect label="Test File Handling"
+          description="Controls how secrets found in test and spec files (e.g., *Test.java, *.spec.ts, *_test.go) are treated. Test files often contain intentional hardcoded credentials for automated testing — these are real secrets in the codebase but lower priority than production configuration leaks."
+          /* Modern values are the strings "normal" | "deprioritize" |
+             "exclude". The previous expression was legacy-boolean logic
+             (`value ? "deprioritize" : "normal"`), and since "normal" is
+             a TRUTHY string it selected "Deprioritize" — so the control
+             showed the wrong option AND appeared frozen: picking "Normal
+             Priority" stored "normal", which rendered as "Deprioritize"
+             again. Handle the strings explicitly; keep the bool branch
+             only for rows written by the old schema. */
+          value={
+            typeof settings.deprioritize_test_files === "boolean"
+              ? (settings.deprioritize_test_files ? "deprioritize" : "normal")
+              : (["normal", "deprioritize", "exclude"].includes(String(settings.deprioritize_test_files))
+                  ? String(settings.deprioritize_test_files)
+                  : "normal")
+          }
+          onChange={(v) => update("deprioritize_test_files", v)}
+          options={[
+            { value: "normal", label: "Normal Priority", desc: "Treat test file secrets with the same severity as production code. All findings appear in dashboards and alerts regardless of file location.", recommended: true },
+            { value: "deprioritize", label: "Deprioritize", desc: "Automatically lower severity to 'Low' for findings in test files. They remain visible in the findings list but won't trigger high-priority alerts." },
+            { value: "exclude", label: "Exclude from AI", desc: "Skip AI false positive analysis for test file findings entirely. Saves AI tokens — findings are still detected and stored but not AI-classified." },
           ]}
         />
       </div>
 
-      {/* Row 4: Test File Handling + Scan Scope */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <RichSelect label="Test File Handling"
-          description="Controls how secrets found in test and spec files (e.g., *Test.java, *.spec.ts, *_test.go) are treated. Test files often contain intentional hardcoded credentials for automated testing — these are real secrets in the codebase but lower priority than production configuration leaks."
-          value={settings.deprioritize_test_files === "exclude" ? "exclude" : settings.deprioritize_test_files ? "deprioritize" : "normal"}
-          onChange={(v) => update("deprioritize_test_files", v)}
-          options={[
-            { value: "normal", label: "Normal Priority", desc: "Treat test file secrets with the same severity as production code. All findings appear in dashboards and alerts regardless of file location.", recommended: true },
-            { value: "deprioritize", label: "Deprioritize", desc: "Automatically lower severity to &apos;Low&apos; for findings in test files. They remain visible in the findings list but won&apos;t trigger high-priority alerts." },
-            { value: "exclude", label: "Exclude from AI", desc: "Skip AI false positive analysis for test file findings entirely. Saves AI tokens — findings are still detected and stored but not AI-classified." },
-          ]}
-        />
+      {/* Trailing single control: kept in a 2-col grid so it
+          keeps the same column width as the rows above rather
+          than stretching across the panel. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-stretch">
         <RichSelect label="Scan Scope"
           description="Defines which file types the secret scanner includes during repository analysis. Standard covers all common code and configuration files. Extended adds documentation and extensionless files which occasionally contain leaked credentials in examples or READMEs."
           value={settings.scan_scope || "standard"}
