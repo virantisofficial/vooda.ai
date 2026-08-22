@@ -688,7 +688,10 @@ function RepositoryDetailPageInner() {
   }, [id]);
 
   const loadScans = () => {
-    getRepoScans(id).then((r) => {
+    // A swallowed error here leaves the previous list on screen with
+    // no indication it is stale — including a scan the user just
+    // deleted.
+    return getRepoScans(id).then((r) => {
       setScans(r.data || []);
       const hasActive = (r.data || []).some((s: ScanJob) => ["running", "analyzing", "pending"].includes(s.status));
       if (hasActive && !pollingRef.current) {
@@ -712,7 +715,12 @@ function RepositoryDetailPageInner() {
           });
         }, 5000);
       }
-    }).catch(() => {});
+    }).catch((err: any) => {
+      // Surface it: a silent failure here is indistinguishable from
+      // "nothing changed", which is how a deleted scan can appear to
+      // still be there.
+      toast("error", "Could not refresh scans", err?.response?.data?.detail || "The scan list may be out of date — reload the page.");
+    });
   };
 
   // AI status check before scan
@@ -812,7 +820,7 @@ function RepositoryDetailPageInner() {
     try {
       await deleteScan(id, deleteScanTarget.id);
       setDeleteScanTarget(null);
-      toast("success", "Scan Deleted", "Scan and all associated findings have been permanently removed");
+      toast("success", "Scan Deleted", "Findings first seen in this scan were removed; earlier findings were kept");
       loadScans();
     } catch (err: any) {
       const msg = err?.response?.data?.detail || "Failed to delete scan";
@@ -1332,13 +1340,12 @@ function RepositoryDetailPageInner() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
                 <div className="text-xs text-slate-400 leading-relaxed">
-                  <p className="text-red-400 font-medium mb-1">This action is permanent and will delete all associated data:</p>
+                  <p className="text-red-400 font-medium mb-1">This action is permanent and will delete:</p>
                   <ul className="space-y-0.5 text-slate-500">
-                    <li>• All findings detected in this scan</li>
-                    <li>• AI triage results and classifications</li>
-                    <li>• Remediation plans and patches</li>
-                    <li>• Scan artifacts and metrics</li>
+                    <li>• Findings first seen in this scan, with their AI triage and remediation plans</li>
+                    <li>• This scan&apos;s artifacts and metrics</li>
                   </ul>
+                  <p className="text-slate-500 mt-2">Findings that were already present before this scan are kept and re-linked to the previous scan. If this is the repository&apos;s only scan, all of its findings are removed.</p>
                 </div>
               </div>
             </div>
