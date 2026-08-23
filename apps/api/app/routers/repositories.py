@@ -1935,6 +1935,58 @@ async def delete_scan(
     # `db.delete(job)` would otherwise try to NULL the child's scan_job_id (the
     # default ORM "nullify" cascade), which fails on NOT-NULL FKs. scan_phase_events
     # was missed when WS-1 added it → "Failed to delete scan" (NotNullViolation).
+    # ── Preserve findings that outlived this scan ────────────────────
+    # A finding's `scan_job_id` is re-pointed to the CURRENT scan on every
+    # re-scan (worker: "Point to current scan for stats"), so after a few
+    # scans every finding a repository has ever accumulated is anchored to
+    # its most recent one. Deleting rows by `scan_job_id` alone therefore
+    # discards the repository's whole finding history — including secrets
+    # first discovered long before the scan being deleted.
+    #
+    # `scan_count` is what separates the two cases. It is incremented on
+    # every ingest path when a finding is seen again, so:
+    #
+    #   scan_count <= 1  this scan was the finding's only sighting; it has
+    #                    no history to preserve and is deleted with it.
+    #   scan_count  > 1  the finding predates this scan. Re-anchor it to
+    #                    the newest SURVIVING scan and decrement the count.
+    #
+    # `scan_job_id` is NOT NULL, so a survivor is required to keep a
+    # finding. When the scan being deleted is the repository's last one
+    # there is nothing left to anchor to and the findings go with it.
+    _survivor = await db.scalar(
+        select(ScanJob.id)
+        .where(ScanJob.repository_id == repo_id, ScanJob.id != scan_id)
+        .order_by(ScanJob.created_at.desc())
+        .limit(1)
+    )
+    if _survivor is not None:
+        _preserved = await db.execute(
+            text(
+                """
+                UPDATE normalized_findings
+                   SET scan_job_id = CAST(:survivor AS uuid),
+                       last_seen_scan_job_id = CASE
+                           WHEN last_seen_scan_job_id = CAST(:sid AS uuid)
+                           THEN CAST(:survivor AS uuid)
+                           ELSE last_seen_scan_job_id
+                       END,
+                       scan_count = GREATEST(COALESCE(scan_count, 1) - 1, 1)
+                 WHERE scan_job_id = CAST(:sid AS uuid)
+                   AND COALESCE(scan_count, 1) > 1
+                """
+            ),
+            {"sid": sid, "survivor": str(_survivor)},
+        )
+        import structlog
+        structlog.get_logger().info(
+            "scan_delete_preserved_findings",
+            scan_job_id=sid,
+            preserved=_preserved.rowcount,
+            reanchored_to=str(_survivor),
+        )
+
+    # Everything still anchored here was only ever seen by this scan.
     _scan_child_tables = (
         "normalized_findings",       # finding_evidence / decisions / remediation cascade from here
         "imported_findings",
