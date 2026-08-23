@@ -171,7 +171,15 @@ class BatchRemediationEngine:
                     db.add(plan)
                     await db.flush()
 
-                    if rem_result.get("patch_diff"):
+                    # PATCH_GENERATED claims a draft fix exists, so it is
+                    # only stamped when a patch with a real diff is
+                    # persisted alongside it. The model can return a plan
+                    # (root cause, rationale) without a diff — that
+                    # finding still needs patch generation, so it stays
+                    # PENDING and re-enters the queue instead of being
+                    # reported as covered.
+                    _diff = (rem_result.get("patch_diff") or "").strip()
+                    if len(_diff) > 20:
                         patch = RemediationPatch(
                             plan_id=plan.id,
                             patch_diff=rem_result["patch_diff"],
@@ -181,9 +189,15 @@ class BatchRemediationEngine:
                             safety_score=rem_result.get("safety_score"),
                         )
                         db.add(patch)
-
-                    f.remediation_status = "patch_generated"
-                    result.remediated += 1
+                        f.remediation_status = "patch_generated"
+                        result.remediated += 1
+                    else:
+                        f.remediation_status = "pending"
+                        logger.info(
+                            "remediation_plan_only",
+                            finding_id=str(f.id),
+                            detail="model returned a plan but no patch diff",
+                        )
 
                 if rem_result.get("patch_diff"):
                     result.file_patches[file_path] = rem_result["patch_diff"]
