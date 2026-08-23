@@ -6182,7 +6182,13 @@ async def _generate_remediation(finding_id: str):
         db.add(plan)
         await db.flush()
 
-        if rem_result.get("patch_diff"):
+        # PATCH_GENERATED claims a draft fix exists, so it is only
+        # stamped when a patch with a real diff is persisted alongside
+        # it. A plan-only result (no diff from the model) leaves the
+        # finding PENDING so it re-enters the queue instead of being
+        # reported as covered.
+        _diff = (rem_result.get("patch_diff") or "").strip()
+        if len(_diff) > 20:
             patch = RemediationPatch(
                 plan_id=plan.id,
                 patch_diff=rem_result["patch_diff"],
@@ -6192,8 +6198,14 @@ async def _generate_remediation(finding_id: str):
                 safety_score=rem_result.get("safety_score"),
             )
             db.add(patch)
-
-        finding.remediation_status = "patch_generated"
+            finding.remediation_status = "patch_generated"
+        else:
+            finding.remediation_status = "pending"
+            logger.info(
+                "remediation_plan_only",
+                finding_id=str(finding.id),
+                detail="model returned a plan but no patch diff",
+            )
         await db.commit()
 
     logger.info("remediation_complete", finding_id=finding_id)
