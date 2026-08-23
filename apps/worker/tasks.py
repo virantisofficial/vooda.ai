@@ -5904,6 +5904,44 @@ def _is_source_locator(file_path: str) -> bool:
     return "://" in file_path[:32]
 
 
+def _is_local_endpoint(base_url: str) -> bool:
+    """True when an inference endpoint is on this host or a private LAN.
+
+    Judged from the URL rather than the provider label, because the label
+    is an operator's dropdown choice and both kinds speak the same
+    OpenAI-compatible protocol — a mislabelled cloud model produces no
+    error, just silent single-request serialization.
+    """
+    from urllib.parse import urlparse
+    import ipaddress
+
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "//" in raw else f"//{raw}", scheme="http")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+
+    # Reserved private-use suffixes: mDNS (RFC 6762) and the conventional
+    # internal zones. `localhost` is reserved by RFC 6761.
+    if host == "localhost" or host.endswith((".local", ".internal", ".localdomain")):
+        return True
+    # A single-label hostname has no public DNS meaning — it resolves only
+    # inside a container network or a LAN (covers "ollama", "lm-studio",
+    # or whatever the service happens to be called).
+    if "." not in host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+    except ValueError:
+        pass
+    # A public hostname is not local, whatever port it is on — an Ollama
+    # default port on someone else's domain is still a remote call.
+    return False
+
+
 async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, int, dict[str, int]]:
     """Run AI triage on all normalized findings for a scan job using batch processing."""
     from apps.api.app.models.finding import NormalizedFinding, Classification
@@ -5982,13 +6020,31 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
     # Detect local/CPU-bound providers (Ollama, LM Studio, vLLM, etc.)
     # These can only process ONE request at a time on a CPU — concurrent requests
     # queue up inside Ollama and cause 120 s timeout cascades.
+    # The ENDPOINT decides this, not the provider label. The label is a
+    # dropdown value an operator picks, and choosing "Ollama" for a model
+    # served over the public internet is an easy mistake: the request path
+    # is identical (both are OpenAI-compatible), so nothing fails — the
+    # scan just serializes to one call at a time and runs far below the
+    # configured throughput, with no error to explain why.
+    #
+    # A loopback or private-network URL cannot be a shared cloud endpoint,
+    # and a public host is not CPU-bound local inference. Only when there
+    # is no endpoint to judge does the label decide.
     _local_provider_names = ("ollama", "lm_studio", "vllm", "localai", "huggingface_tgi")
-    is_local = model_config_dict.get("_provider_name", "").lower() in _local_provider_names
-    if not is_local:
-        # Also detect via provider object's base URL (e.g. env-var configured Ollama)
-        _base = getattr(provider, '_base_url', '') or ''
-        if "11434" in _base or "ollama" in _base.lower():
-            is_local = True
+    _provider_label = model_config_dict.get("_provider_name", "").lower()
+    _base = (getattr(provider, "_base_url", "") or "").strip()
+    if _base:
+        is_local = _is_local_endpoint(_base)
+        if is_local != (_provider_label in _local_provider_names):
+            logger.info(
+                "local_model_detection_from_endpoint",
+                provider_label=_provider_label or "(unset)",
+                endpoint=_base,
+                treated_as_local=is_local,
+                detail="endpoint overrides the provider label",
+            )
+    else:
+        is_local = _provider_label in _local_provider_names
     if is_local:
         # Increase per-request timeout — CPU inference is slow
         try:
