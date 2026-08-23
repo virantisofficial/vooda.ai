@@ -356,7 +356,13 @@ export default function DashboardPage() {
   }, [rangeKey, rangeDays]);
 
   // ── Derived KPI values ────────────────────────────────────────────
+  // `total` is OPEN findings — the number every risk tile reconciles
+  // against. `detected` is every detection including the ones triage
+  // settled; it is context for the noise rate, never a risk figure.
   const total = metrics?.total_findings ?? 0;
+  const detected = metrics?.detected_total ?? total;
+  const filteredNoise = metrics?.filtered_as_noise ?? 0;
+  const noisePct = detected > 0 ? Math.round((filteredNoise / detected) * 100) : 0;
   const sev = (key: string) => (metrics?.by_severity?.[`Severity.${key}`] ?? 0) + (metrics?.by_severity?.[key.toLowerCase()] ?? 0);
   const criticals = sev("CRITICAL"), highs = sev("HIGH"), mediums = sev("MEDIUM"), lows = sev("LOW"), infos = sev("INFO");
   const critHighTotal = criticals + highs;
@@ -365,7 +371,11 @@ export default function DashboardPage() {
   // Surfacing Info in the helper is why the row reconciles now.
   void (criticals + highs + mediums + lows + infos);
 
-  const needsReview = (metrics?.by_classification?.["Classification.NEEDS_REVIEW"] ?? 0) + (metrics?.by_classification?.["needs_review"] ?? 0);
+  // Open-scoped count from the overview (matches the queue the chip
+  // links to); the classification breakdown is unfiltered and would
+  // also count suppressed rows.
+  const needsReview = metrics?.needs_review_open
+    ?? ((metrics?.by_classification?.["Classification.NEEDS_REVIEW"] ?? 0) + (metrics?.by_classification?.["needs_review"] ?? 0));
 
   // MTTR — server-side endpoint.  Used by the MTTR tile + the posture banner.
   const avgMttrHours = mttrData?.avg_hours ?? null;
@@ -391,16 +401,24 @@ export default function DashboardPage() {
   // Auto-Remediation — split into Covered (engine drafted any patch) and
   // Applied (human approved/applied so the fix actually landed).  Single
   // "Remediation Rate" number that lived here previously was misleading.
+  // Numerators come from the overview response, computed under the SAME
+  // open + time-window scope as `total` — a percentage only means
+  // something when both sides of the division share a scope. The
+  // standalone /remediation endpoint counts all-time across every
+  // classification; dividing that by a windowed open denominator
+  // inflates the figure and can exceed 100%. It remains the fallback
+  // for an older API.
   const remStats = remediationM?.by_remediation_status ?? {};
   const _remCount = (k: string) =>
     (remStats[k] ?? 0) + (remStats[`RemediationStatus.${k.toUpperCase()}`] ?? 0);
-  const pendingPatches = _remCount("patch_generated");
-  const approvedPatches = _remCount("approved");
-  const appliedPatches = _remCount("applied");
-  const remediationCovered = pendingPatches + approvedPatches + appliedPatches;
-  const remediationApplied = approvedPatches + appliedPatches;
-  const coveragePct = total > 0 ? Math.round((remediationCovered / total) * 100) : 0;
-  const appliedPct = total > 0 ? Math.round((remediationApplied / total) * 100) : 0;
+  const remediationCovered = metrics?.remediation_covered
+    ?? (_remCount("patch_generated") + _remCount("approved") + _remCount("applied"));
+  const remediationApplied = metrics?.remediation_applied
+    ?? (_remCount("approved") + _remCount("applied"));
+  const pendingPatches = remediationCovered - remediationApplied;
+  const appliedPatches = metrics?.remediation_applied ?? _remCount("applied");
+  const coveragePct = total > 0 ? Math.min(100, Math.round((remediationCovered / total) * 100)) : 0;
+  const appliedPct = total > 0 ? Math.min(100, Math.round((remediationApplied / total) * 100)) : 0;
 
   // ── Posture status — three tiers driven by KPI signal strength ────
   //   At Risk:        any verifier-confirmed live credentials
@@ -444,6 +462,10 @@ export default function DashboardPage() {
   const cov = topRepos?.coverage as
     | { total_configured: number; total_scanned: number; total_leaking: number }
     | undefined;
+  // The banner says "Scanned" — count repositories that actually have a
+  // scan, not everything configured. Falls back to the configured count
+  // only when the coverage payload is unavailable.
+  const scannedRepoCount = cov?.total_scanned ?? repoCount;
 
   // ── Trend chart data ─────────────────────────────────────────────
   const dailyTrend: Array<{ date: string; count: number }> = trendData?.daily_counts || [];
@@ -491,7 +513,10 @@ export default function DashboardPage() {
   // ── Row 5: AI Triage Confidence ──────────────────────────────────
   const aiTriaged = aiAccuracy?.ai_triaged_findings || 0;
   const aiConfirmed = aiAccuracy?.user_confirmed_decisions || 0;
-  const aiAccuracyPct = aiAccuracy?.accuracy_pct || "0.0%";
+  // Accuracy is agreement with HUMAN verdicts. With zero human
+  // confirmations it is undefined, not 0.0% — showing a number would
+  // claim the AI has been measured when it hasn't.
+  const aiAccuracyPct = aiConfirmed > 0 ? (aiAccuracy?.accuracy_pct || "—") : "—";
   const aiConfDist = (aiAccuracy?.confidence_distribution as Record<string, number>) || { low: 0, medium: 0, high: 0, very_high: 0 };
   const aiConfTotal = Object.values(aiConfDist).reduce((acc, v) => acc + (v as number), 0);
 
@@ -587,7 +612,7 @@ export default function DashboardPage() {
             </div>
             <span className="text-slate-700">·</span>
             <span className="text-xs text-slate-400">
-              <b className="text-white font-semibold">{repoCount}</b> {repoCount === 1 ? "Repository" : "Repositories"} Scanned
+              <b className="text-white font-semibold">{scannedRepoCount}</b> {scannedRepoCount === 1 ? "Repository" : "Repositories"} Scanned
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -620,14 +645,14 @@ export default function DashboardPage() {
               follow-on number: 50 secrets in 1 repo is alarming, 50
               spread across 50 repos is routine. */}
           <div className="card p-4">
-            <p className="text-[10px] text-red-400 uppercase tracking-wider font-medium">Total Secrets</p>
+            <p className="text-[10px] text-red-400 uppercase tracking-wider font-medium">Open Secrets</p>
             <div className="flex items-baseline gap-2 mt-1.5">
               <span className="text-3xl font-bold text-white">{total.toLocaleString()}</span>
             </div>
             <div className="mt-1"><DeltaBadge curr={total} prev={prevTotal} prevLabel={prevLabel} goodDirection="down" /></div>
             <p className="text-[11px] text-slate-500 mt-1">
-              {repoCount > 0
-                ? `${(total / repoCount).toFixed(repoCount > 9 ? 0 : 1)} Average Per Repository`
+              {detected > 0
+                ? <>{detected.toLocaleString()} Detected{filteredNoise > 0 && <> · {filteredNoise.toLocaleString()} Filtered As Noise ({noisePct}%)</>}</>
                 : "Awaiting First Scan"}
             </p>
           </div>
@@ -902,7 +927,7 @@ export default function DashboardPage() {
               </div>
             ) : (
               <div className="flex items-center gap-6">
-                <VerifierDonut segments={verifierSegments} totalLabel="Total Verified" />
+                <VerifierDonut segments={verifierSegments} totalLabel="Findings" />
                 {/* Right side: stage labels + counts (donut legend), then a
                     thin separator + the top-4 providers being verified.
                     Two columns of information at one glance. */}
