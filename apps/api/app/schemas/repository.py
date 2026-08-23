@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Virantis
 # SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, HttpUrl, field_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Optional
@@ -88,6 +88,20 @@ class ScanRequest(BaseModel):
 
 
 class ScanJobResponse(BaseModel):
+    # ── NULL-tolerant JSONB fields ───────────────────────────────────
+    # `scan_jobs.config` and `.stats` are NULLABLE in Postgres with no
+    # server default, while both are typed as `dict` here. A default
+    # (`= {}`) only covers a MISSING field — an explicit None still
+    # fails validation, and FastAPI validates the WHOLE response list,
+    # so a single NULL jsonb column would fail the entire request.
+    #
+    # Coerced before validation rather than typed Optional, so callers
+    # keep the simple `dict` contract and never have to null-check.
+    @field_validator("stats", "config", mode="before")
+    @classmethod
+    def _null_jsonb_to_empty_dict(cls, v):
+        return {} if v is None else v
+
     id: UUID
     repository_id: UUID
     scan_type: str
@@ -99,7 +113,7 @@ class ScanJobResponse(BaseModel):
     # timeouts). Exposed so the drawer + /scan-jobs page can show WHY a
     # scan failed instead of a bare red badge. Already redacted (WS-6).
     error_detail: Optional[str] = None
-    stats: dict
+    stats: dict = {}
     # The trigger-time config (skip_ai, force_full, branch, etc.).
     # Exposed so the scan-card UI can distinguish a user-requested
     # AI skip from a missing-provider state — both would otherwise

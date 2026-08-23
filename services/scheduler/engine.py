@@ -147,7 +147,14 @@ async def _trigger_due_repositories(db: AsyncSession) -> int:
             repo.metadata_ = meta
 
         from apps.worker.tasks import run_scan_job
-        run_scan_job.delay(str(scan_job.id))
+        # Store the Celery task id — the cancel endpoint is guarded by
+        # `if job.celery_task_id:`, so a scan dispatched without it can
+        # NEVER be revoked: cancelling flips the row to CANCELLED while
+        # the worker keeps scanning, and the still-held repo lock makes
+        # every subsequent Run Scan coalesce. Scheduled scans missed this
+        # for their whole existence (the API paths always set it).
+        _task = run_scan_job.delay(str(scan_job.id))
+        scan_job.celery_task_id = _task.id
         triggered += 1
 
         logger.info("scheduled_repo_scan_triggered", repo=repo_info["name"], schedule=schedule)
@@ -218,7 +225,10 @@ async def _trigger_due_sources(db: AsyncSession) -> int:
         await db.flush()
 
         from apps.worker.tasks import run_source_scan
-        run_source_scan.delay(str(scan_job.id), str(source.id))
+        # Same reason as the repo path above — without celery_task_id the
+        # cancel endpoint cannot revoke this task.
+        _task = run_source_scan.delay(str(scan_job.id), str(source.id))
+        scan_job.celery_task_id = _task.id
         triggered += 1
 
         logger.info(

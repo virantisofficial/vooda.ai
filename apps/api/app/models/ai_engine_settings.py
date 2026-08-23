@@ -27,10 +27,16 @@ class AIEngineSettings(Base, UUIDMixin, TimestampMixin, TenantMixin):
     ai_confidence_threshold = Column(Float, default=0.6)  # Below this → "needs review"
     max_tokens_per_finding = Column(Integer, default=4096)
 
-    # Batch settings
+    # Throughput settings. Defaults mirror the "Balanced" preset the UI
+    # marks recommended, so a fresh install is self-consistent.
+    #
+    # `batch_size` is kept as a column for backward compatibility with
+    # existing rows but is NO LONGER READ: triage dispatches in
+    # completion order, so there are no batches. It is absent from the
+    # API schema and from the UI.
     batch_size = Column(Integer, default=5)
     max_concurrent = Column(Integer, default=10)
-    rate_limit_rpm = Column(Integer, default=60)
+    rate_limit_rpm = Column(Integer, default=300)
 
     # Scan pipeline settings
     auto_verify_credentials = Column(Boolean, default=True)    # Auto-verify secrets during scan

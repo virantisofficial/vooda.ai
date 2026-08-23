@@ -9,6 +9,27 @@ from celery.signals import worker_process_init, beat_init
 from apps.api.app.core.config import settings
 from packages.common.logging_config import configure_logging
 
+# ── Task time limits + broker visibility timeout ─────────────────────
+# These two values are coupled and must not drift apart. With
+# `acks_late` (below) the broker holds a task's message unacked for the
+# whole run, and Redis redelivers any message left unacked longer than
+# `visibility_timeout` — starting a second, concurrent execution of a
+# task that is still running.
+#
+# The visibility timeout is therefore DERIVED from the longest task
+# limit rather than hardcoded, `run_scan_job` imports
+# SCAN_TASK_TIME_LIMIT from here rather than repeating the number, and
+# tests/worker/test_broker_visibility_invariant.py asserts the
+# relationship across every registered task so it cannot regress.
+#
+# A task cannot outlive its own hard time limit (Celery SIGKILLs it),
+# so a broker ceiling above that limit guarantees the broker never
+# reclaims a message while its task can still be running.
+SCAN_TASK_TIME_LIMIT = 14400          # run_scan_job hard limit — longest task in the app
+SCAN_TASK_SOFT_TIME_LIMIT = 14100     # ~5 min earlier so the soft handler can write a FAILED row
+VISIBILITY_TIMEOUT_MARGIN = 1800      # graceful-shutdown + ack slack above the hard limit
+BROKER_VISIBILITY_TIMEOUT = SCAN_TASK_TIME_LIMIT + VISIBILITY_TIMEOUT_MARGIN
+
 celery_app = Celery(
     "vooda_worker",
     broker=settings.REDIS_URL,
@@ -57,6 +78,12 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Derived from the longest task limit — see the block at the top of
+    # this file. Without this, Redis reclaims any message unacked for
+    # more than its 3600s default and redelivers it, running a second
+    # copy of a scan that is still in progress.
+    broker_transport_options={"visibility_timeout": BROKER_VISIBILITY_TIMEOUT},
+    result_backend_transport_options={"visibility_timeout": BROKER_VISIBILITY_TIMEOUT},
     # Sprint G-4 — if a worker child is SIGKILL'd (hard time limit,
     # OOM, container restart) the task it was running is REJECTED
     # back to the queue instead of silently lost. Combined with

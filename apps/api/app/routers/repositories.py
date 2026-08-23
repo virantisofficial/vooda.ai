@@ -1798,6 +1798,47 @@ async def cancel_scan(
         except Exception as e:
             import structlog
             structlog.get_logger().warning("celery_revoke_failed", task_id=job.celery_task_id, error=str(e))
+    else:
+        # No task id recorded — revoke is impossible. All dispatch sites
+        # persist the id, and the worker self-aborts at its next
+        # cooperative-cancellation checkpoint, so the stop still happens
+        # regardless — but log it, because landing here means some
+        # dispatch path forgot to store the id.
+        import structlog
+        structlog.get_logger().warning(
+            "cancel_without_task_id",
+            scan_job_id=str(job.id),
+            detail="no celery_task_id; relying on the worker's cooperative cancel",
+        )
+
+    # ── Release this scan's repo lock immediately ────────────────
+    # Revoking with SIGTERM kills the worker mid-statement, so the
+    # lock's `finally` never runs and the key survives its full 2h20m
+    # TTL. The beat sweeper does reclaim locks whose holder is terminal,
+    # but only every 5 minutes — and cancel-then-immediately-rerun is
+    # the single most common thing an operator does. In that window the
+    # new scan coalesces and is CANCELLED with "another scan is already
+    # in progress", which is both confusing and untrue: the user just
+    # cancelled that scan. They then click Run Scan again, and again.
+    #
+    # Releasing here makes cancel deterministic; the sweeper stays as
+    # the belt-and-braces for crashes that never reach this code.
+    try:
+        from services.repo_scan.concurrency import cleanup_stale_locks
+
+        _cancelled_id = str(job.id)
+
+        async def _is_this_scan(holder: str) -> bool:
+            return holder == _cancelled_id
+
+        await cleanup_stale_locks(_is_this_scan)
+    except Exception as e:
+        # Never fail the cancel because lock cleanup hiccuped — the
+        # sweeper will still collect it within ~5 minutes.
+        import structlog
+        structlog.get_logger().warning(
+            "cancel_lock_release_failed", scan_job_id=str(job.id), error=str(e)[:200]
+        )
 
     # ── Zombie detection ────────────────────────────────────────
     # When the worker dies (OOM / SIGKILL / container restart) it

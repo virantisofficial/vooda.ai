@@ -250,14 +250,38 @@ async def create_model(
 # ── AI Engine Settings (must be before /{model_id} to avoid route conflict) ──
 
 class AIEngineSettingsSchema(BaseModel):
-    context_mode: str = "smart"
+    """Tenant-level AI engine configuration.
+
+    Every field here MUST change scan behaviour. Fields that were stored
+    and echoed back but never consumed were removed rather than left
+    looking functional:
+
+      * ``context_mode``           — Smart/Full/Minimal were never built;
+        ``extract_rich_context()`` takes no mode argument. Vooda always
+        sends the enclosing function plus imports.
+      * ``max_tokens_per_finding`` — duplicated ``ai_model_configs.max_tokens``
+        and only the per-model value was ever honoured. Token ceilings are
+        per-model, so the model editor owns that.
+      * ``batch_size``             — an artifact of the old fixed-batch
+        dispatcher. Triage now dispatches in completion order, so there
+        are no batches; ``max_concurrent`` and ``rate_limit_rpm`` are the
+        only real levers.
+
+    Pydantic ignores unknown keys, so an older client still sending the
+    removed fields keeps working — they are simply no longer persisted.
+    """
     analysis_mode: str = "batch_similar"
     skip_ai_for_info: bool = True
     ai_confidence_threshold: float = 0.6
-    max_tokens_per_finding: int = 4096
-    batch_size: int = 5
+    # Defaults MUST equal the option the UI marks "recommended", or a
+    # a fresh install is not self-consistent. These are Balanced:
+    # 300 calls/min, 10 in flight.
+    #
+    # A rate limit only binds when the provider is FASTER than the
+    # limit, so this ceiling costs slow and local models nothing; it
+    # only avoids throttling fast ones.
     max_concurrent: int = 10
-    rate_limit_rpm: int = 60
+    rate_limit_rpm: int = 300
     auto_verify_credentials: bool = True
     deprioritize_test_files: str = "normal"   # normal, deprioritize, exclude
     scan_scope: str = "standard"              # standard, extended, minimal
