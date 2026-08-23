@@ -17,13 +17,42 @@ from apps.api.app.models.scan import ScanJob
 router = APIRouter()
 
 
-async def _build_finding_filters(db, user, include_archived_sources: bool = False):
+# Classifications that mean "settled — no longer live risk". Everything
+# NOT in this set counts as open, so a newly added classification is
+# treated as open work until someone decides otherwise; the failure mode
+# of a wrong guess here is over-reporting, never a false all-clear.
+_CLOSED_CLASSIFICATIONS = (
+    Classification.LIKELY_FALSE_POSITIVE,
+    Classification.CONFIRMED_FALSE_POSITIVE,
+    Classification.TEST_CREDENTIAL,
+    Classification.ROTATED,
+    Classification.ACCEPTED_RISK,
+    Classification.RESOLVED_FILE_DELETED,
+    Classification.RESOLVED_ITEM_DELETED,
+    Classification.RESOLVED_REPO_REMOVED,
+    Classification.RESOLVED_SOURCE_REMOVED,
+)
+
+
+async def _build_finding_filters(db, user, include_archived_sources: bool = False, open_only: bool = False):
     """Build base filters for findings scoped to user's accessible repos.
 
     By default, findings from archived sources are excluded so the
     dashboard KPIs reflect the active risk surface — same pattern as
     GitGuardian/Wiz/Snyk.  Pass `include_archived_sources=True` to
     bypass (used for "historical / paused" toggles).
+
+    `open_only=True` additionally narrows to findings that still
+    represent live, actionable risk: anything a human or the AI has
+    already settled (false positive, test credential, rotated, resolved,
+    accepted risk) and anything suppressed is excluded. NEEDS_REVIEW is
+    deliberately KEPT — an un-adjudicated finding is open work, and
+    dropping it would report "all clear" whenever triage fails, which is
+    the one direction a security dashboard must never be wrong in.
+
+    Endpoints that measure DETECTION or TRIAGE behaviour (scanner
+    comparison, AI accuracy) must NOT pass it: excluding false positives
+    from an FP-rate calculation forces the answer to zero.
 
     "Archived source" is unified across two storage shapes:
       - Repository:    `metadata.archived == true`
@@ -68,6 +97,17 @@ async def _build_finding_filters(db, user, include_archived_sources: bool = Fals
                 ),
             )
         )
+
+    if open_only:
+        conditions.append(
+            ~NormalizedFinding.classification.in_(_CLOSED_CLASSIFICATIONS)
+        )
+        conditions.append(
+            or_(
+                NormalizedFinding.is_suppressed.is_(None),
+                NormalizedFinding.is_suppressed == False,  # noqa: E712
+            )
+        )
     return conditions
 
 
@@ -98,7 +138,17 @@ async def metrics_overview(
     ),
 ):
     tenant = user.tenant_id
-    conditions = await _build_finding_filters(db, user)
+    # Two scopes, deliberately:
+    #   `conditions`      — OPEN findings. Everything the dashboard
+    #                       presents as risk (the headline, the severity
+    #                       mix, the remediation denominators) counts
+    #                       these, so the tiles reconcile with each other.
+    #   `all_conditions`  — every detection, settled or not. Used only to
+    #                       report detection volume and how much of it
+    #                       triage removed, which is the denominator that
+    #                       makes the noise rate meaningful.
+    conditions = await _build_finding_filters(db, user, open_only=True)
+    all_conditions = await _build_finding_filters(db, user)
 
     # Time-window filter — drives the dashboard's range picker.
     # The dashboard sends ?days=7 / 30 / 90 / 365 to scope all KPIs to
@@ -108,6 +158,7 @@ async def metrics_overview(
     if days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         conditions.append(NormalizedFinding.created_at >= cutoff)
+        all_conditions.append(NormalizedFinding.created_at >= cutoff)
 
     total = await db.execute(
         select(func.count(NormalizedFinding.id)).where(*conditions)
@@ -117,10 +168,59 @@ async def metrics_overview(
         .where(*conditions)
         .group_by(NormalizedFinding.severity)
     )
+    # Classification breakdown stays UNFILTERED — filtering a breakdown by
+    # classification would erase the categories it exists to show.
     by_classification = await db.execute(
         select(NormalizedFinding.classification, func.count(NormalizedFinding.id))
-        .where(*conditions)
+        .where(*all_conditions)
         .group_by(NormalizedFinding.classification)
+    )
+    detected_total = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(*all_conditions)
+    )
+
+    # Remediation coverage over the SAME open+window scope as the
+    # headline, so the Auto-Fix tile's percentage divides like by like.
+    # The standalone /remediation endpoint counts patches across all
+    # findings all-time; dividing that by an open, windowed denominator
+    # inflates the percentage and can push it past 100%.
+    from apps.api.app.models.finding import RemediationStatus
+    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch
+
+    # "Covered" is a claim that a fix was DRAFTED, so it is counted from
+    # the patch artifacts themselves, not from `remediation_status` — a
+    # status flag can exist without the artifact behind it, and a patch
+    # with an empty diff is not a draft either.
+    _has_real_patch = (
+        select(RemediationPlan.finding_id)
+        .join(RemediationPatch, RemediationPatch.plan_id == RemediationPlan.id)
+        .where(func.length(func.coalesce(RemediationPatch.patch_diff, "")) > 20)
+        .scalar_subquery()
+    )
+    _covered_q = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(
+            *conditions,
+            NormalizedFinding.id.in_(_has_real_patch),
+        )
+    )
+    _applied_q = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(
+            *conditions,
+            NormalizedFinding.id.in_(_has_real_patch),
+            NormalizedFinding.remediation_status.in_([
+                RemediationStatus.APPROVED,
+                RemediationStatus.APPLIED,
+            ]),
+        )
+    )
+    # Review-queue size under the same scope, so the quick-action chip
+    # agrees with the queue it links to (the unfiltered classification
+    # breakdown includes suppressed rows; the queue does not).
+    _needs_review_q = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(
+            *conditions,
+            NormalizedFinding.classification == Classification.NEEDS_REVIEW,
+        )
     )
 
     # Scans also need repo filtering
@@ -153,8 +253,20 @@ async def metrics_overview(
         )
     )
 
+    _open = total.scalar() or 0
+    _detected = detected_total.scalar() or 0
     response = {
-        "total_findings": total.scalar() or 0,
+        # OPEN findings — the headline, and the denominator every other
+        # risk tile reconciles against.
+        "total_findings": _open,
+        # Detection volume and how much triage removed. Reported so the
+        # UI can show "N detected · M filtered as noise" without implying
+        # that settled findings are outstanding work.
+        "detected_total": _detected,
+        "filtered_as_noise": max(_detected - _open, 0),
+        "remediation_covered": _covered_q.scalar() or 0,
+        "remediation_applied": _applied_q.scalar() or 0,
+        "needs_review_open": _needs_review_q.scalar() or 0,
         "total_scans": total_scans.scalar() or 0,
         "by_severity": {str(s): c for s, c in by_severity.all()},
         "by_classification": {str(s): c for s, c in by_classification.all()},
@@ -171,7 +283,9 @@ async def metrics_overview(
     if with_delta and days is not None:
         # Re-derive the base (unwindowed) conditions; we don't want the
         # current-window cutoff carried over into the prev-window query.
-        prev_conditions = await _build_finding_filters(db, user)
+        # Same open-only scope as the current window — a delta between two
+        # differently-scoped counts is not a delta.
+        prev_conditions = await _build_finding_filters(db, user, open_only=True)
         now = datetime.now(timezone.utc)
         prev_start = now - timedelta(days=days * 2)
         prev_end = now - timedelta(days=days)
@@ -252,7 +366,7 @@ async def findings_by_category(
         "salesforce": "CRM & Support",
     }
 
-    conditions = await _build_finding_filters(db, user)
+    conditions = await _build_finding_filters(db, user, open_only=True)
     if days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         conditions.append(NormalizedFinding.created_at >= cutoff)
@@ -336,7 +450,7 @@ async def top_leaking_repos(
     """
     from apps.api.app.models.repository import Repository
 
-    conditions = await _build_finding_filters(db, user)
+    conditions = await _build_finding_filters(db, user, open_only=True)
     conditions.append(NormalizedFinding.repository_id.isnot(None))
     if days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -440,7 +554,7 @@ async def findings_metrics(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    conditions = await _build_finding_filters(db, user)
+    conditions = await _build_finding_filters(db, user, open_only=True)
     by_category = await db.execute(
         select(NormalizedFinding.vulnerability_category, func.count(NormalizedFinding.id))
         .where(*conditions)
@@ -622,7 +736,7 @@ async def finding_trends(
     from sqlalchemy import cast, Date, case, literal_column
 
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    conditions = await _build_finding_filters(db, user)
+    conditions = await _build_finding_filters(db, user, open_only=True)
     time_conditions = list(conditions) + [NormalizedFinding.created_at >= since]
 
     # Daily total
@@ -942,12 +1056,32 @@ async def mttr_metrics(
 ):
     """Server-side MTTR — avoids loading all findings client-side."""
     from datetime import datetime, timezone
+    # Deliberately NOT open_only: MTTR measures findings that completed
+    # remediation. A finding that finished its lifecycle (patched, then
+    # rotated/resolved) is exactly the population this averages over —
+    # the open-only scope would remove it and hollow the metric out.
     conditions = await _build_finding_filters(db, user)
 
-    # MTTR for findings that reached applied/approved status (updated_at - created_at)
-    resolved_statuses = ["applied", "approved", "patch_generated"]
+    # MTTR averages over findings that were actually RESOLVED: the fix
+    # landed (applied) or the finding reached a resolved classification
+    # (rotated, file/item/repo/source removed). Draft and approved
+    # patches are excluded — a drafted fix has remediated nothing.
+    #
+    # updated_at - created_at is an approximation (updated_at can be
+    # touched by later events), but for a terminal-state finding the
+    # last touch is close to the resolution itself.
+    from sqlalchemy import or_ as _or
     resolved_conds = list(conditions) + [
-        NormalizedFinding.remediation_status.in_(resolved_statuses),
+        _or(
+            NormalizedFinding.remediation_status == "applied",
+            NormalizedFinding.classification.in_([
+                Classification.ROTATED,
+                Classification.RESOLVED_FILE_DELETED,
+                Classification.RESOLVED_ITEM_DELETED,
+                Classification.RESOLVED_REPO_REMOVED,
+                Classification.RESOLVED_SOURCE_REMOVED,
+            ]),
+        ),
     ]
 
     avg_q = await db.execute(
@@ -984,7 +1118,7 @@ async def findings_breakdown(
     from source_metadata JSONB — avoids loading all findings client-side."""
     from sqlalchemy import literal_column
 
-    conditions = await _build_finding_filters(db, user)
+    conditions = await _build_finding_filters(db, user, open_only=True)
 
     # Use literal_column for JSONB text extraction to avoid GROUP BY issues
     provider_col = literal_column("source_metadata->>'provider'")
