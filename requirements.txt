@@ -1,63 +1,63 @@
 # Web framework
 fastapi>=0.115.6
 uvicorn[standard]>=0.34.0
-python-multipart==0.0.31
+python-multipart==0.0.32
 
 # Database
-sqlalchemy[asyncio]==2.0.36
-asyncpg==0.30.0
-psycopg2-binary==2.9.10
-alembic==1.14.0
-greenlet==3.1.1
+sqlalchemy[asyncio]==2.0.52
+asyncpg==0.31.0
+psycopg2-binary==2.9.12
+alembic==1.19.1
+greenlet==3.5.5
 
 # Redis / Celery
 redis==5.2.1
-celery[redis]==5.4.0
+celery[redis]==5.6.3
 
 # Rate limiting (Sprint 1 of API-key audit).  slowapi is the de-facto
 # FastAPI rate-limit lib; `limits` is its storage backend layer.
 # Configured with Redis storage in apps/api/app/core/rate_limit.py so
 # all uvicorn workers share one bucket per principal — not separate
 # in-process buckets per worker.
-slowapi==0.1.9
+slowapi==0.1.10
 limits==3.13.0
 
 # Auth
-python-jose[cryptography]==3.4.0
+python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.1
 
 # Validation / Serialization
-pydantic==2.10.3
-pydantic-settings==2.7.0
-email-validator==2.2.0
+pydantic==2.13.4
+pydantic-settings==2.15.0
+email-validator==2.3.0
 
 # AI providers
 anthropic==0.42.0
 openai==1.58.1
-tiktoken==0.8.0
+tiktoken==0.14.0
 
 # Parsing
 defusedxml==0.7.1
-jsonschema==4.23.0
+jsonschema==4.26.0
 
 # Code analysis
-tree-sitter==0.23.2
-pygments==2.20.0
+tree-sitter==0.26.0
+pygments==2.21.0
 
 # Storage
-boto3==1.35.86
+boto3==1.43.77
 
 # File I/O
 aiofiles==24.1.0
 
 # Export formats
 openpyxl==3.1.5
-fpdf2==2.8.2
+fpdf2==2.8.8
 
 # Utilities
 httpx==0.28.1
-tenacity==9.0.0
+tenacity==9.1.4
 # Circuit breaker for outbound LLM calls (Sprint B-1). Wraps each
 # provider call so repeated 5xx/timeouts trip the breaker and the
 # batch fails fast instead of wedging on a stuck call. Replaces the
@@ -66,9 +66,9 @@ tenacity==9.0.0
 # latter's `call_async` actually requires Tornado, not asyncio.
 purgatory==3.0.1
 structlog==24.4.0
-python-dotenv==1.2.2
-pyyaml==6.0.2
-orjson==3.11.6
+python-dotenv==1.2.3
+pyyaml==6.0.3
+orjson==3.12.0
 
 # Git
 
@@ -89,8 +89,8 @@ google-re2>=1.1.20251105
 google-auth>=2.35.0
 
 # Testing
-pytest==9.0.3
+pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==6.0.0
 httpx==0.28.1
-factory-boy==3.3.1
+factory-boy==3.3.3

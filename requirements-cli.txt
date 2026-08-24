@@ -26,4 +26,4 @@ structlog==24.4.0
 
 # greenlet is observed in the CLI's runtime import closure; pin it so the lean
 # image matches the traced set rather than relying on transitive resolution.
-greenlet==3.1.1
+greenlet==3.5.5
