@@ -14,7 +14,7 @@ import { ExportDropdown } from "@/components/findings/ExportDropdown";
 // credential (vs. one row per location).  See IncidentsView for the
 // rotate-once-kill-many UX rationale.
 import { IncidentsView } from "@/components/incidents/IncidentsView";
-import { getFindings, getRepository, getFinding, triageFinding, getScanSources, bulkTriageFindings } from "@/lib/api";
+import { getFindings, getRepository, getFinding, triageFinding, getScanSources, bulkTriageFindings, getRepositories } from "@/lib/api";
 
 // Bulk-triage action vocabulary — must match the Findings drawer's
 // status dropdown AND the IncidentsView bulk bar so the user sees
@@ -183,6 +183,16 @@ function FindingsPageInner() {
   // Keeps the dropdown in sync with whatever the user has configured
   // in /sources without requiring a hard-coded provider list.
   const [availableSources, setAvailableSources] = useState<Array<{ id: string; name: string; source_type: string }>>([]);
+  // Repositories for the "Project" filter. The repository_id filter already
+  // existed but was only reachable by drilling in from a repository page —
+  // this makes it selectable from the findings list itself.
+  const [availableRepos, setAvailableRepos] = useState<Array<{ id: string; name: string }>>([]);
+  // Project picker is a typeahead, not a <select>: an enterprise tenant can
+  // have hundreds of repositories, well past the API's 200-row page cap, so
+  // matching happens server-side rather than over a pre-loaded list.
+  const [repoQuery, setRepoQuery] = useState("");
+  const [repoPickerOpen, setRepoPickerOpen] = useState(false);
+  const [repoLoading, setRepoLoading] = useState(false);
   // Default sort = classification-priority (Confirmed-TP -> Likely-TP ->
   // Needs-Review -> Likely-FP -> Confirmed-FP, then severity). No filter is
   // applied; the FP tiers just sort to the bottom so nothing is ever hidden.
@@ -376,6 +386,32 @@ function FindingsPageInner() {
   // Load connected sources for the Source filter dropdown.  Best-effort:
   // a fetch failure leaves the dropdown empty (the column degrades to
   // an "All sources" placeholder), never blocks the rest of the page.
+  useEffect(() => {
+    // Debounced server-side search — the list is matched by the API, so it
+    // works past the 200-row page cap. Fires once on mount with an empty
+    // query to populate the initial list.
+    const handle = setTimeout(async () => {
+      try {
+        setRepoLoading(true);
+        const params: Record<string, string | number> = { page_size: 50 };
+        if (repoQuery.trim()) params.search = repoQuery.trim();
+        const r = await getRepositories(params);
+        const list = r.data?.items || r.data || [];
+        setAvailableRepos(
+          (Array.isArray(list) ? list : [])
+            .map((x: any) => ({ id: x.id, name: x.name }))
+            .filter((x) => x.id && x.name)
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      } catch {
+        setAvailableRepos([]);
+      } finally {
+        setRepoLoading(false);
+      }
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [repoQuery]);
+
   useEffect(() => {
     getScanSources()
       .then((r) => {
@@ -622,7 +658,19 @@ function FindingsPageInner() {
   }, [selected.size]);
 
   // ── Filters ──
-  const clearRepoFilter = () => { setFilters((f) => ({ ...f, repository_id: "" })); setRepoName(null); window.history.replaceState(null, "", "/findings"); };
+  // Single place that applies a project selection: filter state, the name
+  // chip, pagination reset and the shareable URL move together. Both the
+  // picker and the chip's clear button go through it.
+  const applyRepoFilter = (id: string, name: string | null) => {
+    setFilters((f) => ({ ...f, repository_id: id }));
+    setRepoName(name);
+    setPage(1);
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("repository_id", id);
+    else url.searchParams.delete("repository_id");
+    window.history.replaceState(null, "", url.pathname + url.search);
+  };
+  const clearRepoFilter = () => applyRepoFilter("", null);
 
   const startIdx = (page - 1) * PAGE_SIZE + 1;
   const endIdx = Math.min(page * PAGE_SIZE, total);
@@ -902,13 +950,89 @@ function FindingsPageInner() {
             <option value="confirmed_false_positive">Confirmed False Positive</option>
             <option value="accepted_risk">Accepted Risk</option>
           </select>
+          {/* Project filter — scopes the list to one repository. Shares the
+               `repository_id` filter that drill-through from a repository
+               page already sets, so both entry points stay consistent. */}
+          {/* Project picker — looks and behaves like the other dropdowns
+               (same `select-dark` trigger, same chevron), but opens a panel
+               with a search field instead of a plain option list. A native
+               <select> is unusable once a tenant has more than a few dozen
+               repositories, and matching is done server-side so it works
+               past the API's page cap. Selection writes `repository_id`, so
+               this and drill-through from a repository page are
+               interchangeable. */}
+          <div
+            className="relative"
+            onBlur={(e) => {
+              // Close only when focus actually leaves the picker — moving
+              // between the trigger, the search box and an option all stay
+              // inside, so the panel must not collapse mid-interaction.
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) setRepoPickerOpen(false);
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => { setRepoPickerOpen((o) => !o); setRepoQuery(""); }}
+              className="select-dark w-44 text-left truncate"
+              title={repoName || "Filter by project / repository"}
+              aria-haspopup="listbox"
+              aria-expanded={repoPickerOpen}
+            >
+              <span className={repoName ? "" : "text-slate-500"}>{repoName || "All Projects"}</span>
+            </button>
+            {repoPickerOpen && (
+              <div className="absolute z-30 mt-1 w-64 rounded-lg border border-slate-700/60 bg-[#0e1228] shadow-xl overflow-hidden">
+                <div className="relative border-b border-slate-700/50">
+                  <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  <input
+                    type="text"
+                    autoFocus
+                    value={repoQuery}
+                    placeholder="Search projects…"
+                    onChange={(e) => setRepoQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Escape") setRepoPickerOpen(false); }}
+                    className="w-full bg-transparent pl-8 pr-3 py-2 text-xs text-slate-200 placeholder-slate-600 outline-none"
+                  />
+                </div>
+                <div className="max-h-64 overflow-auto py-1" role="listbox">
+                  <button
+                    onMouseDown={(e) => { e.preventDefault(); clearRepoFilter(); setRepoPickerOpen(false); }}
+                    className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-800/60 ${!filters.repository_id ? "text-red-400" : "text-slate-400"}`}
+                  >
+                    All Projects
+                  </button>
+                  {repoLoading && availableRepos.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-slate-600">Searching…</p>
+                  )}
+                  {!repoLoading && availableRepos.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-slate-600">No projects match</p>
+                  )}
+                  {availableRepos.map((x) => (
+                    <button
+                      key={x.id}
+                      role="option"
+                      aria-selected={filters.repository_id === x.id}
+                      onMouseDown={(e) => { e.preventDefault(); applyRepoFilter(x.id, x.name); setRepoPickerOpen(false); }}
+                      className={`w-full text-left px-3 py-2 text-xs truncate hover:bg-slate-800/60 ${filters.repository_id === x.id ? "text-red-400" : "text-slate-300"}`}
+                      title={x.name}
+                    >
+                      {x.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          {/* Single-option filters are hidden: a dropdown whose only choice
+               is "all" or one value cannot change the result set, so it is
+               chrome. Both this and the Project filter render only at >1. */}
           {/* Source filter — drills findings to a specific source instance
                (e.g. "Confluence" / "Notion" / "#engineering Slack channel").
                The previously-separate "All Providers" filter was removed
                2026-05-14: Source already covers the same axis (each source
                instance has exactly one detector family), and the duplication
                was padding the filter row without adding pivot value. */}
-          {availableSources.length > 0 && (
+          {availableSources.length > 1 && (
             <select value={filters.scan_source_id} onChange={(e) => { setFilters((f) => ({ ...f, scan_source_id: e.target.value })); setPage(1); }} className="select-dark" title="Filter by source">
               <option value="">All Sources</option>
               {availableSources.map((s) => (
@@ -920,7 +1044,7 @@ function FindingsPageInner() {
               so the dropdown auto-hides on tenants that don't use tags
               (industry pattern: Linear / Notion / Jira do this).  Nothing
               to change in this iteration. */}
-          {availableTags.length > 0 && (
+          {availableTags.length > 1 && (
             <select value={filters.tag} onChange={(e) => { setFilters((f) => ({ ...f, tag: e.target.value })); setPage(1); }} className="select-dark">
               <option value="">All Tags</option>
               {availableTags.map((t) => (

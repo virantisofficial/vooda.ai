@@ -2718,11 +2718,32 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             if created_count > 0:
                 try:
                     from apps.worker.tasks import send_notification
+                    _plural = "s" if created_count != 1 else ""
+                    _title = (
+                        f"PR #{pr_number}: {created_count} secret{_plural} detected"
+                        if pr_number
+                        else f"Push scan: {created_count} secret{_plural} detected"
+                    )
+                    # Keyword arguments deliberately: these were passed
+                    # positionally against an older signature, which shifted
+                    # every value by one — the task received a scan-job id as
+                    # its tenant, an event name as its severity, and the
+                    # message text as its event type. Nothing raised, because
+                    # a scan-job UUID parses fine and simply matches no
+                    # channels, so push and PR scans notified no one.
                     send_notification.delay(
-                        str(scan_job.id), str(repo.tenant_id), str(repo.id),
-                        "webhook_scan_complete",
-                        f"PR #{pr_number}: {created_count} secret{'s' if created_count != 1 else ''} detected" if pr_number
-                        else f"Push scan: {created_count} secret{'s' if created_count != 1 else ''} detected",
+                        tenant_id=str(repo.tenant_id),
+                        title=_title,
+                        body=(
+                            f"{created_count} secret{_plural} detected in {repo.name} "
+                            f"during a {'pull request' if pr_number else 'push'} scan."
+                        ),
+                        severity="critical",
+                        event_type="scan_complete",
+                        resource_type="repository",
+                        resource_id=str(repo.id),
+                        url=None,
+                        business_unit_id=str(repo.business_unit_id) if repo.business_unit_id else None,
                     )
                     logger.info("webhook_notification_dispatched", findings=created_count)
                 except Exception as notif_err:
@@ -5416,16 +5437,18 @@ async def _run_scan_job(scan_job_id: str):
                 high_count = severity_counts.get("high", 0)
                 notif_severity = "critical" if critical_count > 0 else "warning" if high_count > 0 else "info"
                 send_notification.delay(
-                    str(job.tenant_id),
-                    f"Scan complete: {repo.name}",
-                    f"Found {created_count} findings ({critical_count} critical, {high_count} high). "
-                    f"Policy: {'PASSED' if policy_passed else 'FAILED'}.",
-                    notif_severity,
-                    "scan_complete",
-                    "repository",
-                    str(repo.id),
-                    None,  # url
-                    str(repo.business_unit_id) if repo.business_unit_id else None,
+                    tenant_id=str(job.tenant_id),
+                    title=f"Scan complete: {repo.name}",
+                    body=(
+                        f"Found {created_count} findings ({critical_count} critical, {high_count} high). "
+                        f"Policy: {'PASSED' if policy_passed else 'FAILED'}."
+                    ),
+                    severity=notif_severity,
+                    event_type="scan_complete",
+                    resource_type="repository",
+                    resource_id=str(repo.id),
+                    url=None,
+                    business_unit_id=str(repo.business_unit_id) if repo.business_unit_id else None,
                 )
             except Exception:
                 pass  # Don't fail scan if notification fails
@@ -5502,15 +5525,15 @@ async def _run_scan_job(scan_job_id: str):
             # error mask the original scan failure we're about to re-raise.
             try:
                 send_notification.delay(
-                    str(job.tenant_id),
-                    f"Scan failed: {repo.name}",
-                    f"Scan of {repo.name} (branch {scan_branch}) failed: {detail[:500]}",
-                    "critical",
-                    "scan_failed",
-                    "repository",
-                    str(repo.id),
-                    None,  # url
-                    str(repo.business_unit_id) if repo.business_unit_id else None,
+                    tenant_id=str(job.tenant_id),
+                    title=f"Scan failed: {repo.name}",
+                    body=f"Scan of {repo.name} (branch {scan_branch}) failed: {detail[:500]}",
+                    severity="critical",
+                    event_type="scan_failed",
+                    resource_type="repository",
+                    resource_id=str(repo.id),
+                    url=None,
+                    business_unit_id=str(repo.business_unit_id) if repo.business_unit_id else None,
                 )
             except Exception:
                 pass
