@@ -130,9 +130,13 @@ AI triage sends your code context and candidate credential values to a model. Po
 | **Frontier API** | Anthropic, OpenAI or Google Gemini, called natively | Pay-as-you-go per token |
 | **Any OpenAI-compatible endpoint** | Azure OpenAI, AWS Bedrock, OpenRouter, your own gateway | Whatever that endpoint charges |
 
-New to BYOM? Mistral Small 24B is the local model we've evaluated most heavily, and where we'd start.
+### Choosing a model
 
-Frontier providers are set by environment variable:
+**The 24–32B class is where local triage becomes production-viable.** Models like Qwen 27B, Gemma 31B and Mistral Small 24B run on a single GPU, cost nothing per token, and keep your code inside your network — while still doing the job that matters: separating real leaked credentials from test fixtures, FP and placeholders.
+
+### Frontier providers
+
+Frontier models are supported too. Add them under **Integrations → AI providers** — pick Anthropic, OpenAI or Azure OpenAI and paste the API key. They can also be set by environment variable if you'd rather keep credentials out of the database:
 
 ```bash
 AI_PROVIDER=claude                       # claude | openai
@@ -140,13 +144,31 @@ ANTHROPIC_API_KEY=sk-ant-...
 AI_MODEL=claude-sonnet-4-20250514
 ```
 
-Local and OpenAI-compatible endpoints are configured in the UI, under **Integrations → AI providers** — set the endpoint URL and leave the API key blank. If Vooda runs in Compose and the model runs on your host, reach it as `http://host.docker.internal:11434`, not `localhost`.
+### Local and OpenAI-compatible endpoints
 
-For a genuinely air-gapped deployment, also switch off outbound credential verification — that's the other thing that talks to the internet:
+Configured in the UI, under **Integrations → AI providers** — set the endpoint URL and leave the API key blank.
+
+If Vooda runs in Compose and the model runs on your host, reach it as `http://host.docker.internal:11434`, not `localhost`. Inside a container, `localhost` is the container itself.
+
+Use **Test connection** after saving. It performs a real completion, so a green result means the model answered — not merely that the port is open.
+
+### Two settings worth checking
+
+**`max_tokens`** — set per model, and the default suits a model that answers directly. A model that emits reasoning tokens first can spend the whole budget thinking and get cut off mid-answer, which surfaces as findings stuck at *needs review* rather than as an error. If triage coverage is unexpectedly low, raise this to **2000+** before suspecting anything else.
+
+**Throughput** — under **AI Engine Settings**, `max_concurrent` and `rate_limit_rpm` are chosen by preset (Balanced is 300/min, 10 in flight). Local inference servers process one request at a time, so Vooda serialises for them automatically; the configured concurrency applies to hosted endpoints.
+
+Multiple providers can be active at once — one is primary, the rest are fallbacks if it fails or rate-limits.
+
+### Genuinely air-gapped
+
+With a local model, no code or credential value leaves your network. One more thing talks to the internet — outbound credential verification — so switch it off too:
 
 ```bash
 VERIFICATION_ENABLED=false   # scans still complete; findings stay not_validated
 ```
+
+Findings then carry `not_validated` instead of live/inactive. Detection and triage are unaffected; you lose only the "is this key still working?" signal, so triage priority rests on severity and AI confidence alone.
 
 ## Community vs Enterprise
 
