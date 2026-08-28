@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 import structlog
 
 from apps.api.app.core.database import get_db
@@ -263,6 +263,7 @@ async def receive_webhook(provider: str, request: Request, db: AsyncSession = De
 
     # Load webhook secret from DB (check all tenants — webhook URL doesn't carry tenant info)
     webhook_secret = None
+    webhook_disabled = False
     try:
         result = await db.execute(
             select(IntegrationConfig).where(
@@ -271,6 +272,23 @@ async def receive_webhook(provider: str, request: Request, db: AsyncSession = De
             ).limit(1)
         )
         cfg = result.scalar_one_or_none()
+        if cfg is None:
+            # Nothing ACTIVE for this provider. Both cases reject, but
+            # they need different advice: an operator told to set a secret
+            # they already set will go and set it again. Only report
+            # "disabled" when a secret really is present — if it is also
+            # missing, that is the thing to fix first.
+            from packages.common.encryption import decrypt_value as _dv
+            off = (await db.execute(
+                select(IntegrationConfig).where(
+                    IntegrationConfig.provider == f"webhook_{provider}",
+                    IntegrationConfig.is_active == False,  # noqa: E712
+                ).limit(1)
+            )).scalar_one_or_none()
+            if off is not None:
+                webhook_disabled = bool(
+                    _dv((off.config or {}).get("webhook_secret") or "")
+                )
         if cfg:
             from packages.common.encryption import decrypt_value, encrypt_config_dict
 
@@ -303,6 +321,16 @@ async def receive_webhook(provider: str, request: Request, db: AsyncSession = De
     # cannot check is a signature we must reject.
     verifier = VERIFIERS.get(provider)
     if not webhook_secret or not verifier:
+        if webhook_disabled:
+            # The secret may well be set — the integration is simply off.
+            logger.warning("webhook_rejected_disabled", provider=provider)
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    f"The {provider} webhook is disabled, so events are not "
+                    "processed. Enable it under Integrations → Webhooks."
+                ),
+            )
         logger.warning("webhook_rejected_no_secret", provider=provider)
         raise HTTPException(
             status_code=401,
