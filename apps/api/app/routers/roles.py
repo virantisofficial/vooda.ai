@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -67,7 +68,7 @@ BUILTIN_ROLES = [
 
 # ── Schemas ───────────────────────────────────────────
 
-class RoleCreate(BaseModel):
+class RoleCreate(StrictModel):
     name: str = Field(..., examples=["Security Reviewer"])
     # slug is the stable machine-readable identifier — name can be
     # renamed without breaking grants/integrations that reference the
@@ -99,7 +100,7 @@ class RoleCreate(BaseModel):
     }
 
 
-class RoleUpdate(BaseModel):
+class RoleUpdate(StrictModel):
     name: Optional[str] = None
     description: Optional[str] = None
     color: Optional[str] = None

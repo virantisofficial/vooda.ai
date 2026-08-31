@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -88,7 +89,7 @@ class SuppressionRuleResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class SuppressionRuleCreate(BaseModel):
+class SuppressionRuleCreate(StrictModel):
     # ``name`` is the human-readable label that appears in the audit
     # log + suppressions list view — NOT the secret value being matched.
     # Suppression criteria are the optional match fields below; a
@@ -167,7 +168,7 @@ class SuppressionRuleCreate(BaseModel):
     }
 
 
-class SuppressionRuleUpdate(BaseModel):
+class SuppressionRuleUpdate(StrictModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[bool] = None
