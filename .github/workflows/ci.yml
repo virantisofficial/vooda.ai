@@ -1,0 +1,131 @@
+# CI — run the test suite, typecheck and production build on every PR.
+#
+# Until now nothing ran the suite automatically: the only workflows were
+# a path-filtered verifier audit and a weekly cron, so a pull request
+# could change any behaviour in the scanner, the API or the dashboard
+# without a single check executing. Every merge relied on the author
+# having run the suite locally.
+#
+# The suite needs a real Postgres and Redis — a large share of the tests
+# exercise routers and adapters against the database rather than mocks,
+# which is why they catch things unit tests do not. Both run as service
+# containers here, migrated and seeded exactly as a fresh install would
+# be, so CI exercises the same path an operator gets.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+# A new push to the same PR makes the previous run irrelevant — cancel it
+# rather than paying for both.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vooda
+          POSTGRES_PASSWORD: vooda_ci_password
+          POSTGRES_DB: vooda
+        ports: ["5432:5432"]
+        # Without a health check the first migration can race the server's
+        # own startup and fail on a connection refused.
+        options: >-
+          --health-cmd "pg_isready -U vooda"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://vooda:vooda_ci_password@localhost:5432/vooda
+      DATABASE_URL_SYNC: postgresql://vooda:vooda_ci_password@localhost:5432/vooda
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      # CI-only value. Real deployments supply their own; this exists so
+      # token signing and config encryption have a key to work with.
+      SECRET_KEY: ci-only-not-a-real-secret-000000000000
+      ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run migrations
+        # From the repo root with an explicit -c: alembic.ini sets
+        # script_location to the root-relative `apps/api/alembic`, so
+        # running with `working-directory: apps/api` resolves it to
+        # apps/api/apps/api/alembic and fails.
+        run: alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Seed baseline data
+        # Several API tests provision a throwaway admin inside an existing
+        # tenant and SKIP when none exists. A skip is not a pass, so the
+        # seed runs to keep those tests actually executing.
+        env:
+          SEED_ADMIN_PASSWORD: ci-only-seed-password
+        run: python -m infra.scripts.seed
+
+      - name: Run test suite
+        # Run from the repo root: `apps.*`, `services.*` and `packages.*`
+        # are imported as top-level packages and resolve via cwd.
+        run: python -m pytest tests/ -q -p no:cacheprovider
+
+  frontend:
+    name: Frontend typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Production build
+        # The build catches what tsc does not: a bad import path, a server
+        # component using a client-only API, a page that fails to
+        # prerender.
+        run: npx next build
