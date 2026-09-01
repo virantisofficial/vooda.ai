@@ -47,6 +47,13 @@ class SuppressionRule(Base, UUIDMixin, TimestampMixin, TenantMixin):
 
     # State
     is_active = Column(Boolean, default=True, nullable=False, index=True)
+
+    # Review state for rules the learning engine PROPOSED rather than
+    # created outright. NULL means nobody proposed this — it is an
+    # ordinary rule. 'pending' rules are stored inactive and suppress
+    # nothing until approved; 'rejected' is remembered so learning does
+    # not re-propose the same pattern on the next scan.
+    review_status = Column(String(20), nullable=True)
     created_by = Column(String(100), default="system_learning")  # "system_learning" or user email
 
     # Stats

@@ -849,6 +849,25 @@ async def update_repository(
     repo = await _get_repo_with_access_check(repo_id, db, user)
 
     update_data = body.model_dump(exclude_unset=True)
+
+    # Scan Schedules is an Enterprise feature. It has no router of its
+    # own — it is a field on the repository — so the guard lives here
+    # rather than on a mount. Only a CHANGE is refused: an existing
+    # value can still be read and re-sent unchanged, so a tenant that
+    # downgrades keeps working instead of failing every repository save.
+    if "scan_schedule" in update_data:
+        from apps.api.app.core.edition import feature_enabled
+        _current = (repo.metadata_ or {}).get("scan_schedule")
+        if not feature_enabled("schedules") and update_data["scan_schedule"] != _current:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    "Scan Schedules is available in Vooda Enterprise. "
+                    "Scans can still be run on demand, from the CLI, or "
+                    "from CI. See https://vooda.ai/"
+                ),
+            )
+
     # Store scan config in metadata
     config_fields = {"scan_schedule", "scan_paths", "exclude_patterns", "team_owner"}
     meta_updates = {k: v for k, v in update_data.items() if k in config_fields}

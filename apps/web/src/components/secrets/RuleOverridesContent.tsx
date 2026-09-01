@@ -34,6 +34,7 @@ import {
   getRepositories,
   getRuleOverrideStats,
   getRuleOverrides,
+  getScanSources,
   updateRuleOverride,
 } from "@/lib/api";
 import { Repository } from "@/types";
@@ -56,6 +57,9 @@ interface RuleOverride {
   created_by: string | null;
   created_by_email: string | null;
   is_active: boolean;
+  // Snooze-until; null mutes until turned off. An expired row is
+  // kept for audit but no longer enforced by scans.
+  expires_at: string | null;
   times_blocked: number;
   created_at: string;
   updated_at: string;
@@ -119,6 +123,7 @@ export function RuleOverridesContent({
   const [rules, setRules] = useState<RuleOverride[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
+  const [sources, setSources] = useState<{ id: string; name: string; source_type?: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,6 +140,7 @@ export function RuleOverridesContent({
   const [formRepoId, setFormRepoId] = useState<string>("");
   const [formSourceId, setFormSourceId] = useState<string>("");
   const [formReason, setFormReason] = useState("");
+  const [formExpiry, setFormExpiry] = useState<string>("");   // datetime-local value
   const [formError, setFormError] = useState<string | null>(null);
 
   // Rule picker typeahead
@@ -158,10 +164,15 @@ export function RuleOverridesContent({
       // Only load the repo list for the picker if we're in the full-page
       // admin view (no pre-applied filter).  Embedded mode never needs it.
       const needRepoList = !repositoryFilter && !sourceFilter;
-      const [rRules, rStats, rRepos] = await Promise.all([
+      const [rRules, rStats, rRepos, rSources] = await Promise.all([
         getRuleOverrides(params),
         getRuleOverrideStats(),
         needRepoList ? getRepositories() : Promise.resolve(null),
+        // Sources join the admin picker so a per-source mute no longer
+        // requires a detour through the source's detail drawer — the
+        // scope FILTER already offered "Per-source", so creation should
+        // be able to say it too.
+        needRepoList ? getScanSources().catch(() => null) : Promise.resolve(null),
       ]);
       setRules(rRules.data || []);
       setStats(rStats.data || null);
@@ -171,6 +182,12 @@ export function RuleOverridesContent({
           Array.isArray(data)
             ? data
             : data?.items || data?.repositories || [],
+        );
+      }
+      if (rSources) {
+        const sdata = rSources.data;
+        setSources(
+          Array.isArray(sdata) ? sdata : sdata?.items || sdata?.sources || [],
         );
       }
     } catch (e: any) {
@@ -252,6 +269,7 @@ export function RuleOverridesContent({
     setFormRepoId(repositoryFilter?.id || "");
     setFormSourceId(sourceFilter?.id || "");
     setFormReason("");
+    setFormExpiry("");
     setFormError(null);
     setPickerQuery("");
     setEditingId(null);
@@ -268,6 +286,7 @@ export function RuleOverridesContent({
     setFormRepoId(r.repository_id || "");
     setFormSourceId(r.scan_source_id || "");
     setFormReason(r.reason || "");
+    setFormExpiry(r.expires_at ? new Date(r.expires_at).toISOString().slice(0, 16) : "");
     setFormError(null);
     setShowCreate(true);
   };
@@ -289,7 +308,10 @@ export function RuleOverridesContent({
         // Only `reason` and `is_active` are editable for an existing
         // override — rule_id + scope are immutable to keep the audit
         // log on a single row.
-        await updateRuleOverride(editingId, { reason });
+        await updateRuleOverride(editingId, {
+          reason,
+          expires_at: formExpiry ? new Date(formExpiry).toISOString() : null,
+        });
       } else {
         // Scope is determined by which target id (if any) is set.
         // The Pydantic model_validator on the API side rejects the
@@ -307,6 +329,9 @@ export function RuleOverridesContent({
           scan_source_id: formSourceId || null,
           mode: "disabled",
           reason,
+          // datetime-local has no zone; toISOString pins it to the
+          // user's local wall clock converted to UTC.
+          expires_at: formExpiry ? new Date(formExpiry).toISOString() : null,
         });
       }
       setShowCreate(false);
@@ -510,20 +535,32 @@ export function RuleOverridesContent({
                     source picker isn't exposed here yet — admins reach
                     per-source overrides from the source detail drawer). */
                 <select
-                  value={formRepoId}
+                  value={formSourceId ? `src:${formSourceId}` : formRepoId ? `repo:${formRepoId}` : ""}
                   onChange={(e) => {
-                    setFormRepoId(e.target.value);
-                    // Repos and sources are mutually exclusive; clear
-                    // the other.
-                    if (e.target.value) setFormSourceId("");
+                    // One select covers all three scopes; the prefix
+                    // keeps repo/source mutually exclusive by
+                    // construction instead of by clearing the other.
+                    const v = e.target.value;
+                    if (v.startsWith("repo:")) {
+                      setFormRepoId(v.slice(5)); setFormSourceId("");
+                    } else if (v.startsWith("src:")) {
+                      setFormSourceId(v.slice(4)); setFormRepoId("");
+                    } else {
+                      setFormRepoId(""); setFormSourceId("");
+                    }
                   }}
                   disabled={!!editingId}
                   className="input-dark w-full"
                 >
                   <option value="">Org-wide (every scan target)</option>
                   {repos.map((r) => (
-                    <option key={r.id} value={r.id}>
+                    <option key={r.id} value={`repo:${r.id}`}>
                       Repository: {r.name}
+                    </option>
+                  ))}
+                  {sources.map((sc) => (
+                    <option key={sc.id} value={`src:${sc.id}`}>
+                      Source: {sc.name}
                     </option>
                   ))}
                 </select>
@@ -543,6 +580,21 @@ export function RuleOverridesContent({
                 className="input-dark w-full h-20 resize-none"
                 placeholder="Why is this rule muted?  Visible in the audit log."
               />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">
+                Expires <span className="text-slate-600">(optional)</span>
+              </label>
+              <input
+                type="datetime-local"
+                value={formExpiry}
+                onChange={(e) => setFormExpiry(e.target.value)}
+                className="input-dark w-full"
+              />
+              <p className="text-[10px] text-slate-500 mt-1">
+                After this, the mute lifts on its own and findings resurface at the
+                next scan. Leave empty to mute until someone turns it off.
+              </p>
             </div>
           </div>
 
@@ -687,13 +739,24 @@ export function RuleOverridesContent({
                       <button
                         onClick={() => handleToggle(r)}
                         className={`text-[10px] px-2.5 py-1 rounded cursor-pointer ${
-                          r.is_active
-                            ? "bg-green-500/15 text-green-400 hover:bg-green-500/25"
-                            : "bg-slate-500/10 text-slate-500 hover:bg-slate-500/20"
+                          !r.is_active
+                            ? "bg-slate-500/10 text-slate-500 hover:bg-slate-500/20"
+                            : r.expires_at && new Date(r.expires_at) <= new Date()
+                              ? "bg-amber-500/15 text-amber-400 hover:bg-amber-500/25"
+                              : "bg-green-500/15 text-green-400 hover:bg-green-500/25"
                         }`}
                       >
-                        {r.is_active ? "Active" : "Disabled"}
+                        {r.is_active
+                          ? (r.expires_at && new Date(r.expires_at) <= new Date()
+                              ? "Expired"
+                              : "Active")
+                          : "Disabled"}
                       </button>
+                      {r.is_active && r.expires_at && new Date(r.expires_at) > new Date() && (
+                        <div className="text-[9px] text-amber-400/80 mt-0.5">
+                          until {new Date(r.expires_at).toLocaleDateString()}
+                        </div>
+                      )}
                     </td>
                     <td className="py-2.5 px-3">
                       <div className="flex gap-2">

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # which is called from the API lifespan and the worker bootstrap —
     # the check deliberately lives there rather than in a validator so
     # that importing the settings never explodes.
+    # Edition — "community" (default) or "enterprise". Gates the feature
+    # set listed in apps/api/app/core/edition.py. Config, not a key
+    # server: a scanner sold on "nothing leaves your network" must not
+    # phone home to ask whether it may run.
+    EDITION: str = "community"
+
     SECRET_KEY: str = "change-me-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALGORITHM: str = "HS256"

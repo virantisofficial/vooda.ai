@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +57,7 @@ async def load_active_rule_ids(
     tenant_id: UUID,
     repository_id: UUID | None = None,
     scan_source_id: UUID | None = None,
+    scan_job=None,
 ) -> set[str]:
     """Return the set of scanner_rule_ids the scanner should drop for
     this scan target — both target-scoped AND org-wide overrides.
@@ -97,6 +98,14 @@ async def load_active_rule_ids(
             select(RuleOverride.scanner_rule_id).where(
                 RuleOverride.tenant_id == tenant_id,
                 RuleOverride.is_active == True,
+                # A dated mute stops enforcing the moment its expiry
+                # passes — no cron, no state flip: the next scan simply
+                # sees the rule again and the findings resurface. NULL
+                # (no expiry) keeps meaning "until someone turns it off".
+                or_(
+                    RuleOverride.expires_at.is_(None),
+                    RuleOverride.expires_at > func.now(),
+                ),
                 or_(*scope_clauses),
             )
         )
@@ -111,13 +120,28 @@ async def load_active_rule_ids(
             )
         return rule_ids
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
+        # Fail-open stays the right call — a missed override is a noisy
+        # finding an admin can clean up, a killed scan loses signal —
+        # but silently-open is not: this scan just ran WITHOUT the mutes
+        # the admin configured, and nothing in the product said so. So
+        # the failure is stamped onto the scan job's stats where the
+        # scan card can show it, and logged at error so ops can alert
+        # on the event name.
+        logger.error(
             "rule_overrides.load_failed",
             tenant_id=str(tenant_id),
             repository_id=str(repository_id) if repository_id else None,
             scan_source_id=str(scan_source_id) if scan_source_id else None,
             error=str(exc),
         )
+        if scan_job is not None:
+            try:
+                scan_job.stats = {
+                    **(scan_job.stats or {}),
+                    "rule_overrides_load_failed": True,
+                }
+            except Exception:  # noqa: BLE001
+                pass  # observability must never out-fail the fail-open
         return set()
 
 
@@ -139,12 +163,11 @@ async def record_blocks(
 
     Notes
     -----
-    * We update target-scoped AND org-wide rows for each rule_id
-      because either may have been the matching override that caused
-      the skip.  In the (rare) case both exist for the same rule, both
-      increment, which slightly over-counts.  Acceptable trade-off:
-      we'd otherwise need to track which specific override row matched
-      per finding, which would push state into the hot loop.
+    * When a target-scoped and an org-wide override both cover the
+      same rule, the SCOPED one owns the count — precedence, resolved
+      here with one extra SELECT rather than by threading per-finding
+      attribution through the hot loop. Both incrementing (the old
+      behaviour) made the Findings Blocked tile over-count.
     * No-op when blocked_counts is empty so the common case (no
       overrides hit) doesn't issue a single UPDATE.
     """
@@ -167,17 +190,46 @@ async def record_blocks(
         scope_clauses.append(RuleOverride.scan_source_id == scan_source_id)
 
     try:
+        # One SELECT for all fired rules, then attribute each rule's
+        # count to the MOST SPECIFIC live override: target-scoped over
+        # org-wide. When both exist, precedence says the scoped one is
+        # the rule doing the muting, so it alone owns the number —
+        # incrementing both made "Findings Blocked" over-count, and a
+        # tile that over-counts trains people to distrust every number
+        # next to it. Expired rows can no longer have caused a skip, so
+        # they are excluded the same way the loader excludes them.
+        rows = (await db.execute(
+            select(
+                RuleOverride.id,
+                RuleOverride.scanner_rule_id,
+                RuleOverride.repository_id,
+                RuleOverride.scan_source_id,
+            ).where(
+                RuleOverride.tenant_id == tenant_id,
+                RuleOverride.scanner_rule_id.in_(
+                    [r for r, c in blocked_counts.items() if c > 0]
+                ),
+                RuleOverride.is_active == True,
+                or_(
+                    RuleOverride.expires_at.is_(None),
+                    RuleOverride.expires_at > func.now(),
+                ),
+                or_(*scope_clauses),
+            )
+        )).all()
+
+        owner_for: dict[str, "UUID"] = {}
+        for oid, rule_id, repo_id, src_id in rows:
+            is_scoped = repo_id is not None or src_id is not None
+            if rule_id not in owner_for or is_scoped:
+                owner_for[rule_id] = oid
+
         for rule_id, count in blocked_counts.items():
-            if count <= 0:
+            if count <= 0 or rule_id not in owner_for:
                 continue
             await db.execute(
                 update(RuleOverride)
-                .where(
-                    RuleOverride.tenant_id == tenant_id,
-                    RuleOverride.scanner_rule_id == rule_id,
-                    RuleOverride.is_active == True,
-                    or_(*scope_clauses),
-                )
+                .where(RuleOverride.id == owner_for[rule_id])
                 .values(times_blocked=RuleOverride.times_blocked + count)
             )
         logger.info(

@@ -188,6 +188,14 @@ class NormalizedFinding(Base, UUIDMixin, TimestampMixin, TenantMixin):
 
     # Status
     review_status = Column(SAEnum(ReviewStatus), default=ReviewStatus.UNREVIEWED, nullable=False, index=True)
+
+    # How the current classification was established: mechanism, actor,
+    # and the originating decision. Required whenever `classification`
+    # is a CONFIRMED_* value, because that word asserts somebody decided
+    # — a session guard refuses the write otherwise. NULL on anything
+    # weaker, and on rows that predate the column.
+    # See apps/api/app/core/classification_provenance.py
+    classification_provenance = Column(JSONB, nullable=True)
     remediation_status = Column(SAEnum(RemediationStatus), default=RemediationStatus.NONE, nullable=False, index=True)
     is_suppressed = Column(Boolean, default=False)
     suppression_reason = Column(String(255), nullable=True)
@@ -411,3 +419,8 @@ class SecretIncident(Base, UUIDMixin, TimestampMixin, TenantMixin):
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+# Importing the models is enough to arm the provenance guard; nothing
+# can reach a session without going through here first.
+from apps.api.app.core import classification_provenance as _cp  # noqa: E402,F401

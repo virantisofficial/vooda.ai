@@ -41,6 +41,10 @@ class CacheResult:
         self.compensating_controls: list = []
         self.ai_evidence_refs: list = []
         self.decided_by: Optional[str] = None
+        # Who made the ORIGINAL decision. A replay of a human's
+        # verdict has to carry their id forward, or the copy claims
+        # a confirmation with nobody's name on it.
+        self.decided_by_user_id = None
         self.invalidated: bool = False  # True if code changed
         self.invalidation_reason: Optional[str] = None
 
@@ -85,6 +89,7 @@ async def lookup_cache(
             result.compensating_controls = cached.compensating_controls or []
             result.ai_evidence_refs = cached.ai_evidence_refs or []
             result.decided_by = cached.decided_by
+            result.decided_by_user_id = cached.decided_by_user_id
 
             # Update hit count
             cached.hit_count = (cached.hit_count or 0) + 1

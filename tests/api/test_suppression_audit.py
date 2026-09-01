@@ -43,6 +43,9 @@ class _FakeSuppressionRule:
         self.vulnerability_category = kw.get("vulnerability_category")
         self.cwe = kw.get("cwe")
         self.file_path_pattern = kw.get("file_path_pattern")
+        # Mirrors the model: NULL on an ordinary rule, "pending"
+        # while a learning proposal awaits review.
+        self.review_status = kw.get("review_status")
         self.evidence_count = kw.get("evidence_count", 0)
         self.evidence_repo_count = kw.get("evidence_repo_count", 0)
         self.confidence = kw.get("confidence", 0.85)
@@ -120,6 +123,11 @@ async def test_create_suppression_emits_audit(fake_user, captured_audits, mock_l
     db = MagicMock()
     db.add = lambda x: added.append(x)
     db.flush = AsyncMock()
+    # The admin gate SELECTs the user's role row before anything else;
+    # a truthy scalar means "is an admin", which this test's actor is.
+    _role_row = MagicMock()
+    _role_row.scalar_one_or_none = MagicMock(return_value=object())
+    db.execute = AsyncMock(return_value=_role_row)
 
     async def _refresh(obj):
         # Populate the row id + created_at like a real flush would
@@ -280,11 +288,12 @@ async def test_learning_with_no_new_rules_skips_audit(captured_audits, mock_log_
     from apps.api.app.routers import suppressions as suppressions_mod
     from apps.api.app.routers.suppressions import trigger_learning
 
-    # Mock learn_patterns to return an empty list
-    async def _no_patterns(*a, **k):
-        return []
+    # Learning now goes through one writer, which reports what it made:
+    # rules from confirmed decisions, proposals from AI triage.
+    async def _nothing_new(*a, **k):
+        return {"created_active": 0, "created_pending": 0}
     mod = MagicMock()
-    mod.learn_patterns = _no_patterns
+    mod.sync_learned_rules = _nothing_new
 
     db = MagicMock()
     db.execute = AsyncMock()
@@ -295,5 +304,34 @@ async def test_learning_with_no_new_rules_skips_audit(captured_audits, mock_log_
          patch.object(suppressions_mod, "log_audit", side_effect=mock_log_audit):
         result = await trigger_learning(db=db, user=fake_user)
 
-    assert result == {"patterns_found": 0, "rules_created": 0}
+    assert result == {"rules_created": 0, "proposals_created": 0}
     assert len(captured_audits) == 0, "no-op learning runs must not audit"
+
+
+async def test_learning_audits_rules_and_proposals_separately(
+    captured_audits, mock_log_audit, fake_user,
+):
+    """A proposal is not a suppression. An auditor reading "learning
+    created 6 rules" must not be counting 6 things that suppress nothing
+    and are still waiting on a human."""
+    from apps.api.app.routers import suppressions as suppressions_mod
+    from apps.api.app.routers.suppressions import trigger_learning
+
+    async def _some(*a, **k):
+        return {"created_active": 2, "created_pending": 4}
+    mod = MagicMock()
+    mod.sync_learned_rules = _some
+
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.flush = AsyncMock()
+
+    with patch.dict("sys.modules", {"services.learning.pattern_learner": mod}), \
+         patch.object(suppressions_mod, "log_audit", side_effect=mock_log_audit):
+        result = await trigger_learning(db=db, user=fake_user)
+
+    assert result == {"rules_created": 2, "proposals_created": 4}
+    assert len(captured_audits) == 1
+    md = captured_audits[0]["metadata"]
+    assert md["rules_created"] == 2
+    assert md["proposals_created"] == 4

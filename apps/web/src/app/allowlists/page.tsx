@@ -22,13 +22,14 @@ export default function AllowlistPage() {
   const [entries, setEntries] = useState<AllowlistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ pattern: "", match_type: "exact", scope: "global", description: "" });
 
   const fetchEntries = useCallback(async () => {
     try {
       setLoading(true);
       // Allowlists are stored as suppression rules with type=ALLOWLIST
-      const res = await getSuppressionRules({ type: "ALLOWLIST" });
+      const res = await getSuppressionRules({ suppression_type: "manual" });
       const data = res.data?.rules || res.data || [];
       setEntries(data.map((r: any) => ({
         id: r.id,
@@ -49,16 +50,27 @@ export default function AllowlistPage() {
 
   const handleCreate = async () => {
     try {
+      // Field names must match SuppressionRuleCreate: `name` is required
+      // and `suppression_type` is the field — an earlier version sent
+      // `type` with no name, so every save was rejected 422 and the only
+      // sign was a console line the user never sees.
       await createSuppressionRule({
-        type: "ALLOWLIST",
+        name: form.description || `Allowlist: ${form.pattern}`,
+        description: form.description || "Allowlisted pattern",
+        suppression_type: "manual",
         scanner_rule_id: form.match_type === "exact" ? form.pattern : null,
         file_path_pattern: form.match_type === "glob" ? form.pattern : null,
-        vulnerability_category: form.description || "Allowlisted pattern",
       });
       setShowCreate(false);
       setForm({ pattern: "", match_type: "exact", scope: "global", description: "" });
       fetchEntries();
-    } catch (e) { console.error(e); }
+    } catch (e: any) {
+      // Surface it. A silent console.error meant a rejected save looked
+      // identical to a successful one that simply showed nothing.
+      setError(e?.response?.data?.detail
+        ? String(e.response.data.detail)
+        : "Could not save this allowlist entry.");
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -104,7 +116,12 @@ export default function AllowlistPage() {
             mobile stacks vertically, desktop fills 3 columns. Each
             field carries a one-line hint mirroring the integrations
             page polish standard. */}
-        {showCreate && (
+        {error && (
+        <div className="card border-red-500/30 bg-red-500/5">
+          <p className="text-xs text-red-400">{error}</p>
+        </div>
+      )}
+      {showCreate && (
           <div className="card border-red-500/20">
             <h3 className="text-sm font-semibold text-white mb-4">New Allowlist Entry</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

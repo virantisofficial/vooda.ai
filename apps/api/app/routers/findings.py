@@ -12,6 +12,11 @@ from sqlalchemy import select, func, or_
 from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
 from apps.api.app.models.user import User
+from apps.api.app.core.classification_provenance import (
+    MECHANISM_BULK_TRIAGE,
+    MECHANISM_HUMAN_TRIAGE,
+    set_classification,
+)
 from apps.api.app.models.finding import (
     NormalizedFinding,
     FindingEvidence,
@@ -499,7 +504,15 @@ async def triage_finding(
     db.add(decision)
 
     if new_class:
-        finding.classification = new_class
+        # The decision row created above IS the provenance; recording it
+        # on the finding means a confirmed verdict can be attributed
+        # without joining, and lets the guard verify the write.
+        set_classification(
+            finding, new_class,
+            mechanism=MECHANISM_HUMAN_TRIAGE,
+            actor=user.id,
+            decision_id=decision.id,
+        )
     finding.review_status = ReviewStatus.REVIEWED
 
     # ── Case-B: cascade triage UP to the parent incident ──
@@ -713,7 +726,11 @@ async def bulk_triage_findings(
             comment=body.comment,
         ))
 
-        f.classification = new_class
+        set_classification(
+            f, new_class,
+            mechanism=MECHANISM_BULK_TRIAGE,
+            actor=user.id,
+        )
         f.review_status = ReviewStatus.REVIEWED
         updated += 1
 

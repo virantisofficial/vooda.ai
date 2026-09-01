@@ -136,6 +136,7 @@ async def _to_response(
         created_by=rule.created_by,
         created_by_email=actor_email,
         is_active=rule.is_active,
+        expires_at=rule.expires_at,
         times_blocked=rule.times_blocked,
         created_at=rule.created_at,
         updated_at=rule.updated_at,
@@ -315,6 +316,12 @@ async def rule_override_stats(
         select(func.count(RuleOverride.id)).where(
             RuleOverride.tenant_id == user.tenant_id,
             RuleOverride.is_active == True,
+            # An expired mute is not enforcing anything: counting it as
+            # Active would make the tile disagree with what scans do.
+            or_(
+                RuleOverride.expires_at.is_(None),
+                RuleOverride.expires_at > func.now(),
+            ),
         )
     )
     total_inactive_row = await db.execute(
@@ -330,6 +337,12 @@ async def rule_override_stats(
         select(func.count(RuleOverride.id)).where(
             RuleOverride.tenant_id == user.tenant_id,
             RuleOverride.is_active == True,
+            # An expired mute is not enforcing anything: counting it as
+            # Active would make the tile disagree with what scans do.
+            or_(
+                RuleOverride.expires_at.is_(None),
+                RuleOverride.expires_at > func.now(),
+            ),
             RuleOverride.repository_id.is_(None),
             RuleOverride.scan_source_id.is_(None),
         )
@@ -338,6 +351,12 @@ async def rule_override_stats(
         select(func.count(RuleOverride.id)).where(
             RuleOverride.tenant_id == user.tenant_id,
             RuleOverride.is_active == True,
+            # An expired mute is not enforcing anything: counting it as
+            # Active would make the tile disagree with what scans do.
+            or_(
+                RuleOverride.expires_at.is_(None),
+                RuleOverride.expires_at > func.now(),
+            ),
             RuleOverride.repository_id.isnot(None),
         )
     )
@@ -345,6 +364,12 @@ async def rule_override_stats(
         select(func.count(RuleOverride.id)).where(
             RuleOverride.tenant_id == user.tenant_id,
             RuleOverride.is_active == True,
+            # An expired mute is not enforcing anything: counting it as
+            # Active would make the tile disagree with what scans do.
+            or_(
+                RuleOverride.expires_at.is_(None),
+                RuleOverride.expires_at > func.now(),
+            ),
             RuleOverride.scan_source_id.isnot(None),
         )
     )
@@ -352,6 +377,12 @@ async def rule_override_stats(
         select(func.coalesce(func.sum(RuleOverride.times_blocked), 0)).where(
             RuleOverride.tenant_id == user.tenant_id,
             RuleOverride.is_active == True,
+            # An expired mute is not enforcing anything: counting it as
+            # Active would make the tile disagree with what scans do.
+            or_(
+                RuleOverride.expires_at.is_(None),
+                RuleOverride.expires_at > func.now(),
+            ),
         )
     )
 
@@ -514,6 +545,7 @@ async def create_rule_override(
         scan_source_id=body.scan_source_id,
         mode=body.mode,
         reason=body.reason,
+        expires_at=body.expires_at,
         created_by=user.id,
         is_active=True,
         times_blocked=0,
@@ -541,6 +573,7 @@ async def create_rule_override(
             "repository_id": str(rule.repository_id) if rule.repository_id else None,
             "scan_source_id": str(rule.scan_source_id) if rule.scan_source_id else None,
             "mode": rule.mode,
+            "expires_at": rule.expires_at.isoformat() if rule.expires_at else None,
         },
     )
 
