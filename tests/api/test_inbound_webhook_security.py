@@ -15,10 +15,20 @@ import json
 import pytest
 
 
-async def _set_secret(client, jwt, provider, secret):
+async def _set_secret(client, jwt, provider, secret, enable=None):
+    """Set the signing secret, and enable the webhook when one is given.
+
+    The receiver only loads secrets from ACTIVE configs — a disabled
+    webhook is not processed at all — so a test that sets a secret
+    without enabling is not exercising signature verification.
+    """
+    body = {"secret": secret}
+    if enable is None:
+        enable = bool(secret)
+    body["enabled"] = enable
     return await client.put(
         f"/api/v1/webhooks/{provider}/config",
-        json={"secret": secret},
+        json=body,
         headers={"Authorization": f"Bearer {jwt}"},
     )
 
@@ -175,3 +185,34 @@ async def test_posting_the_mask_back_does_not_overwrite_the_secret(client, admin
         ).scalar_one()
     cfg = cfg if isinstance(cfg, dict) else _json.loads(cfg)
     assert decrypt_value(cfg["webhook_secret"]) == "realsecret123"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_disabled_webhook_says_disabled_not_missing_secret(client, admin_jwt):
+    """A configured-but-switched-off webhook must say so.
+
+    The receiver only reads secrets from ACTIVE configs, so a disabled
+    webhook with a perfectly good secret was reported as having none —
+    sending the operator to set a secret that was already set, which
+    changes nothing and leaves the webhook still disabled.
+    """
+    h = {"Authorization": f"Bearer {admin_jwt}"}
+    # Configure and enable, then switch off while keeping the secret.
+    await _set_secret(client, admin_jwt, "github", "still-configured")
+    r = await client.put(
+        "/api/v1/webhooks/github/config", json={"enabled": False}, headers=h
+    )
+    assert r.status_code < 400, r.text
+
+    r = await client.post(
+        "/api/v1/webhooks/github",
+        content=b'{"ref":"refs/heads/main","repository":{"full_name":"x/y"}}',
+        headers={**h, "X-GitHub-Event": "push", "Content-Type": "application/json"},
+    )
+    assert r.status_code == 401
+    text = r.text.lower()
+    assert "disabled" in text, f"expected a disabled diagnostic, got: {r.text}"
+    assert "no signing secret" not in text, (
+        "a secret IS configured — reporting it missing sends the operator "
+        "to fix the wrong thing"
+    )
