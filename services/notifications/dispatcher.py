@@ -61,6 +61,11 @@ def _is_retryable_error(error_text: Optional[str]) -> bool:
         "404", "not found", "no such",
         "400", "bad request", "malformed", "invalid payload",
         "unsupported", "unknown channel",
+        # Malformed destination — the config is wrong, not the network,
+        # so every retry fails identically. Dead-letter instead of
+        # burning the retry budget.
+        "invalid port", "invalid url", "no host", "missing url", "no url",
+        "invalid ipv6", "unsupported protocol", "relative url",
     )
     if any(m in err for m in permanent_markers):
         return False
@@ -578,38 +583,73 @@ class NotificationDispatcher:
 
     async def _send_webhook(self, config: dict, payload: NotificationPayload) -> DispatchResult:
         """Send notification via generic webhook (POST JSON)."""
+        import hashlib
+        import hmac
+        import json
+
         import httpx
 
         url = config.get("url") or config.get("endpoint_url")
         if not url:
             return DispatchResult(channel="webhook", success=False, error="No URL")
 
+        # Build the body ONCE and send exactly these bytes. The signature
+        # used to be computed over `payload.__dict__` while a separately
+        # constructed dict was posted — different keys, different ordering,
+        # so the digest never matched the delivered body and any receiver
+        # verifying it rejected every notification.
+        body = {
+            "title": payload.title,
+            "body": payload.body,
+            "severity": payload.severity,
+            "event_type": payload.event_type,
+            "resource_type": payload.resource_type,
+            "resource_id": payload.resource_id,
+            "url": payload.url,
+            "business_unit_id": payload.business_unit_id,
+            "repository_id": payload.repository_id,
+            "metadata": payload.metadata,
+            "source": "vooda_ai",
+        }
+        raw = json.dumps(body, default=str).encode()
+
         headers = {"Content-Type": "application/json", "User-Agent": "Vooda-Webhook/1.0"}
+        # Operator-supplied headers, applied first so the values below always
+        # win — a custom header must never be able to overwrite the signature
+        # or replace the content type. Accepts a JSON object (what the UI
+        # field collects) or an already-parsed dict.
+        extra = config.get("headers")
+        if extra:
+            if isinstance(extra, str):
+                try:
+                    extra = json.loads(extra)
+                except ValueError:
+                    extra = None
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if isinstance(k, str) and k.strip():
+                        headers[k.strip()] = str(v)
+        headers["Content-Type"] = "application/json"
+        headers["User-Agent"] = "Vooda-Webhook/1.0"
+
         if config.get("auth_header"):
             headers["Authorization"] = config["auth_header"]
         if config.get("secret"):
-            # Sign payload with HMAC
-            import hmac, hashlib, json
-            body_str = json.dumps(payload.__dict__, default=str)
-            sig = hmac.new(config["secret"].encode(), body_str.encode(), hashlib.sha256).hexdigest()
-            headers["X-Vooda-Signature"] = sig
+            # `sha256=` prefix matches the ticketing webhook and the common
+            # GitHub/Stripe convention, so one verification routine works
+            # against every webhook Vooda sends.
+            sig = hmac.new(config["secret"].encode(), raw, hashlib.sha256).hexdigest()
+            headers["X-Vooda-Signature"] = "sha256=" + sig
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(url, json={
-                    "title": payload.title,
-                    "body": payload.body,
-                    "severity": payload.severity,
-                    "event_type": payload.event_type,
-                    "resource_type": payload.resource_type,
-                    "resource_id": payload.resource_id,
-                    "url": payload.url,
-                    "business_unit_id": payload.business_unit_id,
-                    "repository_id": payload.repository_id,
-                    "metadata": payload.metadata,
-                    "source": "vooda_ai",
-                }, headers=headers)
-                return DispatchResult(channel="webhook", success=200 <= r.status_code < 300)
+                r = await client.post(url, content=raw, headers=headers)
+                if 200 <= r.status_code < 300:
+                    return DispatchResult(channel="webhook", success=True)
+                return DispatchResult(
+                    channel="webhook", success=False,
+                    error=f"Webhook returned {r.status_code}",
+                )
         except Exception as e:
             return DispatchResult(channel="webhook", success=False, error=str(e)[:200])
 
