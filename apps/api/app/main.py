@@ -17,6 +17,7 @@ from apps.api.app.core.security import require_scope
 # supply_chain, policy_dsl, federation, migrations, quantum, universal_governance)
 # removed 2026-05-16 — those product surfaces belong to dedicated specialists.
 # Vooda focuses on best-in-class secret scanning.
+from apps.api.app.core.edition import ENTERPRISE_FEATURES, is_enterprise, require_enterprise
 from apps.api.app.routers import auth, repositories, scan_jobs, findings, metrics, audit, integrations, integrations_oauth, ai_models, users, roles, suppressions, sso, api_keys, reports, ws, saved_views, access, notification_rules, webhooks, push_protection, custom_detectors, scan_sources, rotation_events, incidents, rule_overrides, scanner_rules_public, imports
 from packages.common.logging_config import configure_logging
 
@@ -141,6 +142,21 @@ app.add_middleware(
 #
 # /auth and /ws are intentionally scope-free: auth IS the bootstrap, and
 # WebSocket auth flows via a separate token-on-connect path.
+@app.get("/api/v1/edition", tags=["edition"])
+async def get_edition():
+    """Which edition is running, and what it gates.
+
+    Unauthenticated on purpose: the UI needs it to render the settings
+    grid before any tile is clicked, and it reveals nothing beyond what
+    the licence already states publicly.
+    """
+    return {
+        "edition": "enterprise" if is_enterprise() else "community",
+        "enterprise_features": ENTERPRISE_FEATURES,
+        "gated": [] if is_enterprise() else sorted(ENTERPRISE_FEATURES),
+    }
+
+
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(
     repositories.router, prefix="/api/v1/repositories", tags=["repositories"],
@@ -231,7 +247,7 @@ app.include_router(
 )
 app.include_router(
     access.router, prefix="/api/v1/access", tags=["access-control"],
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(require_scope("admin")), Depends(require_enterprise("access_control"))],
 )
 app.include_router(
     notification_rules.router, prefix="/api/v1/notifications", tags=["notifications"],
@@ -262,7 +278,7 @@ app.include_router(
 # edition. The router and its services remain in-tree but unreachable.
 app.include_router(
     custom_detectors.router, prefix="/api/v1/custom-detectors", tags=["custom-detectors"],
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(require_scope("admin")), Depends(require_enterprise("custom_detectors"))],
 )
 app.include_router(
     scan_sources.router, prefix="/api/v1/scan-sources", tags=["scan-sources"],

@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -30,7 +31,7 @@ async def _require_org_admin(db: AsyncSession, user) -> None:
 
 # ── Schemas ───────────────────────────────────────────
 
-class BUCreate(BaseModel):
+class BUCreate(StrictModel):
     name: str
     description: Optional[str] = None
     parent_id: Optional[UUID] = None
@@ -48,7 +49,7 @@ class BUResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class AccessGrantCreate(BaseModel):
+class AccessGrantCreate(StrictModel):
     user_id: UUID
     access_level: str  # "organization", "business_unit", "project"
     business_unit_id: Optional[UUID] = None

@@ -15,6 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -33,7 +34,7 @@ REGEX_TIMEOUT_SECONDS = 2.0
 
 # ── Schemas ───────────────────────────────────────────────
 
-class CustomDetectorCreate(BaseModel):
+class CustomDetectorCreate(StrictModel):
     # Stable identifier — appears in audit rows + finding.scanner_rule_id
     # so changing it would orphan historical findings.  Kebab-case
     # recommended (mirrors the built-in 925-rule catalog convention).
@@ -86,7 +87,7 @@ class CustomDetectorCreate(BaseModel):
     }
 
 
-class CustomDetectorUpdate(BaseModel):
+class CustomDetectorUpdate(StrictModel):
     title: Optional[str] = None
     secret_type: Optional[str] = None
     severity: Optional[str] = None

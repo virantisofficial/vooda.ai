@@ -37,6 +37,9 @@ export const login = (email: string, password: string) =>
 
 export const getMe = () => api.get("/auth/me");
 
+// Which edition is running, and which settings tiles it gates.
+export const getEdition = () => api.get("/edition");
+
 // Repositories
 export const getRepositories = (params?: Record<string, string | number>) =>
   api.get("/repositories", { params });
@@ -324,6 +327,11 @@ export const updateSuppressionRule = (id: string, data: object) => api.put(`/sup
 export const deleteSuppressionRule = (id: string) => api.delete(`/suppressions/${id}`);
 export const getSuppressionStats = () => api.get("/suppressions/stats");
 export const triggerLearning = () => api.post("/suppressions/learn");
+// Dry-run: how many current findings these criteria would suppress.
+export const previewSuppressionRule = (criteria: object) => api.post("/suppressions/preview", criteria);
+// Approve or reject a rule the learning engine proposed from AI triage.
+export const reviewSuppressionProposal = (id: string, decision: "approve" | "reject") =>
+  api.post(`/suppressions/${id}/review?decision=${decision}`);
 // getCalibrationStats removed — it called GET /ai-models/calibration,
 // which no endpoint has ever served. Nothing imported it, so it was a
 // 404 waiting for whoever wired it up first.
@@ -342,11 +350,13 @@ export const createRuleOverride = (data: {
   scan_source_id?: string | null;
   mode?: string;
   reason: string;
+  expires_at?: string | null;
 }) => api.post("/rule-overrides", data);
 export const updateRuleOverride = (id: string, data: {
   mode?: string;
   reason?: string;
   is_active?: boolean;
+  expires_at?: string | null;
 }) => api.patch(`/rule-overrides/${id}`, data);
 export const deleteRuleOverride = (id: string) => api.delete(`/rule-overrides/${id}`);
 

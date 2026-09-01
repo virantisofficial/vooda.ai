@@ -17,7 +17,7 @@ Mixing the schemas would push every API client into a defensive
 union type.  Cleaner to keep them apart.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -57,6 +57,7 @@ class RuleOverrideResponse(BaseModel):
     # ON DELETE SET NULL).
     created_by_email: Optional[str] = None
     is_active: bool
+    expires_at: Optional[datetime] = None
     times_blocked: int
     created_at: datetime
     updated_at: datetime
@@ -83,7 +84,10 @@ class RuleOverrideCreate(BaseModel):
     # log identically to how the scanner reports a rule hit.
     scanner_rule_id: str = Field(
         ..., min_length=1, max_length=255,
-        examples=["aws-access-key-id", "stripe-secret-key", "acme-internal-token-v1"],
+        # Branded form — what normalized_findings.scanner_rule_id holds
+        # and what the worker's override lookup compares against. Raw
+        # VOODA-SEC-* ids are accepted too (create normalises them).
+        examples=["AWS-001", "JWT-001", "HUGGINGFACE-WRITE-001"],
         description="Built-in or custom rule id. GET /rule-overrides/available-rules for the catalog.",
     )
     repository_id: Optional[UUID] = Field(
@@ -95,17 +99,35 @@ class RuleOverrideCreate(BaseModel):
     )
     mode: str = Field(
         default="disabled", max_length=20,
-        examples=["disabled", "monitor_only"],
+        # Only "disabled" exists; the validator rejects anything else.
+        # An example advertising an unimplemented mode teaches a value
+        # that 422s when copied.
+        examples=["disabled"],
     )
     reason: str = Field(
         ..., min_length=1, max_length=2000,
         examples=["AWS demo credentials in /examples — internal docs only."],
     )
+    expires_at: Optional[datetime] = Field(
+        None,
+        description=(
+            "Optional snooze-until. After this instant the override stops "
+            "being enforced and findings resurface at the next scan — no "
+            "cron, nothing to turn back on. NULL mutes until turned off."
+        ),
+        examples=["2026-12-01T00:00:00Z"],
+    )
 
+    # extra="forbid": scope here is decided by which OPTIONAL field is
+    # set, so a misspelled target field would not be a harmless typo —
+    # it would silently change what the override means (a repo-scoped
+    # mute becoming org-wide). Only our own UI posts here, so
+    # strictness costs nothing.
     model_config = {
+        "extra": "forbid",
         "json_schema_extra": {
             "examples": [{
-                "scanner_rule_id": "aws-access-key-id",
+                "scanner_rule_id": "AWS-001",
                 "mode": "disabled",
                 "reason": "AWS demo credentials in /examples; not real keys.",
             }],
@@ -139,6 +161,20 @@ class RuleOverrideCreate(BaseModel):
             raise ValueError(f"mode must be one of {sorted(allowed)}; got {v!r}")
         return v
 
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_in_future(cls, v: Optional[datetime]) -> Optional[datetime]:
+        """An already-past expiry creates an override that was never in
+        force — almost certainly a timezone slip on the client, and
+        better refused than silently inert."""
+        if v is None:
+            return v
+        now = datetime.now(timezone.utc)
+        ref = v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        if ref <= now:
+            raise ValueError("expires_at is in the past — the override would never be enforced")
+        return v
+
     @model_validator(mode="after")
     def _validate_scope_xor(self) -> "RuleOverrideCreate":
         # Mirrors the DB CHECK constraint ck_rule_overrides_scope_xor.
@@ -161,6 +197,28 @@ class RuleOverrideUpdate(BaseModel):
     mode: Optional[str] = Field(default=None, max_length=20)
     reason: Optional[str] = Field(default=None, max_length=2000)
     is_active: Optional[bool] = None
+    # Explicit null clears the expiry (mute until turned off again);
+    # omitting the field leaves it unchanged — exclude_unset in the
+    # router tells the two apart.
+    expires_at: Optional[datetime] = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_in_future(cls, v: Optional[datetime]) -> Optional[datetime]:
+        # Same guard as create. Null is legal here (clears the expiry);
+        # a past instant is not — it would flip the row to inert while
+        # the list still shows it Active.
+        if v is None:
+            return v
+        now = datetime.now(timezone.utc)
+        ref = v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        if ref <= now:
+            raise ValueError("expires_at is in the past — clear it with null or pick a future date")
+        return v
+
+    # Same reasoning as RuleOverrideCreate: a misspelled `is_active`
+    # would silently no-op a PATCH that meant to disable a mute.
+    model_config = {"extra": "forbid"}
 
     @field_validator("reason")
     @classmethod

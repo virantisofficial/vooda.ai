@@ -150,7 +150,7 @@ VERIFICATION_ENABLED=false   # scans still complete; findings stay not_validated
 
 ## Community vs Enterprise
 
-**The whole scan engine is in this repository.** The full detection engine, every detector module, verification, and AI triage — no `ee/` directory, no crippled code. What you self-host is a real, production-grade secret scanner: **free for non-commercial use**, and available to businesses under a commercial licence.
+**The whole scan engine is in this repository.** The full detection engine, every detector module, verification, and AI triage — no `ee/` directory, nothing held back from the scanner itself. Suppressions and rule overrides come with it, because living with a false positive is part of running a scanner, not an upgrade. What Enterprise adds is organisational scale: multi-team scoping, compliance tooling, org-specific detectors and scheduling. What you self-host is a real, production-grade secret scanner: **free for non-commercial use**, and available to businesses under a commercial licence.
 
 Both editions are self-hosted — you run Vooda on your own infrastructure either way. **Enterprise** is the same software under a commercial licence, with more: the complete set of source connectors, secret-manager coverage with rotation write-back, fresh signatures the day they ship, and a support line with an SLA.
 
@@ -163,6 +163,12 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 | Local-model triage ($0 AI cost) | ✅ | ✅ |
 | CLI, pre-commit, CI gates | ✅ | ✅ |
 | Compliance reporting | ✅ | ✅ |
+| Suppressions & rule overrides | ✅ | ✅ |
+| Multi-team scoping — business units, per-user access grants | — | ✅ |
+| Audit log — view & search | ✅ | ✅ |
+| Audit export & retention enforcement | — | ✅ |
+| Org-specific custom detectors | — | ✅ |
+| Scheduled scans | on demand, CLI, CI & webhooks | ✅ adds scheduling |
 | Secret-manager coverage & rotation write-back — Vault, AWS, Azure, GCP, CyberArk | — | ✅ |
 | **Detection & signature updates** | published here **monthly** (~30 days behind) | **continuous** — new detectors the day they ship |
 | Hosting | ✅ self-hosted (on-prem) | ✅ self-hosted (on-prem) |

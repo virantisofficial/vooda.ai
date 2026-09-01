@@ -4,6 +4,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from apps.api.app.schemas.strict import StrictModel
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,7 +17,7 @@ from apps.api.app.models.saved_view import SavedView
 router = APIRouter()
 
 
-class SavedViewCreate(BaseModel):
+class SavedViewCreate(StrictModel):
     name: str
     filters: dict
     view_type: str = "findings"

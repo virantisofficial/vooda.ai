@@ -1561,7 +1561,7 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
         )
         from packages.common.scanner_branding import brand_rule_id as _brand_rule_id
         src_muted_rule_ids: set[str] = await _load_src_overrides(
-            db, job.tenant_id, scan_source_id=source.id,
+            db, job.tenant_id, scan_source_id=source.id, scan_job=job,
         )
         src_block_counts = _new_src_block_counter()
 
@@ -2152,6 +2152,23 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
                 db, job.tenant_id, src_block_counts, scan_source_id=source.id,
             )
 
+            # Suppression rules — same reactive pass the repository scan
+            # runs. Applied in every scan path or a rule an operator wrote
+            # would silence findings from Git and quietly miss the same
+            # secret arriving through source_scan.
+            try:
+                from services.suppressions.engine import apply_suppression_rules
+                _sup_rows = (await db.execute(
+                    select(NormalizedFinding).where(
+                        NormalizedFinding.scan_job_id == job.id
+                    )
+                )).scalars().all()
+                _sup_n = await apply_suppression_rules(db, job.tenant_id, _sup_rows)
+                if _sup_n:
+                    logger.info("suppression_rules_applied", suppressed=_sup_n, path="source_scan")
+            except Exception as _se:
+                logger.warning("suppression_rules_failed", path="source_scan", error=str(_se)[:200])
+
             # findings_count = distinct findings (by stability_id)
             # ever seen on this source. Each scan creates new
             # NormalizedFinding rows, so naive COUNT(*) inflates the
@@ -2454,7 +2471,7 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                 record_blocks as _record_wh_blocks,
             )
             wh_muted_rule_ids: set[str] = await _load_wh_overrides(
-                db, repo.tenant_id, repo.id,
+                db, repo.tenant_id, repo.id, scan_job=job,
             )
             wh_block_counts = _new_wh_block_counter()
 
@@ -2653,6 +2670,23 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             # before the commit because record_blocks() is itself
             # transaction-aware and only issues UPDATEs.
             await _record_wh_blocks(db, repo.tenant_id, wh_block_counts, repository_id=repo.id)
+
+            # Suppression rules — same reactive pass the repository scan
+            # runs. Applied in every scan path or a rule an operator wrote
+            # would silence findings from Git and quietly miss the same
+            # secret arriving through webhook_scan.
+            try:
+                from services.suppressions.engine import apply_suppression_rules
+                _sup_rows = (await db.execute(
+                    select(NormalizedFinding).where(
+                        NormalizedFinding.scan_job_id == scan_job.id
+                    )
+                )).scalars().all()
+                _sup_n = await apply_suppression_rules(db, repo.tenant_id, _sup_rows)
+                if _sup_n:
+                    logger.info("suppression_rules_applied", suppressed=_sup_n, path="webhook_scan")
+            except Exception as _se:
+                logger.warning("suppression_rules_failed", path="webhook_scan", error=str(_se)[:200])
 
             await db.commit()
 
@@ -4245,7 +4279,7 @@ async def _run_scan_job(scan_job_id: str):
                 record_blocks,
             )
             muted_rule_ids: set[str] = await load_active_rule_ids(
-                db, job.tenant_id, repo.id,
+                db, job.tenant_id, repo.id, scan_job=job,
             )
             block_counts = new_block_counter()
 
@@ -4714,14 +4748,43 @@ async def _run_scan_job(scan_job_id: str):
             # ── Step 4b: Apply org-wide learned suppressions ──────
             if created_count > 0:
                 try:
-                    from services.learning.pattern_learner import apply_learned_suppressions
+                    # Derive learned rules from this tenant's evidence, then
+                    # let the normal engine apply them. Learning used to
+                    # suppress findings inline instead: no rule row, so the
+                    # suppression was invisible in the UI, missing from the
+                    # audit trail, and could only be undone finding by
+                    # finding. Rules derived from AI triage land as pending
+                    # proposals and suppress nothing until approved.
+                    from services.learning.pattern_learner import sync_learned_rules
                     new_findings_result = await db.execute(
                         select(NormalizedFinding).where(NormalizedFinding.scan_job_id == job.id)
                     )
                     new_findings = new_findings_result.scalars().all()
-                    suppressed = await apply_learned_suppressions(db, job.tenant_id, new_findings)
-                    if suppressed > 0:
-                        logger.info("org_learning_applied", suppressed=suppressed, scan_job_id=scan_job_id)
+                    synced = await sync_learned_rules(db, job.tenant_id)
+                    suppressed = 0
+                    if synced["created_active"] or synced["created_pending"]:
+                        logger.info(
+                            "learned_rules_synced",
+                            active=synced["created_active"],
+                            pending=synced["created_pending"],
+                            scan_job_id=scan_job_id,
+                        )
+
+                    # Admin-authored suppression rules, applied after the
+                    # learned ones so a hand-written rule can still claim a
+                    # finding learning did not. Reactive by design: the
+                    # finding stays stored and auditable, it just leaves the
+                    # working queue. Rule OVERRIDES are the pre-persist gate.
+                    from services.suppressions.engine import apply_suppression_rules
+                    rule_suppressed = await apply_suppression_rules(
+                        db, job.tenant_id, new_findings,
+                    )
+                    if rule_suppressed > 0:
+                        logger.info(
+                            "suppression_rules_applied",
+                            suppressed=rule_suppressed, scan_job_id=scan_job_id,
+                        )
+                    if suppressed > 0 or rule_suppressed > 0:
                         await db.commit()
                 except Exception as le:
                     logger.warning("org_learning_failed", error=str(le)[:200])
@@ -4910,9 +4973,41 @@ async def _run_scan_job(scan_job_id: str):
                                 "accepted_risk": Classification.ACCEPTED_RISK,
                                 "needs_review": Classification.NEEDS_REVIEW,
                             }
-                            f.classification = classification_map.get(
+                            _cached_class = classification_map.get(
                                 cache_result.classification, Classification.NEEDS_REVIEW
                             )
+                            # A replay copies someone else's verdict onto a
+                            # new finding. When that verdict is a CONFIRMED_*
+                            # one it has to carry the ORIGINAL decider, or
+                            # this finding asserts a confirmation with no
+                            # name behind it. If the cache cannot say who
+                            # decided, the claim is downgraded rather than
+                            # asserted on their behalf.
+                            from apps.api.app.core.classification_provenance import (
+                                MECHANISM_CACHE_REPLAY,
+                                requires_provenance,
+                                set_classification,
+                            )
+                            _decider = getattr(cache_result, "decided_by_user_id", None)
+                            if requires_provenance(_cached_class) and not _decider:
+                                logger.warning(
+                                    "cached_confirmation_without_decider",
+                                    stability_id=sid,
+                                    classification=cache_result.classification,
+                                )
+                                _cached_class = (
+                                    Classification.LIKELY_FALSE_POSITIVE
+                                    if "false" in str(cache_result.classification)
+                                    else Classification.LIKELY_TRUE_POSITIVE
+                                )
+                                f.classification = _cached_class
+                            else:
+                                set_classification(
+                                    f, _cached_class,
+                                    mechanism=MECHANISM_CACHE_REPLAY,
+                                    actor=_decider,
+                                    note=f"replayed {cache_result.hit_type} cache hit",
+                                )
                             # G1b — a cached triage result may predate the
                             # scrub (or come from another finding's run), so
                             # mask secret shapes in its free text on apply too.

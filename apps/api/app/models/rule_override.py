@@ -21,7 +21,7 @@ engine emits values like ``VOODA-SEC-AWS-001``, ``VOODA-SEC-CONFIG-ASSIGN``,
 because future detector packs will introduce new prefixes.
 """
 
-from sqlalchemy import Column, String, Integer, Boolean, Text, ForeignKey
+from sqlalchemy import Column, String, Integer, Boolean, Text, ForeignKey, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 
 from apps.api.app.core.database import Base
@@ -78,6 +78,13 @@ class RuleOverride(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # Soft-disable instead of hard-delete so re-enabling a rule keeps
     # the audit history visible.
     is_active = Column(Boolean, default=True, nullable=False)
+
+    # Optional snooze-until. NULL = mute until someone turns it off.
+    # Enforcement is purely read-side: the worker's loader skips rows
+    # whose expiry has passed, so findings resurface at the next scan
+    # with no cron and no state flip. The row survives its own expiry
+    # for the audit trail, and re-dating it re-arms the mute.
+    expires_at = Column(DateTime(timezone=True), nullable=True)
 
     # Incremented by the worker every time this override short-circuits
     # a would-be finding.  Drives the "doing-work" stat in the admin UI

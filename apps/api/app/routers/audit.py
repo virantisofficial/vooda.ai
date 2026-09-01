@@ -5,6 +5,7 @@ from typing import Optional
 import io
 import csv
 
+from apps.api.app.core.edition import require_enterprise
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,7 +93,13 @@ async def list_audit_events(
     ]
 
 
-@router.get("/export")
+# Export and retention are the compliance-tooling half of this router and
+# are gated; reading the log is not. The dashboard's activity feed reads
+# it, so gating the whole router would empty a panel that has nothing to
+# do with compliance — and an operator who cannot see their own audit
+# trail cannot answer "what happened?", which is not a feature, it is the
+# point of having a log.
+@router.get("/export", dependencies=[Depends(require_enterprise("audit_export"))])
 async def export_audit_csv(
     action: Optional[str] = Query(None),
     resource_type: Optional[str] = Query(None),
@@ -148,7 +155,7 @@ async def export_audit_csv(
     )
 
 
-@router.post("/enforce-retention")
+@router.post("/enforce-retention", dependencies=[Depends(require_enterprise("audit_export"))])
 async def enforce_retention(
     retention_days: int = Query(..., ge=1, description="Delete events older than N days"),
     db: AsyncSession = Depends(get_db),

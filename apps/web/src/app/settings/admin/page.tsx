@@ -23,6 +23,7 @@ import { RuleOverridesContent } from "@/components/secrets/RuleOverridesContent"
 // the org's security/compliance owner, not a per-scanner
 // configurator.  See AuditLogStreaming.tsx header for the move
 // rationale.
+import { getEdition } from "@/lib/api";
 import { AuditLogStreaming } from "@/components/secrets/AuditLogStreaming";
 
 // ── Tab types ────────────────────────────────────────
@@ -3351,6 +3352,19 @@ function AdminSettingsContent() {
     window.history.replaceState(null, "", `/settings/admin?tab=${key}`);
   };
 
+  // Edition gating — the API is the source of truth for which tiles are
+  // Enterprise-only, so the badge and the endpoint's refusal can never
+  // disagree. Defaults to "nothing gated" if the call fails: a UI that
+  // greys tiles because a request errored is worse than one that lets
+  // the click through and surfaces the API's own message.
+  const [gatedFeatures, setGatedFeatures] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setGatedFeatures(r.data?.gated || []))
+      .catch(() => setGatedFeatures([]));
+  }, []);
+  const isGated = (key: string) => gatedFeatures.includes(key);
+
   const activeTabInfo = TABS.find((t) => t.key === activeTab);
 
   // Single-source breadcrumb — passed to AppShell so it renders in
@@ -3376,29 +3390,42 @@ function AdminSettingsContent() {
             <p className="text-sm text-slate-400 mb-6">Platform configuration and administration</p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-              {TABS.filter((t) => t.key !== "organization").map((tab) => (
+              {TABS.filter((t) => t.key !== "organization").map((tab) => {
+                const gated = isGated(tab.key);
+                return (
                 <button
                   key={tab.key}
-                  onClick={() => openSection(tab.key)}
-                  className="card card-hover group text-left p-5 pb-10 relative overflow-hidden min-h-[140px] flex flex-col"
+                  onClick={() => { if (!gated) openSection(tab.key); }}
+                  disabled={gated}
+                  aria-disabled={gated}
+                  title={gated ? `${tab.label} is available in Vooda Enterprise` : undefined}
+                  className={`card group text-left p-5 pb-10 relative overflow-hidden min-h-[140px] flex flex-col ${gated ? "opacity-60 cursor-not-allowed" : "card-hover"}`}
                 >
                   {/* Gradient accent bar at top */}
-                  <div className={`absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${tab.color} opacity-0 group-hover:opacity-100 transition-opacity`} />
+                  {!gated && <div className={`absolute top-0 left-0 right-0 h-1 bg-gradient-to-r ${tab.color} opacity-0 group-hover:opacity-100 transition-opacity`} />}
 
-                  <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${tab.color} flex items-center justify-center mb-3 opacity-90 group-hover:opacity-100 transition-opacity text-white shrink-0`}>
+                  <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${gated ? "from-slate-600 to-slate-700" : tab.color} flex items-center justify-center mb-3 opacity-90 group-hover:opacity-100 transition-opacity text-white shrink-0`}>
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       {tab.icon}
                     </svg>
                   </div>
-                  <h3 className="text-sm font-semibold text-slate-200 group-hover:text-white transition-colors">{tab.label}</h3>
+                  <h3 className={`text-sm font-semibold ${gated ? "text-slate-400" : "text-slate-200 group-hover:text-white"} transition-colors`}>{tab.label}</h3>
                   <p className="text-xs text-slate-500 mt-1 leading-relaxed line-clamp-2">{tab.description}</p>
 
-                  {/* Arrow */}
-                  <svg className="absolute bottom-4 right-4 w-4 h-4 text-slate-700 group-hover:text-slate-400 group-hover:translate-x-0.5 transition-all" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
+                  {gated ? (
+                    /* Badge replaces the arrow: the tile leads nowhere, so
+                       an arrow promising navigation would be a lie. */
+                    <span className="absolute bottom-3 right-3 text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                      Enterprise
+                    </span>
+                  ) : (
+                    <svg className="absolute bottom-4 right-4 w-4 h-4 text-slate-700 group-hover:text-slate-400 group-hover:translate-x-0.5 transition-all" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  )}
                 </button>
-              ))}
+                );
+              })}
             </div>
           </>
         )}

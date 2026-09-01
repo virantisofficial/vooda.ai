@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
 
@@ -23,7 +24,7 @@ router = APIRouter()
 
 # ── Schemas ───────────────────────────────────────────
 
-class AIModelCreate(BaseModel):
+class AIModelCreate(StrictModel):
     name: str
     provider: str
     model_id: str
@@ -43,7 +44,7 @@ class AIModelCreate(BaseModel):
     provider_config: dict = {}
 
 
-class AIModelUpdate(BaseModel):
+class AIModelUpdate(StrictModel):
     name: Optional[str] = None
     model_id: Optional[str] = None
     api_key: Optional[str] = None

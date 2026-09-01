@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
+from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
@@ -113,7 +114,7 @@ _KEY_NAME_MIN = 1
 _KEY_NAME_MAX = 255
 
 
-class APIKeyCreate(BaseModel):
+class APIKeyCreate(StrictModel):
     name: str = Field(min_length=_KEY_NAME_MIN, max_length=_KEY_NAME_MAX)
     scopes: list[str] = ["scan", "findings", "gate"]
     expires_in_days: Optional[int] = 365
@@ -124,7 +125,7 @@ class APIKeyCreate(BaseModel):
     allowed_ip_cidrs: Optional[list[str]] = None
 
 
-class APIKeyUpdate(BaseModel):
+class APIKeyUpdate(StrictModel):
     """PATCH body for editing a key in-place.  Scope changes are
     deliberately NOT supported here — changing a key's scope changes
     its blast radius and is better expressed by issuing a new key.
