@@ -539,7 +539,11 @@ async def _emit_triage_health_signal(
             await db.flush()
         return
 
-    failed = triaged - classified
+    # Same definition as the caller's rate: a failure is an AI call the
+    # engine recorded in `failure_summary`. `classified` stays in the
+    # notification metadata for context, but must not define failure —
+    # a verdict held for human review is triage working, not breaking.
+    failed = sum((failure_summary or {}).values()) or (triaged - classified)
     dominant_type, short_summary, full_body = _pick_failure_copy(failure_summary)
 
     # Compact one-liner for the provider-card badge (hovering shows this).
@@ -5125,8 +5129,18 @@ async def _run_scan_job(scan_job_id: str):
                     # one-size-fits-all "check stop_sequences" hint.
                     try:
                         classified = fp_count_after + tp_count_after
+                        # Failures are what the engine stamped `_parse_failure`
+                        # on — upstream error, truncated/invalid JSON, empty
+                        # response. Deriving the rate from `triaged - (FP+TP)`
+                        # counted every NEEDS_REVIEW outcome as a failure,
+                        # including verdicts deliberately held below the
+                        # tenant's confidence threshold and honest
+                        # needs_review verdicts — so one held verdict on a
+                        # one-finding scan lit the provider card up as 100%
+                        # broken with failure_type=unknown.
+                        failed_calls = sum((failure_summary or {}).values())
                         parse_failure_rate = (
-                            1.0 - (classified / triaged) if triaged > 0 else 0.0
+                            failed_calls / triaged if triaged > 0 else 0.0
                         )
                         await _emit_triage_health_signal(
                             db=db,
