@@ -7,7 +7,7 @@ python-multipart==0.0.32
 sqlalchemy[asyncio]==2.0.52
 asyncpg==0.31.0
 psycopg2-binary==2.9.12
-alembic==1.19.1
+alembic==1.19.2
 greenlet==3.5.5
 
 # Redis / Celery
@@ -46,7 +46,7 @@ tree-sitter==0.26.0
 pygments==2.21.0
 
 # Storage
-boto3==1.43.88
+boto3==1.43.89
 
 # File I/O
 aiofiles==24.1.0
