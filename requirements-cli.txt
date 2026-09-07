@@ -18,7 +18,7 @@
 # Secret-scanner regex engines: google-re2 is the ReDoS-immune fast path that
 # compiles ~92.6% of the rule pack; `regex` is the lookahead/large-repetition
 # fallback with a per-match timeout. Both are mandatory for the engine.
-regex>=2024.5.10
+regex>=2026.9.3
 google-re2>=1.1.20251105
 
 # Structured logging — the engine logs via structlog.get_logger().
