@@ -568,6 +568,22 @@ class NotificationDispatcher:
                 <p style="color: #666; font-size: 12px;">Vooda AI Security Engine</p>
             </div>
             """
+            # multipart/alternative promises the client a choice of
+            # renderings; shipping only text/html breaks text-only
+            # clients, strict corporate gateways, and screen-reader
+            # setups that prefer the plain part. Plain goes first —
+            # RFC 2046 orders alternatives from least to most preferred.
+            plain_lines = [
+                payload.title,
+                "",
+                payload.body or "",
+                f"Severity: {payload.severity.upper()}",
+                f"Event: {payload.event_type}",
+            ]
+            if payload.url:
+                plain_lines.append(f"View in Vooda AI: {payload.url}")
+            plain_lines += ["", "-- ", "Vooda AI Security Engine"]
+            msg.attach(MIMEText("\n".join(plain_lines), "plain"))
             msg.attach(MIMEText(html, "html"))
 
             with smtplib.SMTP(smtp_host, smtp_port) as server:

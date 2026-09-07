@@ -326,7 +326,6 @@ export const createSuppressionRule = (data: object) => api.post("/suppressions",
 export const updateSuppressionRule = (id: string, data: object) => api.put(`/suppressions/${id}`, data);
 export const deleteSuppressionRule = (id: string) => api.delete(`/suppressions/${id}`);
 export const getSuppressionStats = () => api.get("/suppressions/stats");
-export const triggerLearning = () => api.post("/suppressions/learn");
 // Dry-run: how many current findings these criteria would suppress.
 export const previewSuppressionRule = (criteria: object) => api.post("/suppressions/preview", criteria);
 // Approve or reject a rule the learning engine proposed from AI triage.
