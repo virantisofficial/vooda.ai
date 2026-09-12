@@ -713,11 +713,8 @@ export default function DashboardPage() {
           {/* Tile 5: Auto-Fix coverage / applied (Vooda differentiator) */}
           <div className="card p-4">
             <p className="text-[10px] text-cyan-400 uppercase tracking-wider font-medium">Auto-Fix</p>
-            {/* Lead with the count and its plain meaning — the two
-                percentages here previously needed a tooltip to decode.
-                "61 of 147 have a draft fix" is the sentence; the
-                coverage % is a trailing annotation, and "applied" is
-                the count that actually landed. */}
+            {/* Count first ("N of M have a draft fix"); coverage % is
+                a trailing annotation, "applied" is what landed. */}
             <div className="flex items-baseline gap-1.5 mt-1.5">
               <span className={`text-3xl font-bold ${remediationCovered > 0 ? "text-cyan-400" : "text-slate-500"}`}>{remediationCovered}</span>
               <span className="text-[11px] text-slate-500">of {total} have a draft fix</span>
@@ -963,13 +960,9 @@ export default function DashboardPage() {
                   ))}
                   {topProviders.length > 0 && (
                     <div className="col-span-2 pt-2 mt-1 border-t border-white/[0.04]">
-                      {/* These are secret TYPES (aws, ssh, postgres, …)
-                          across all open findings — not verification
-                          providers, and not scoped to the donut's
-                          verifier population above. Labelled as such so
-                          "Aws 46" doesn't read as "46 AWS secrets were
-                          verified" when only the donut count went to the
-                          verifier. */}
+                      {/* Secret types across all open findings — a
+                          different set from the verifier donut above,
+                          so labelled distinctly. */}
                       <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-1.5">Top Secret Types · All Findings</p>
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                         {topProviders.map(p => (

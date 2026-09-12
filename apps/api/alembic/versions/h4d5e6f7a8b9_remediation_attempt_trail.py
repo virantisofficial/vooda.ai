@@ -7,27 +7,11 @@ Revision ID: h4d5e6f7a8b9
 Revises: g3b4c5d6e7f9
 Create Date: 2026-09-12 10:00:00.000000
 
-Why
----
-A remediation attempt that failed left nothing behind: no status, no
-error, no retry — the plan row (when one existed at all) was
-indistinguishable from success, and the finding sat looking
-in-progress forever. 47 findings were in that state, silently, with
-no way for the UI or an operator to tell.
-
-Fix
----
-``status`` on the plan ('generating' → 'patched' | 'no_patch' |
-'failed') plus a nullable ``error``. A plan row now records the
-ATTEMPT, created before the model is called, so even a crash mid-call
-leaves a row that says so.
-
-Backfill is honest about what it cannot know: existing plans with a
-real patch become 'patched'; plans without one become 'no_patch' with
-an error noting that crash-vs-plan-only is indistinguishable for rows
-that predate the trail. Findings stuck at PENDING with no plan at all
-(queued attempts that bailed before recording anything) return to
-NONE so they read as "no fix exists" and become re-queueable.
+Adds ``status`` ('generating' -> 'patched' | 'no_patch' | 'failed')
+and a nullable ``error`` so a plan row records the attempt, not only a
+success. Backfill: plans with a real patch become 'patched', the rest
+'no_patch'; findings left PENDING with no plan return to NONE so they
+read as "no fix exists" and can be re-queued.
 """
 from alembic import op
 import sqlalchemy as sa
