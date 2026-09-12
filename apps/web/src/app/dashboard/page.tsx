@@ -963,7 +963,14 @@ export default function DashboardPage() {
                   ))}
                   {topProviders.length > 0 && (
                     <div className="col-span-2 pt-2 mt-1 border-t border-white/[0.04]">
-                      <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-1.5">Top Providers</p>
+                      {/* These are secret TYPES (aws, ssh, postgres, …)
+                          across all open findings — not verification
+                          providers, and not scoped to the donut's
+                          verifier population above. Labelled as such so
+                          "Aws 46" doesn't read as "46 AWS secrets were
+                          verified" when only the donut count went to the
+                          verifier. */}
+                      <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-1.5">Top Secret Types · All Findings</p>
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                         {topProviders.map(p => (
                           <div key={p.provider} className="flex items-center gap-2 text-[11px]">
