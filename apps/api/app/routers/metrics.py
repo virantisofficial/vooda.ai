@@ -782,7 +782,14 @@ async def finding_trends(
     ]
     prev_r = await db.execute(select(func.count(NormalizedFinding.id)).where(*prev_conditions))
     prev_count = prev_r.scalar() or 0
-    change_pct = round(((total_new - prev_count) / max(prev_count, 1)) * 100, 1)
+    # No baseline, no percentage. max(prev,1) used to fabricate e.g.
+    # "14700%" for a tenant whose scanning began inside the window,
+    # which the UI capped to a shouting "999%+" — while the KPI tiles
+    # one inch above honestly showed "—" for the same empty baseline.
+    change_pct = (
+        round(((total_new - prev_count) / prev_count) * 100, 1)
+        if prev_count > 0 else None
+    )
 
     return {
         "period_days": days,
@@ -792,7 +799,12 @@ async def finding_trends(
             "new_findings": total_new,
             "previous_period": prev_count,
             "change_pct": change_pct,
-            "trend": "increasing" if change_pct > 10 else "decreasing" if change_pct < -10 else "stable",
+            "trend": (
+                "no_baseline" if change_pct is None
+                else "increasing" if change_pct > 10
+                else "decreasing" if change_pct < -10
+                else "stable"
+            ),
         },
     }
 

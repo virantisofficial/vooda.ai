@@ -6875,11 +6875,35 @@ async def _generate_remediation(finding_id: str):
         if not finding:
             return
 
+        # The plan row is the ATTEMPT record, created before anything
+        # that can fail. Every exit below settles its status, so a
+        # failed attempt is queryable instead of invisible — previously
+        # a crash here left the finding claiming PENDING forever with
+        # nothing an operator could see or retry.
+        plan = RemediationPlan(
+            finding_id=finding.id,
+            generated_by=f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
+            vulnerability_summary="",
+            root_cause="",
+            fix_rationale="",
+            status="generating",
+        )
+        db.add(plan)
+        await db.commit()
+
+        async def _settle(status: str, error: str | None = None,
+                          finding_status: str = "none") -> None:
+            plan.status = status
+            plan.error = (error or "")[:2000] or None
+            finding.remediation_status = finding_status
+            await db.commit()
+
         # Get AI provider — DB model first, env vars fallback
         provider = await get_provider_for_task("remediation", str(finding.tenant_id), db=db)
         if not provider:
             if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
                 logger.warning("no_ai_key_for_remediation", finding_id=finding_id)
+                await _settle("failed", "no AI provider configured for remediation")
                 return
             provider = create_provider(
                 settings.AI_PROVIDER,
@@ -6896,7 +6920,14 @@ async def _generate_remediation(finding_id: str):
         snapshot = snap_result.scalar_one_or_none()
         repo_path = snapshot.storage_path if snapshot else ""
 
-        code_ctx = extract_rich_context(repo_path, finding.file_path, finding.line_start)
+        try:
+            code_ctx = extract_rich_context(repo_path, finding.file_path, finding.line_start)
+        except Exception as ctx_err:
+            # A context failure must settle the attempt too, or the plan
+            # sits at 'generating' forever — the exact stuck state this
+            # trail exists to prevent, one step earlier.
+            await _settle("failed", f"context extraction: {ctx_err}")
+            return
         code_ctx["vulnerable_code"] = code_ctx.get("code_snippet", "")
         code_ctx["available_imports"] = ""
 
@@ -6915,7 +6946,15 @@ async def _generate_remediation(finding_id: str):
         triage_result = {"reasoning_summary": finding.ai_explanation or ""}
         repo_ctx = {"framework_context": ""}
 
-        rem_result = await engine.generate_remediation(finding_data, triage_result, code_ctx, repo_ctx)
+        try:
+            rem_result = await engine.generate_remediation(finding_data, triage_result, code_ctx, repo_ctx)
+        except Exception as gen_err:
+            logger.warning(
+                "remediation_generation_failed",
+                finding_id=finding_id, error=str(gen_err)[:200],
+            )
+            await _settle("failed", str(gen_err))
+            return
 
         # G1b — the AI remediation result is free text that can echo the
         # secret: the summary/root-cause/fix-rationale/notes describe the
@@ -6923,18 +6962,13 @@ async def _generate_remediation(finding_id: str):
         # Scrub every string in the result before it's persisted + served.
         from services.secret_scan.engine import scrub_secrets_in_obj as _scrub_obj
         rem_result = _scrub_obj(rem_result)
-        plan = RemediationPlan(
-            finding_id=finding.id,
-            generated_by=f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
-            vulnerability_summary=rem_result.get("summary", ""),
-            root_cause=rem_result.get("root_cause", ""),
-            fix_rationale=rem_result.get("fix_rationale", ""),
-            developer_notes=rem_result.get("developer_notes", []),
-            validation_steps=rem_result.get("validation_steps", []),
-            risk_of_breakage=rem_result.get("risk_of_breakage", "unknown"),
-            confidence_score=rem_result.get("confidence_score"),
-        )
-        db.add(plan)
+        plan.vulnerability_summary = rem_result.get("summary", "")
+        plan.root_cause = rem_result.get("root_cause", "")
+        plan.fix_rationale = rem_result.get("fix_rationale", "")
+        plan.developer_notes = rem_result.get("developer_notes", [])
+        plan.validation_steps = rem_result.get("validation_steps", [])
+        plan.risk_of_breakage = rem_result.get("risk_of_breakage", "unknown")
+        plan.confidence_score = rem_result.get("confidence_score")
         await db.flush()
 
         # PATCH_GENERATED claims a draft fix exists, so it is only
@@ -6953,9 +6987,15 @@ async def _generate_remediation(finding_id: str):
                 safety_score=rem_result.get("safety_score"),
             )
             db.add(patch)
+            plan.status = "patched"
             finding.remediation_status = "patch_generated"
         else:
-            finding.remediation_status = "pending"
+            # NONE, not PENDING: "the model produced no fix" is a settled
+            # outcome, and NONE keeps the finding eligible for re-queue
+            # instead of looking forever in-progress.
+            plan.status = "no_patch"
+            plan.error = "model returned a plan but no patch diff"
+            finding.remediation_status = "none"
             logger.info(
                 "remediation_plan_only",
                 finding_id=str(finding.id),
@@ -6995,32 +7035,12 @@ async def _create_fix_pr(finding_id: str):
 #  BATCH REMEDIATION — fix multiple findings at once
 # ═══════════════════════════════════════════════════════════════════
 
-@celery_app.task(bind=True, max_retries=2)
-def batch_remediate(self, repository_id: str, finding_ids: list[str], tenant_id: str):
-    """Generate fixes for a batch of findings."""
-    logger.info("batch_remediation_started", repo_id=repository_id, count=len(finding_ids))
-    run_async(_batch_remediate(repository_id, finding_ids, tenant_id))
-
-
-async def _batch_remediate(repository_id: str, finding_ids: list[str], tenant_id: str):
-    from services.batch_remediation.engine import BatchRemediationEngine
-
-    async with await _get_db_session() as db:
-        engine = BatchRemediationEngine()
-        result = await engine.remediate_batch(
-            db=db,
-            repository_id=UUID(repository_id),
-            finding_ids=[UUID(fid) for fid in finding_ids],
-            tenant_id=UUID(tenant_id),
-        )
-        await db.commit()
-
-    logger.info(
-        "batch_remediation_done",
-        remediated=result.remediated,
-        failed=result.failed,
-        errors=len(result.errors),
-    )
+# NOTE: an earlier batch_remediate defined here delegated to
+# services.batch_remediation.engine. A second definition later in this
+# module shadowed it — same Celery task name and same module attribute,
+# so the later one is what has always run. The dead pair is removed
+# rather than left as a trap for the next edit; the fan-out variant
+# below is the live implementation.
 
 
 # ═══════════════════════════════════════════════════════════════════

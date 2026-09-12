@@ -135,3 +135,18 @@ async def test_below_threshold_rate_never_badges():
     )
     assert primary.last_error is None
     db.add.assert_not_called()
+
+
+# ── trend baseline honesty (same bug family, other endpoint) ─────────
+
+def test_trend_change_pct_is_null_without_a_baseline():
+    """max(prev,1) fabricated e.g. 14700% for a tenant whose scanning
+    began inside the window — capped by the UI to a shouting 999%+
+    while the KPI tiles honestly showed an em-dash for the very same
+    empty baseline."""
+    import inspect
+    from apps.api.app.routers import metrics
+    src = inspect.getsource(metrics)
+    assert "if prev_count > 0 else None" in src
+    assert "max(prev_count, 1)" not in src
+    assert '"no_baseline" if change_pct is None' in src

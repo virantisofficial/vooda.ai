@@ -31,6 +31,13 @@ class RemediationPlan(Base, UUIDMixin, TimestampMixin):
     validation_steps = Column(JSONB, default=list)
     risk_of_breakage = Column(String(20), default="unknown")
     confidence_score = Column(Float, nullable=True)
+    # Attempt trail. The row is created BEFORE the model call
+    # ('generating') and settled afterwards: 'patched' when a real diff
+    # was stored, 'no_patch' when the model returned a plan without one,
+    # 'failed' (+ error) when the attempt died. Without this, a failed
+    # attempt was indistinguishable from success and invisible to retry.
+    status = Column(String(20), nullable=False, default="generating", server_default="generating")
+    error = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSONB, default=dict)
 
     finding = relationship("NormalizedFinding", back_populates="remediation_plans")

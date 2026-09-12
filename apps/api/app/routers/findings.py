@@ -959,6 +959,84 @@ async def approve_patch(
     return {"status": body.action, "pr_creating": body.action == "approve"}
 
 
+@router.post("/remediation/backfill")
+async def backfill_remediation(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Queue draft-fix generation for open true positives that have none.
+
+    Two populations end up without a patch: attempts that failed (now
+    visible on the plan's status/error trail) and findings whose scan
+    never queued generation at all. Both are re-queueable — identical
+    content is provably patchable in sibling repos — so this endpoint
+    closes the gap the Auto-Fix tile shows, instead of the coverage
+    number being a record of which scans happened to run healthy.
+
+    Selection mirrors the dashboard's covered-metric exactly (open,
+    likely-true-positive, no patch with a real diff), so "queued" here
+    and "missing" on the tile are the same set. `dry_run` returns the
+    count without queueing; `limit` caps a batch (each queued item is
+    one model call). NEEDS_REVIEW findings are deliberately out of
+    scope — no fixes are drafted for findings nobody has judged real.
+    """
+    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch
+    from apps.api.app.models.finding import Classification
+
+    dry_run = bool(body.get("dry_run", False))
+    limit = min(int(body.get("limit", 100) or 100), 500)
+    repository_id = body.get("repository_id")
+
+    covered = (
+        select(RemediationPlan.finding_id)
+        .join(RemediationPatch, RemediationPatch.plan_id == RemediationPlan.id)
+        .where(func.length(func.coalesce(RemediationPatch.patch_diff, "")) > 20)
+        .scalar_subquery()
+    )
+    conditions = [
+        NormalizedFinding.tenant_id == user.tenant_id,
+        NormalizedFinding.is_suppressed == False,  # noqa: E712
+        NormalizedFinding.classification == Classification.LIKELY_TRUE_POSITIVE,
+        NormalizedFinding.id.not_in(covered),
+        # A repository snapshot is what generation patches against;
+        # source-only findings have nothing to diff.
+        NormalizedFinding.repository_id.is_not(None),
+    ]
+    if repository_id:
+        conditions.append(NormalizedFinding.repository_id == UUID(str(repository_id)))
+
+    from apps.api.app.core.access_control import get_accessible_repo_ids
+    accessible = await get_accessible_repo_ids(db, user)
+    if accessible is not None:
+        conditions.append(NormalizedFinding.repository_id.in_(accessible))
+
+    rows = (await db.execute(
+        select(NormalizedFinding).where(*conditions)
+        .order_by(NormalizedFinding.created_at.desc()).limit(limit)
+    )).scalars().all()
+
+    if dry_run:
+        return {"eligible": len(rows), "queued": 0, "dry_run": True}
+
+    from apps.worker.tasks import generate_remediation
+    queued = 0
+    for f in rows:
+        f.remediation_status = "pending"
+        generate_remediation.delay(str(f.id))
+        queued += 1
+    await db.flush()
+
+    if queued:
+        from apps.api.app.core.audit import log_audit
+        await log_audit(
+            db, user, "remediation_backfill", "finding", None,
+            f"Queued draft-fix generation for {queued} finding(s)",
+            metadata={"queued": queued, "repository_id": repository_id},
+        )
+    return {"eligible": len(rows), "queued": queued, "dry_run": False}
+
+
 @router.post("/batch-remediate")
 async def batch_remediate_findings(
     body: dict,
