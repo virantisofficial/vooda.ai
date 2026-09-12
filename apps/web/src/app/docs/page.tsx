@@ -11,7 +11,7 @@ import { APP_VERSION } from "@/lib/constants";
 // corresponding product surfaces.  See Sidebar.tsx for the
 // architectural rationale (refocus on secret-scanner core).
 type DocSection =
-  | "overview" | "quickstart" | "accuracy"
+  | "overview" | "dashboard" | "quickstart" | "accuracy"
   | "auth" | "users" | "roles" | "repositories" | "sources"
   | "findings" | "ai-triage" | "detectors" | "remediation"
   | "integrations" | "notifications" | "reporting" | "api" | "cicd"
@@ -21,6 +21,7 @@ type DocSection =
 const SECTIONS: { key: DocSection; label: string; group: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Introduction", group: "Get started", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" /> },
   { key: "quickstart", label: "Quickstart", group: "Get started", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" /> },
+  { key: "dashboard", label: "Read your dashboard", group: "Get started", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" /> },
   { key: "repositories", label: "Add a repository and scan", group: "How-to guides", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z" /> },
   { key: "sources", label: "Connect a scan source", group: "How-to guides", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" /> },
   { key: "ai-triage", label: "Configure AI triage", group: "How-to guides", icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /> },
@@ -3688,6 +3689,62 @@ vooda scan . --format sarif > results.sarif   # for CI code-scanning`}</Code>
   );
 }
 
+function DashboardContent() {
+  return (
+    <>
+      <RoleBox role="any signed-in user (you only ever see data for the repositories and sources you have access to)" />
+
+      <P>The dashboard at <code>/dashboard</code> is the first screen you see after signing in. It answers one question: <strong>how exposed are we right now, and what should we do first?</strong> Everything on it is a summary you can click into for detail.</P>
+
+      <H2>Two controls frame everything</H2>
+      <Tbl headers={["Control", "What it does"]} rows={[
+        ["Posture banner (top-left)", "A one-line health verdict. “At Risk” means a live credential was confirmed. “Action Needed” means you have Critical or High secrets but nothing confirmed live. “Healthy” means neither."],
+        ["Time range (top-right)", "Every number and chart is limited to this window — Last 24 hours through All time. Change it to see today’s picture or a long-term trend. “— vs Previous” on a tile means there is no earlier period to compare against yet."],
+      ]} />
+
+      <H2>The five headline tiles</H2>
+      <P>The top row is your at-a-glance scorecard. Left to right:</P>
+      <Tbl headers={["Tile", "What it tells you", "What to do with it"]} rows={[
+        ["Open Secrets", "Real secrets still open and needing attention — what Vooda detected, minus everything it filtered out as noise (false positives). The small line shows that split, e.g. “1,935 detected · 1,788 filtered as noise.”", "This is your working backlog. Drive it toward zero."],
+        ["Severity Mix", "How urgent those open secrets are, split into Critical, High, Medium and Low.", "Work Critical and High first — those are the ones that hurt."],
+        ["Active Credentials", "Secrets Vooda tested against the real provider and confirmed are still live. The most dangerous kind — a working key someone could use this minute.", "Rotate these immediately. This number should be zero. Anything above zero flips your posture to “At Risk.”"],
+        ["Mean Time to Remediate", "The average time from a secret being found to being fixed. A dash means nothing has been resolved yet, so there is no average to show — not that it is zero.", "Watch it trend downward over weeks. It is a measure of how fast your team closes exposures."],
+        ["Auto-Fix", "How many open secrets already have a ready-made draft fix Vooda generated, and how many of those you have applied. “61 of 147 have a draft fix · 0 applied.”", "Review the drafts and apply the good ones. Use “Generate missing fixes” to draft fixes for the rest."],
+      ]} />
+      <Tip>A dash (“—”) anywhere on the dashboard means “not enough data to show a number yet,” never “zero.” It disappears on its own once there is something real to measure.</Tip>
+
+      <H2>The panels below</H2>
+      <Tbl headers={["Panel", "What it shows you"]} rows={[
+        ["Findings Trend", "New secrets found across the selected time range, day by day. A downward slope is good — fewer new leaks are appearing."],
+        ["Findings by Source", "Where your secrets come from — code repositories versus DevOps sources — as a share of the total, so you know where to focus prevention."],
+        ["Top Leaking Repositories", "Your worst repositories, ranked by open secrets, each with its Critical and High counts. The header line — Configured · Scanned · Leaking — tells you coverage at a glance."],
+        ["Quick Actions", "One-click jumps to the work that matters most: live credentials to rotate, the triage queue awaiting review, draft fixes awaiting your approval, and secrets awaiting rotation. Each shows a live count."],
+        ["Verifier Breakdown", "Of the secrets Vooda checked against the live provider, how many came back live, inactive, or still unverified. The “Top Secret Types” list beneath it shows what kinds of secrets you have across all findings (AWS, SSH, Postgres, and so on)."],
+        ["AI Triage Confidence", "How confident Vooda’s AI was across its verdicts, and — once your team has confirmed some — how often it agreed with your reviewers. A dash for accuracy means no human confirmations yet."],
+        ["Recent Activity", "The latest actions across your workspace — scans, triage decisions, rule changes — with who did each and when. Your audit trail at a glance."],
+      ]} />
+
+      <H2>A simple daily routine</H2>
+      <P>You do not need to read every panel every day. This order works for most teams:</P>
+      <ul className="space-y-2 my-4">
+        <Li><strong>Glance at the posture banner and Active Credentials.</strong> Anything confirmed live gets rotated now — nothing else on the page is more urgent.</Li>
+        <Li><strong>Work the Severity Mix top-down.</strong> Clear Critical, then High. Click the tile to open those findings.</Li>
+        <Li><strong>Use Top Leaking Repositories to focus.</strong> A handful of repos usually holds most of the risk — fix those first.</Li>
+        <Li><strong>Review Auto-Fix drafts.</strong> Approve the good ones; the fix ships as a pull request. Generate the missing ones if you want fuller coverage.</Li>
+        <Li><strong>Check the Trend and Mean Time to Remediate weekly.</strong> Both should move the right way over time — fewer new leaks, faster fixes.</Li>
+      </ul>
+
+      <Note>Every tile and panel is a shortcut, not a dead end — click any number to open the underlying findings, filtered to exactly what the tile was counting.</Note>
+
+      <NextSteps items={[
+        { label: "Triage findings", href: "/docs?section=findings", desc: "What to do once you click into a tile — confirm, dismiss, or accept a finding." },
+        { label: "Remediate and rotate secrets", href: "/docs?section=remediation", desc: "Turn a draft fix into a merged pull request, and rotate a live credential safely." },
+        { label: "Generate reports", href: "/docs?section=reporting", desc: "Turn the dashboard picture into a shareable report for stakeholders." },
+      ]} />
+    </>
+  );
+}
+
 const CONTENT: Record<DocSection, React.ReactNode> = {
   overview: <OverviewContent />,
   // Sections 1.4 / 1.5 / 1.6 — added 2026-05-25 as part of the
@@ -3695,6 +3752,7 @@ const CONTENT: Record<DocSection, React.ReactNode> = {
   // top of the nav so first-touch evaluators land on the 5-minute
   // onboarding path immediately.
   quickstart: <QuickstartContent />,
+  dashboard: <DashboardContent />,
   accuracy: <AccuracyContent />,
   auth: <AuthContent />,
   users: <UsersContent />,
