@@ -782,10 +782,8 @@ async def finding_trends(
     ]
     prev_r = await db.execute(select(func.count(NormalizedFinding.id)).where(*prev_conditions))
     prev_count = prev_r.scalar() or 0
-    # No baseline, no percentage. max(prev,1) used to fabricate e.g.
-    # "14700%" for a tenant whose scanning began inside the window,
-    # which the UI capped to a shouting "999%+" — while the KPI tiles
-    # one inch above honestly showed "—" for the same empty baseline.
+    # No baseline -> no percentage (null), rather than dividing by a
+    # forced 1. Matches how the KPI tiles show "-" for an empty window.
     change_pct = (
         round(((total_new - prev_count) / prev_count) * 100, 1)
         if prev_count > 0 else None

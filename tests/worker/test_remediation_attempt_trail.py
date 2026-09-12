@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 """Every remediation attempt leaves a settled record.
 
-47 findings sat with a plan and no patch, and 3 more claimed PENDING
-with no plan at all — failures with no status, no error, no retry
-path, indistinguishable in the UI from work in progress. The plan row
-is now the attempt record: created before anything that can fail, and
-every exit settles it ('patched' | 'no_patch' | 'failed' + error).
+A failed remediation attempt used to leave no status, error, or
+retry path — indistinguishable from work in progress. The plan row is
+now the attempt record: created before anything that can fail, and
+settled on every exit ('patched' | 'no_patch' | 'failed' + error).
 """
 import inspect
 

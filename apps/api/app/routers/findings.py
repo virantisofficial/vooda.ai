@@ -967,19 +967,11 @@ async def backfill_remediation(
 ):
     """Queue draft-fix generation for open true positives that have none.
 
-    Two populations end up without a patch: attempts that failed (now
-    visible on the plan's status/error trail) and findings whose scan
-    never queued generation at all. Both are re-queueable — identical
-    content is provably patchable in sibling repos — so this endpoint
-    closes the gap the Auto-Fix tile shows, instead of the coverage
-    number being a record of which scans happened to run healthy.
-
-    Selection mirrors the dashboard's covered-metric exactly (open,
-    likely-true-positive, no patch with a real diff), so "queued" here
-    and "missing" on the tile are the same set. `dry_run` returns the
-    count without queueing; `limit` caps a batch (each queued item is
-    one model call). NEEDS_REVIEW findings are deliberately out of
-    scope — no fixes are drafted for findings nobody has judged real.
+    Selection matches the dashboard's Auto-Fix coverage set (open,
+    likely-true-positive, no patch with a real diff). `dry_run` returns
+    the count without queueing; `limit` caps the batch. NEEDS_REVIEW
+    findings are out of scope — fixes are only drafted for findings
+    judged real.
     """
     from apps.api.app.models.remediation import RemediationPlan, RemediationPatch
     from apps.api.app.models.finding import Classification

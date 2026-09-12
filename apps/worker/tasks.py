@@ -6875,11 +6875,9 @@ async def _generate_remediation(finding_id: str):
         if not finding:
             return
 
-        # The plan row is the ATTEMPT record, created before anything
-        # that can fail. Every exit below settles its status, so a
-        # failed attempt is queryable instead of invisible — previously
-        # a crash here left the finding claiming PENDING forever with
-        # nothing an operator could see or retry.
+        # The plan row is the attempt record, created before anything
+        # that can fail; every exit below settles its status, so a
+        # failed attempt is queryable rather than invisible.
         plan = RemediationPlan(
             finding_id=finding.id,
             generated_by=f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
@@ -6990,9 +6988,8 @@ async def _generate_remediation(finding_id: str):
             plan.status = "patched"
             finding.remediation_status = "patch_generated"
         else:
-            # NONE, not PENDING: "the model produced no fix" is a settled
-            # outcome, and NONE keeps the finding eligible for re-queue
-            # instead of looking forever in-progress.
+            # NONE (a settled "no fix") keeps the finding re-queueable;
+            # PENDING would read as still in progress.
             plan.status = "no_patch"
             plan.error = "model returned a plan but no patch diff"
             finding.remediation_status = "none"
@@ -7035,12 +7032,9 @@ async def _create_fix_pr(finding_id: str):
 #  BATCH REMEDIATION — fix multiple findings at once
 # ═══════════════════════════════════════════════════════════════════
 
-# NOTE: an earlier batch_remediate defined here delegated to
-# services.batch_remediation.engine. A second definition later in this
-# module shadowed it — same Celery task name and same module attribute,
-# so the later one is what has always run. The dead pair is removed
-# rather than left as a trap for the next edit; the fan-out variant
-# below is the live implementation.
+# (An earlier batch_remediate here was shadowed by the definition
+# below — same task name — so only the later one ran. Removed to avoid
+# the trap; the fan-out variant below is the live one.)
 
 
 # ═══════════════════════════════════════════════════════════════════

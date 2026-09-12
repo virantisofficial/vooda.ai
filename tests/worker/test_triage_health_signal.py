@@ -140,10 +140,9 @@ async def test_below_threshold_rate_never_badges():
 # ── trend baseline honesty (same bug family, other endpoint) ─────────
 
 def test_trend_change_pct_is_null_without_a_baseline():
-    """max(prev,1) fabricated e.g. 14700% for a tenant whose scanning
-    began inside the window — capped by the UI to a shouting 999%+
-    while the KPI tiles honestly showed an em-dash for the very same
-    empty baseline."""
+    """With no previous period, change_pct is null rather than a
+    percentage forced by dividing by 1 — matching how the KPI tiles
+    show an em-dash for an empty baseline."""
     import inspect
     from apps.api.app.routers import metrics
     src = inspect.getsource(metrics)
