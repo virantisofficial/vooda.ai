@@ -343,6 +343,10 @@ export const getRuleOverrides = (params?: Record<string, string | number | boole
 export const getRuleOverrideStats = () => api.get("/rule-overrides/stats");
 export const getAvailableRules = (params?: { q?: string }) =>
   api.get("/rule-overrides/available-rules", { params });
+// Queue draft-fix generation for open true positives that lack one.
+export const backfillRemediation = (opts?: { dry_run?: boolean; limit?: number; repository_id?: string }) =>
+  api.post("/findings/remediation/backfill", opts ?? {});
+
 export const createRuleOverride = (data: {
   scanner_rule_id: string;
   repository_id?: string | null;
