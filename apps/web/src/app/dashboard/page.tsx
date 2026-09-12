@@ -429,7 +429,6 @@ export default function DashboardPage() {
     }
   };
   const coveragePct = total > 0 ? Math.min(100, Math.round((remediationCovered / total) * 100)) : 0;
-  const appliedPct = total > 0 ? Math.min(100, Math.round((remediationApplied / total) * 100)) : 0;
 
   // ── Posture status — three tiers driven by KPI signal strength ────
   //   At Risk:        any verifier-confirmed live credentials
@@ -714,19 +713,21 @@ export default function DashboardPage() {
           {/* Tile 5: Auto-Fix coverage / applied (Vooda differentiator) */}
           <div className="card p-4">
             <p className="text-[10px] text-cyan-400 uppercase tracking-wider font-medium">Auto-Fix</p>
-            <div className="flex items-baseline gap-1.5 mt-1.5" title="Covered = engine drafted a patch · Applied = human approved or applied">
-              <span className={`text-3xl font-bold ${remediationCovered > 0 ? "text-cyan-400" : "text-slate-500"}`}>{coveragePct}%</span>
-              <span className="text-[11px] text-slate-500">Covered</span>
-              <span className="text-slate-700 mx-0.5">·</span>
-              <span className={`text-base font-semibold ${remediationApplied > 0 ? "text-emerald-400" : "text-slate-600"}`}>{appliedPct}%</span>
-              <span className="text-[10px] text-slate-500">Applied</span>
+            {/* Lead with the count and its plain meaning — the two
+                percentages here previously needed a tooltip to decode.
+                "61 of 147 have a draft fix" is the sentence; the
+                coverage % is a trailing annotation, and "applied" is
+                the count that actually landed. */}
+            <div className="flex items-baseline gap-1.5 mt-1.5">
+              <span className={`text-3xl font-bold ${remediationCovered > 0 ? "text-cyan-400" : "text-slate-500"}`}>{remediationCovered}</span>
+              <span className="text-[11px] text-slate-500">of {total} have a draft fix</span>
             </div>
-            <div className="mt-1">
-              <span className="text-[10px] text-slate-600">
-                {pendingPatches > 0 ? `${pendingPatches} Draft · ${appliedPatches} Applied` : "No Patches Yet"}
+            <div className="mt-1 flex items-baseline gap-1.5">
+              <span className={`text-sm font-semibold ${remediationApplied > 0 ? "text-emerald-400" : "text-slate-600"}`}>{appliedPatches}</span>
+              <span className="text-[10px] text-slate-500">
+                applied{remediationCovered > 0 ? ` · ${coveragePct}% coverage` : ""}
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 mt-1">{remediationCovered} Of {total}</p>
             {total - remediationCovered > 0 && (
               <button
                 onClick={handleBackfill}
