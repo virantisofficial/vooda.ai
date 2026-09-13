@@ -3101,6 +3101,20 @@ def _triage_coverage_warning(untriaged_count: int):
     return None
 
 
+async def _committer_user_map(db, tenant_id) -> dict:
+    """Map lowercased email -> user_id for a tenant.
+
+    Built once per scan so a new finding can be routed to the developer
+    whose commit introduced the secret without a per-finding lookup —
+    the difference between one query and one-per-finding at repo scale.
+    """
+    from apps.api.app.models.user import User
+    rows = await db.execute(
+        select(User.id, User.email).where(User.tenant_id == tenant_id)
+    )
+    return {e.strip().lower(): uid for uid, e in rows.all() if e}
+
+
 async def _run_scan_job(scan_job_id: str):
     from sqlalchemy import func as sa_func
     # Import ALL models to ensure FK metadata is registered before session creation
@@ -4287,6 +4301,10 @@ async def _run_scan_job(scan_job_id: str):
             )
             block_counts = new_block_counter()
 
+            # Email -> user for auto-assignment to the introducing
+            # committer. One query per scan (see helper).
+            committer_map = await _committer_user_map(db, job.tenant_id)
+
             # In-scan SecretIncident cache (Case-B aggregation).  Same
             # contract as the source-scan path's incident_cache: same
             # secret_hash within a single scan → one DB upsert, N
@@ -4602,12 +4620,22 @@ async def _run_scan_job(scan_job_id: str):
                             "is_placeholder": (pf.raw_data or {}).get("is_placeholder"),
                             "commit_sha": (pf.raw_data or {}).get("commit_sha"),
                             "commit_author": (pf.raw_data or {}).get("commit_author"),
+                            "commit_email": (pf.raw_data or {}).get("commit_email"),
                             "commit_date": (pf.raw_data or {}).get("commit_date"),
                             "commit_message": (pf.raw_data or {}).get("commit_message"),
                             # _raw_value_for_verification is intentionally NOT included — never persisted
                         },
                         sink_metadata=pf.sink_info,
                     )
+                    # Route to whoever introduced the secret, when the
+                    # committer email maps to a user in this tenant. Only
+                    # here (on create) and only while unassigned, so a
+                    # later manual reassignment is never overwritten, and
+                    # a re-scan never re-routes a triaged finding.
+                    _ce = (pf.raw_data or {}).get("commit_email")
+                    if _ce and finding.assigned_to is None:
+                        finding.assigned_to = committer_map.get(_ce.strip().lower())
+
                     db.add(finding)
                     created_count += 1
 
