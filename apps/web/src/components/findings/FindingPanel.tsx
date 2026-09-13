@@ -50,8 +50,10 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
       await requestRemediation(finding.id);
       setFixQueued(true);
       toast("success", "Drafting a fix — it appears here shortly");
-    } catch {
-      toast("error", "Could not start fix generation");
+    } catch (e: any) {
+      // Surface the server's reason — e.g. "AI remediation is not
+      // enabled" when the tenant is identification-only.
+      toast("error", e?.response?.data?.detail || "Could not start fix generation");
     } finally {
       setGeneratingFix(false);
     }
