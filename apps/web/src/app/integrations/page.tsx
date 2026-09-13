@@ -390,9 +390,12 @@ const AI_PROVIDERS = [
     icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M9 9l3 3-3 3M13 15h3" strokeLinecap="round" strokeLinejoin="round" /></svg>) },
 ];
 
-// Single task — AI is only used for triage (false positive reduction + classification)
+// A model can be assigned to identification (triage) and/or auto
+// remediation. Remediation is opt-in: assign a capable model to it, or
+// Vooda stays identification-only.
 const AI_TASKS = [
-  { key: "triage", label: "AI Triage", description: "False positive reduction and finding classification" },
+  { key: "triage", label: "AI Triage (identification)", description: "False-positive reduction and finding classification" },
+  { key: "remediation", label: "Auto Remediation", description: "Secure code-fix generation — assign a capable model" },
 ];
 
 function AIModelsFullSection() {
@@ -408,7 +411,7 @@ function AIModelsFullSection() {
   // task strings the worker actually dispatches on. No UI surface; Vooda's
   // product model is one primary does everything, with task-level routing
   // reserved as a backend capability for future hybrid setups.
-  const [form, setForm] = useState({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage", "remediation"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [] as string[], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null as string | null, provider_config_json: "{}" });
+  const [form, setForm] = useState({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [] as string[], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null as string | null, provider_config_json: "{}" });
   // Transient per-model test-connection status — replaces the jarring alert()
   // popups. Auto-dismisses ~5s after each test completes.
   const [testStatus, setTestStatus] = useState<Record<string, { status: string; message: string; at: number }>>({});
@@ -513,7 +516,7 @@ function AIModelsFullSection() {
     // Tasks always = triage + remediation (the only two keywords the worker
     // dispatches on). Routing is uniform across providers — the primary
     // fallback in get_provider_for_task handles everything.
-    setForm({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage", "remediation"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null, provider_config_json: "{}" });
+    setForm({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null, provider_config_json: "{}" });
     setDiscoveredModels([]);
     setDiscoverStatus(null);
     setKeyValidated(false);
@@ -598,6 +601,11 @@ function AIModelsFullSection() {
     } catch (e: any) {
       setProviderConfigError(`Invalid JSON: ${e.message}`);
       setShowAdvanced(true); // open the accordion so the user sees the error
+      return;
+    }
+
+    if (!form.tasks || form.tasks.length === 0) {
+      setProviderConfigError("Assign this model to at least one task (AI Triage and/or Auto Remediation).");
       return;
     }
 
@@ -751,6 +759,8 @@ function AIModelsFullSection() {
                       <span className="text-sm font-medium text-slate-200">{model.name}</span>
                       {model.is_primary && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/20">Primary</span>}
                       {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500">Disabled</span>}
+                      {(model.tasks || []).includes("triage") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">Triage</span>}
+                      {(model.tasks || []).includes("remediation") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">Auto Remediation</span>}
                       {model.last_error && String(model.last_error).startsWith("triage_parse_failure:") && (
                         <span
                           title={String(model.last_error).replace(/^triage_parse_failure:\s*/, "")}
@@ -1032,21 +1042,43 @@ function AIModelsFullSection() {
                 </div>
               </div>
 
-              {/* ── Essentials: Name + Primary toggle ── */}
-              {form.model_id && (
-                <div className="pt-4 border-t border-white/[0.06]">
-                  <label className="text-xs text-slate-500 mb-1.5 block">Display Name</label>
-                  <input value={form.name}
-                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                    placeholder={form.model_id || "e.g. Production Primary"} className="input-dark" />
-                  <label className="flex items-center gap-2 cursor-pointer mt-3">
-                    <input type="checkbox" checked={form.is_primary}
-                      onChange={(e) => setForm((f) => ({ ...f, is_primary: e.target.checked }))}
-                      className="w-4 h-4 rounded border-slate-600 bg-dark-950 text-red-500" />
-                    <span className="text-sm text-slate-300">Set as primary provider</span>
-                  </label>
+            </div>
+          )}
+
+          {/* ── Essentials: Name + Primary + task assignment ──
+              Rendered whenever a model is set (discovery OR manual
+              entry), so tasks are always configurable — not only on
+              successful auto-discovery. */}
+          {(keyValidated || editingId) && form.model_id && (
+            <div className="mb-5">
+              <label className="text-xs text-slate-500 mb-1.5 block">Display Name</label>
+              <input value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder={form.model_id || "e.g. Production Primary"} className="input-dark" />
+              <label className="flex items-center gap-2 cursor-pointer mt-3">
+                <input type="checkbox" checked={form.is_primary}
+                  onChange={(e) => setForm((f) => ({ ...f, is_primary: e.target.checked }))}
+                  className="w-4 h-4 rounded border-slate-600 bg-dark-950 text-red-500" />
+                <span className="text-sm text-slate-300">Set as primary provider</span>
+              </label>
+              <div className="mt-4">
+                <label className="text-xs text-slate-500 mb-1.5 block">Used for</label>
+                <div className="space-y-2">
+                  {AI_TASKS.map((t) => (
+                    <label key={t.key} className="flex items-start gap-2 cursor-pointer">
+                      <input type="checkbox" checked={form.tasks.includes(t.key)}
+                        onChange={(e) => setForm((f) => ({ ...f, tasks: e.target.checked ? Array.from(new Set([...f.tasks, t.key])) : f.tasks.filter((x) => x !== t.key) }))}
+                        className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-dark-950 text-red-500" />
+                      <span className="text-sm text-slate-300">{t.label}
+                        <span className="block text-[11px] text-slate-500">{t.description}</span>
+                      </span>
+                    </label>
+                  ))}
                 </div>
-              )}
+                {form.tasks.length === 0 && (
+                  <p className="text-[11px] text-amber-400 mt-1.5">Select at least one — a model with no task assigned does nothing.</p>
+                )}
+              </div>
             </div>
           )}
 
