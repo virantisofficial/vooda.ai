@@ -11,6 +11,7 @@ from sqlalchemy import select, func, or_
 
 from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
+from apps.api.app.core.edition import require_enterprise
 from apps.api.app.models.user import User
 from apps.api.app.core.classification_provenance import (
     MECHANISM_BULK_TRIAGE,
@@ -911,7 +912,7 @@ async def get_blast_radius(
     return {"error": "Blast radius analysis not available for this provider"}
 
 
-@router.post("/{finding_id}/remediate")
+@router.post("/{finding_id}/remediate", dependencies=[Depends(require_enterprise("auto_remediation"))])
 async def request_remediation(
     finding_id: UUID,
     body: RemediateRequest,
@@ -978,7 +979,7 @@ async def approve_patch(
     return {"status": body.action, "pr_creating": body.action == "approve"}
 
 
-@router.post("/remediation/backfill")
+@router.post("/remediation/backfill", dependencies=[Depends(require_enterprise("auto_remediation"))])
 async def backfill_remediation(
     body: dict,
     db: AsyncSession = Depends(get_db),
@@ -998,6 +999,17 @@ async def backfill_remediation(
     dry_run = bool(body.get("dry_run", False))
     limit = min(int(body.get("limit", 100) or 100), 500)
     repository_id = body.get("repository_id")
+
+    # Same opt-in gate as single-finding remediation.
+    from services.ai_triage.provider import get_provider_for_task
+    if await get_provider_for_task("remediation", str(user.tenant_id), db=db) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "AI remediation is not enabled. Assign a model to the "
+                "Auto Remediation task in Settings -> AI Models to generate fixes."
+            ),
+        )
 
     covered = (
         select(RemediationPlan.finding_id)
@@ -1048,7 +1060,7 @@ async def backfill_remediation(
     return {"eligible": len(rows), "queued": queued, "dry_run": False}
 
 
-@router.post("/batch-remediate")
+@router.post("/batch-remediate", dependencies=[Depends(require_enterprise("auto_remediation"))])
 async def batch_remediate_findings(
     body: dict,
     db: AsyncSession = Depends(get_db),
@@ -1064,6 +1076,17 @@ async def batch_remediate_findings(
     from apps.api.app.core.access_control import can_access_repository
     if not await can_access_repository(db, user, repository_id):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    # Same opt-in gate as single-finding remediation.
+    from services.ai_triage.provider import get_provider_for_task
+    if await get_provider_for_task("remediation", str(user.tenant_id), db=db) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "AI remediation is not enabled. Assign a model to the "
+                "Auto Remediation task in Settings -> AI Models to generate fixes."
+            ),
+        )
 
     from apps.worker.tasks import batch_remediate
     batch_remediate.delay(repository_id, finding_ids, str(user.tenant_id))

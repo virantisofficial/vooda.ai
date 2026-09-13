@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding, requestRemediation } from "@/lib/api";
+import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding, requestRemediation, getEdition } from "@/lib/api";
 import SuggestionChips from "@/components/suggestions/SuggestionChips";
 import { CodeSnippet } from "@/components/findings/CodeSnippet";
 import { brandScannerName, getScannerColor, isVoodaEngine } from "@/lib/branding";
@@ -44,6 +44,13 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   // single model call the user can see they asked for.
   const [generatingFix, setGeneratingFix] = useState(false);
   const [fixQueued, setFixQueued] = useState(false);
+  // Enterprise-gated: in Community the draft-fix action is an upsell.
+  const [remediationGated, setRemediationGated] = useState(true);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setRemediationGated((r.data?.gated || []).includes("auto_remediation")))
+      .catch(() => setRemediationGated(true));
+  }, []);
   const handleGenerateFix = async () => {
     setGeneratingFix(true);
     try {
@@ -1521,18 +1528,30 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                       half-shipped; for now the Rotation tab is a
                       knowledge-base view (provider-specific guides
                       above), not an action surface. */}
-                  <p className="text-[11px] text-slate-600 mb-3">No AI fix drafted yet for this finding. You can draft one now, or follow the rotation steps above.</p>
-                  {fixQueued ? (
-                    <p className="text-[11px] text-purple-400">Fix generation started — refresh in a moment to see the draft.</p>
+                  {remediationGated ? (
+                    <>
+                      <p className="text-[11px] text-slate-600 mb-3">Follow the rotation steps above to remediate this finding.</p>
+                      <span className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-amber-500/25 text-amber-400 bg-amber-500/[0.06]" title="AI draft-fix generation is a Vooda Enterprise capability">
+                        AI-drafted fixes
+                        <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/25">Enterprise</span>
+                      </span>
+                    </>
                   ) : (
-                    <button
-                      onClick={handleGenerateFix}
-                      disabled={generatingFix}
-                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-500/30 text-purple-300 hover:bg-purple-500/10 disabled:opacity-50"
-                      title="Draft an AI code fix for this finding (one model call)"
-                    >
-                      {generatingFix ? "Starting…" : "Generate fix"}
-                    </button>
+                    <>
+                      <p className="text-[11px] text-slate-600 mb-3">No AI fix drafted yet for this finding. You can draft one now, or follow the rotation steps above.</p>
+                      {fixQueued ? (
+                        <p className="text-[11px] text-purple-400">Fix generation started — refresh in a moment to see the draft.</p>
+                      ) : (
+                        <button
+                          onClick={handleGenerateFix}
+                          disabled={generatingFix}
+                          className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-500/30 text-purple-300 hover:bg-purple-500/10 disabled:opacity-50"
+                          title="Draft an AI code fix for this finding (one model call)"
+                        >
+                          {generatingFix ? "Starting…" : "Generate fix"}
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               ) : (
