@@ -4,7 +4,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding } from "@/lib/api";
+import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding, requestRemediation } from "@/lib/api";
 import SuggestionChips from "@/components/suggestions/SuggestionChips";
 import { CodeSnippet } from "@/components/findings/CodeSnippet";
 import { brandScannerName, getScannerColor, isVoodaEngine } from "@/lib/branding";
@@ -39,6 +39,23 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   const [comment, setComment] = useState("");
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const [reverifying, setReverifying] = useState(false);
+  // Draft-fix generation for THIS finding — one call, in context, on
+  // demand. Deliberately per-finding (not a bulk sweep): the cost is a
+  // single model call the user can see they asked for.
+  const [generatingFix, setGeneratingFix] = useState(false);
+  const [fixQueued, setFixQueued] = useState(false);
+  const handleGenerateFix = async () => {
+    setGeneratingFix(true);
+    try {
+      await requestRemediation(finding.id);
+      setFixQueued(true);
+      toast("success", "Drafting a fix — it appears here shortly");
+    } catch {
+      toast("error", "Could not start fix generation");
+    } finally {
+      setGeneratingFix(false);
+    }
+  };
   // ── Pending-then-confirm status flow (2026-05-04) ──
   // The dropdown used to fire `triageFinding` immediately on click,
   // and the "Save" button only saved comments. Two issues:
@@ -1502,7 +1519,19 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                       half-shipped; for now the Rotation tab is a
                       knowledge-base view (provider-specific guides
                       above), not an action surface. */}
-                  <p className="text-[11px] text-slate-600">No AI remediation plan generated yet. Follow the provider-specific rotation steps above.</p>
+                  <p className="text-[11px] text-slate-600 mb-3">No AI fix drafted yet for this finding. You can draft one now, or follow the rotation steps above.</p>
+                  {fixQueued ? (
+                    <p className="text-[11px] text-purple-400">Fix generation started — refresh in a moment to see the draft.</p>
+                  ) : (
+                    <button
+                      onClick={handleGenerateFix}
+                      disabled={generatingFix}
+                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-500/30 text-purple-300 hover:bg-purple-500/10 disabled:opacity-50"
+                      title="Draft an AI code fix for this finding (one model call)"
+                    >
+                      {generatingFix ? "Starting…" : "Generate fix"}
+                    </button>
+                  )}
                 </div>
               ) : (
                 finding.remediation_plans.map((plan: any, idx: number) => (

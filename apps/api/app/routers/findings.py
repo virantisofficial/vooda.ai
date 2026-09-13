@@ -515,6 +515,22 @@ async def triage_finding(
         )
     finding.review_status = ReviewStatus.REVIEWED
 
+    # ── Draft a fix when a human confirms a finding is real ──
+    # Scan-time auto-generation only fires for findings already
+    # confirmed at scan time; a finding triaged "needs review" and later
+    # confirmed here would otherwise never get a draft. Generate one now,
+    # so coverage stays current as a consequence of the triage decision
+    # itself — one finding, one model call. Deliberately only on the
+    # single-finding path (never bulk triage), and skipped when a draft
+    # already exists or is in flight, so confirming cannot fan out into
+    # silent batch spend.
+    if body.action == "mark_tp" and str(
+        getattr(finding, "remediation_status", "none") or "none"
+    ).lower() in ("none", "rejected"):
+        finding.remediation_status = "pending"
+        from apps.worker.tasks import generate_remediation
+        generate_remediation.delay(str(finding.id))
+
     # ── Case-B: cascade triage UP to the parent incident ──
     # Per-finding triage is a decision about the CREDENTIAL, not just
     # this one location.  Apply the same classification + review_status
