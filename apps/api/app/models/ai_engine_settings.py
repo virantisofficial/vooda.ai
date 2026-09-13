@@ -19,7 +19,8 @@ class AIEngineSettings(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # Context Extraction: "full", "smart", "minimal"
     context_mode = Column(String(20), default="smart", nullable=False)
 
-    # Finding Analysis: "individual", "batch_similar"
+    # Retained for backward compatibility; no longer read (triage always
+    # groups identical findings). Absent from API and UI.
     analysis_mode = Column(String(20), default="batch_similar", nullable=False)
 
     # Token Optimization

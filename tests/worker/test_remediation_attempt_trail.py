@@ -24,9 +24,16 @@ def test_the_plan_is_created_before_the_model_is_called():
 
 def test_every_failure_path_settles_the_attempt():
     src = _src()
-    assert 'await _settle("failed", "no AI provider configured' in src
     assert 'await _settle("failed", f"context extraction' in src
     assert 'await _settle("failed", str(gen_err))' in src
+
+
+def test_missing_remediation_model_refuses_before_creating_a_plan():
+    """Remediation is opt-in: with no model assigned the task returns
+    before an attempt record exists, rather than logging a failed plan."""
+    src = _src()
+    assert src.index("get_provider_for_task") < src.index('status="generating"')
+    assert "remediation_not_enabled_skip" in src
 
 
 def test_success_and_plan_only_settle_too():

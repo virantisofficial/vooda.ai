@@ -30,6 +30,7 @@ ENTERPRISE_FEATURES: dict[str, str] = {
     "access_control": "Access Control",
     "audit": "Audit & Compliance",
     "audit_export": "Audit Export & Retention",
+    "auto_remediation": "Auto Remediation",
     "custom_detectors": "Custom Detectors",
     "schedules": "Scan Schedules",
 }

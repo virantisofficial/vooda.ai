@@ -404,6 +404,13 @@ async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[
     from apps.api.app.models.ai_model import AIModelConfig
     from sqlalchemy import select
 
+    # Auto remediation is Enterprise-gated: no model resolves for it in
+    # Community, so no path generates fixes. Triage is unaffected.
+    if task == "remediation":
+        from apps.api.app.core.edition import is_enterprise
+        if not is_enterprise():
+            return None
+
     if db:
         # Use provided session (from worker's own event loop)
         result = await db.execute(
