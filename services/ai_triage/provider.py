@@ -433,6 +433,14 @@ async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[
                 extra_payload=m.provider_config or None,
             )
 
+    # Remediation is opt-in by explicit model assignment: if no model is
+    # assigned to it, remediation simply does not run (the tenant chose
+    # identification-only). No primary/env fallback — otherwise
+    # "triage-only" would still generate fixes. Triage keeps the
+    # fallback below so a single configured model still triages.
+    if task == "remediation":
+        return None
+
     # Fallback: primary model regardless of task
     for m in models:
         if m.is_primary and m.api_key_encrypted:

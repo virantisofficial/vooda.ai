@@ -5204,10 +5204,18 @@ async def _run_scan_job(scan_job_id: str):
                 await db.commit()
 
             # ── Step 5b: Auto-generate remediation for ALL true positives ──
-            # Remediation code is generated automatically so users see fixes
-            # immediately. Applying the fix (PR/branch) is user-action driven.
+            # Only when a model is assigned to the remediation task. If the
+            # tenant configured triage-only (or no model), remediation does
+            # not run — Vooda is identification-only, and no empty "failed"
+            # plans are created.
+            from services.ai_triage.provider import get_provider_for_task as _gpft
+            _rem_provider = None
+            try:
+                _rem_provider = await _gpft("remediation", str(job.tenant_id), db=db)
+            except Exception:
+                _rem_provider = None
             auto_remediated = 0
-            if triaged > 0 and has_ai:
+            if triaged > 0 and has_ai and _rem_provider is not None:
                 try:
                     # Find ALL true positives from this scan
                     tp_findings = await db.execute(
@@ -5243,7 +5251,7 @@ async def _run_scan_job(scan_job_id: str):
                 if skip_ai:
                     job.status_message = "[7b/8] Auto Remediation skipped by user"
                 else:
-                    job.status_message = "[7b/8] Auto Remediation skipped — no API key configured"
+                    job.status_message = "[7b/8] Auto Remediation not enabled (no remediation model configured)"
                 job.progress_pct = 90
                 await db.commit()
 

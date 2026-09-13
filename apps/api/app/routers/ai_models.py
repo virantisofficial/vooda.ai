@@ -176,13 +176,27 @@ async def ai_status(
 
     is_ready = has_db_models or has_env_key
 
+    # Capability is defined by which tasks have a model assigned. Triage
+    # can run off any configured model (env fallback included); remediation
+    # runs only when a model is explicitly assigned to it — so a tenant can
+    # be identification-only or full-remediation by configuration alone.
+    triage_enabled = is_ready
+    remediation_enabled = any(
+        "remediation" in (m.tasks or []) and m.api_key_encrypted for m in db_models
+    )
+
     return {
         "ai_configured": is_ready,
         "has_db_models": has_db_models,
         "has_env_key": has_env_key,
         "active_models": len(db_models),
-        "message": "AI is ready for false positive analysis and auto-remediation" if is_ready
-                   else "No AI model configured. Configure an API key in Integration Hub → AI Models to enable false positive analysis and auto-remediation.",
+        "triage_enabled": triage_enabled,
+        "remediation_enabled": remediation_enabled,
+        "message": (
+            "AI remediation is enabled." if remediation_enabled
+            else "Identification only — assign a model to Auto Remediation to enable fixes." if is_ready
+            else "No AI model configured."
+        ),
     }
 
 

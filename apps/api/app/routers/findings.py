@@ -920,6 +920,19 @@ async def request_remediation(
 ):
     finding = await _get_finding_with_access_check(finding_id, db, user)
 
+    # Remediation is only available when a model is assigned to it. If
+    # the tenant is identification-only, say so plainly rather than
+    # queueing a job that would have nothing to run.
+    from services.ai_triage.provider import get_provider_for_task
+    if await get_provider_for_task("remediation", str(user.tenant_id), db=db) is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "AI remediation is not enabled. Assign a model to the "
+                "Auto Remediation task in Settings -> AI Models to generate fixes."
+            ),
+        )
+
     from apps.worker.tasks import generate_remediation
     generate_remediation.delay(str(finding.id))
 
