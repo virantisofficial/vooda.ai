@@ -10,7 +10,6 @@ import {
   getRepositories, getMTTRMetrics, getTrendData,
   getFindingsByCategory, getTopLeakingRepos,
   getFindingsBreakdown, getAIAccuracy, getAuditEvents,
-  backfillRemediation,
 } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { Skeleton, SkeletonKpiTile, SkeletonCard } from "@/components/ui/Skeleton";
@@ -418,16 +417,6 @@ export default function DashboardPage() {
     ?? (_remCount("approved") + _remCount("applied"));
   const pendingPatches = remediationCovered - remediationApplied;
   const appliedPatches = metrics?.remediation_applied ?? _remCount("applied");
-  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
-  const handleBackfill = async () => {
-    setBackfillMsg("Queuing…");
-    try {
-      const res = await backfillRemediation({ limit: 200 });
-      setBackfillMsg(`Queued ${res.data.queued} fix generation${res.data.queued === 1 ? "" : "s"} — drafts appear as they complete.`);
-    } catch {
-      setBackfillMsg("Could not queue fix generation.");
-    }
-  };
   const coveragePct = total > 0 ? Math.min(100, Math.round((remediationCovered / total) * 100)) : 0;
 
   // ── Posture status — three tiers driven by KPI signal strength ────
@@ -725,16 +714,6 @@ export default function DashboardPage() {
                 applied{remediationCovered > 0 ? ` · ${coveragePct}% coverage` : ""}
               </span>
             </div>
-            {total - remediationCovered > 0 && (
-              <button
-                onClick={handleBackfill}
-                className="text-[10px] text-cyan-400 hover:text-cyan-300 mt-1 underline decoration-dotted underline-offset-2"
-                title="Queue draft-fix generation for open true positives that have no patch yet"
-              >
-                Generate missing fixes
-              </button>
-            )}
-            {backfillMsg && <p className="text-[10px] text-slate-500 mt-0.5">{backfillMsg}</p>}
           </div>
         </div>
 
