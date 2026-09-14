@@ -22,7 +22,7 @@ regex>=2026.9.3
 google-re2>=1.1.20251105
 
 # Structured logging — the engine logs via structlog.get_logger().
-structlog==24.4.0
+structlog==26.1.0
 
 # greenlet is observed in the CLI's runtime import closure; pin it so the lean
 # image matches the traced set rather than relying on transitive resolution.
