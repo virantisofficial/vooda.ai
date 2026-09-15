@@ -129,9 +129,8 @@ def test_scanner_comparison_stays_unfiltered():
 
 def test_mttr_stays_unfiltered():
     """MTTR averages over findings that COMPLETED remediation. A finding
-    that finished its lifecycle (patched, then rotated/resolved) is the
-    population — the open-only scope would remove it and hollow the
-    metric out as the remediation flow starts actually closing things."""
+    that finished its lifecycle (rotated/resolved) is the population —
+    the open-only scope would remove it and hollow the metric out."""
     src = inspect.getsource(metrics.mttr_metrics)
     assert "open_only=True" not in src
 
@@ -152,55 +151,10 @@ def test_noise_count_cannot_go_negative():
     assert "max(_detected - _open, 0)" in OVERVIEW_SRC
 
 
-def test_remediation_coverage_shares_the_headline_scope():
-    """A percentage only means something when numerator and denominator
-    share a scope. The standalone /remediation endpoint counts patches
-    all-time across every classification; dividing that by the windowed
-    open headline inflated the tile and could push it past 100%."""
-    assert '"remediation_covered"' in OVERVIEW_SRC
-    assert '"remediation_applied"' in OVERVIEW_SRC
-    for anchor in ("_covered_q = await db.execute", "_applied_q = await db.execute"):
-        m = OVERVIEW_SRC.find(anchor)
-        assert m > 0, f"{anchor} not found"
-        segment = OVERVIEW_SRC[m:m + 450]
-        assert "*conditions," in segment, (
-            "remediation counts must use the open+window `conditions`, "
-            "not `all_conditions`"
-        )
-
-
-def test_covered_means_a_real_patch_exists():
-    """"Covered" claims a fix was drafted, so it is counted from the
-    patch artifacts, not the status column — a status flag can exist
-    without the artifact behind it, and a patch whose diff is empty is
-    not a draft either."""
-    assert "_has_real_patch" in OVERVIEW_SRC
-    assert "RemediationPatch.plan_id == RemediationPlan.id" in OVERVIEW_SRC
-    assert 'func.length(func.coalesce(RemediationPatch.patch_diff, "")) > 20' in OVERVIEW_SRC
-    # Both counts must require the artifact, not just the flag.
-    for anchor in ("_covered_q = await db.execute", "_applied_q = await db.execute"):
-        m = OVERVIEW_SRC.find(anchor)
-        assert "_has_real_patch" in OVERVIEW_SRC[m:m + 450], (
-            f"{anchor} does not require an actual patch"
-        )
-
-
-def test_covered_no_longer_trusts_the_status_flag_alone():
-    m = OVERVIEW_SRC.find("_covered_q = await db.execute")
-    segment = OVERVIEW_SRC[m:m + 450]
-    assert "PATCH_GENERATED" not in segment, (
-        "covered must be artifact-based; the status flag lies"
-    )
-
-
 def test_mttr_counts_only_actual_resolutions():
-    """Resolved means the fix landed (applied) or the finding reached a
-    resolved classification (rotated / removed) — a drafted or approved
-    patch has remediated nothing yet."""
+    """Resolved means the finding was resolved (applied) or reached a
+    resolved classification (rotated / removed)."""
     src = inspect.getsource(metrics.mttr_metrics)
-    assert '"patch_generated"' not in src and '"approved"' not in src, (
-        "a drafted or approved patch has remediated nothing"
-    )
     assert '== "applied"' in src
     assert "Classification.ROTATED" in src
     assert "RESOLVED_FILE_DELETED" in src

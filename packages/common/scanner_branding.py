@@ -158,7 +158,6 @@ def get_sarif_tool_info() -> dict:
                 ],
                 "ai_engines": [
                     "Vooda AI Triage Engine",
-                    "Vooda AI Remediation Engine",
                 ],
             },
         },
@@ -176,7 +175,7 @@ Detection Components:
   detectors, Shannon entropy analysis, and context-aware false positive filtering.
 
 AI Analysis:
-- AI triage and remediation engines are proprietary to Vooda AI.
+- The AI triage engine is proprietary to Vooda AI.
 - AI models are provided by Anthropic (Claude), OpenAI, or customer-configured providers.
 
 All open-source component licenses are respected and attributed per their terms.

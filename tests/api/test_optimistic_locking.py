@@ -213,7 +213,6 @@ def test_finding_detail_exposes_version():
         "cache_source": None,
         "evidence": [],
         "decisions": [],
-        "remediation_plans": [],
         "is_archived_parent": False,
         "created_at": now,
         "updated_at": now,

@@ -24,6 +24,10 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("remediation_plans"):
+        # Fresh installs never create the code-fix tables (removed in
+        # i5d6e7f8a9b0), so there is nothing to change.
+        return
     op.add_column(
         "remediation_plans",
         sa.Column("status", sa.String(length=20), nullable=False,
@@ -64,5 +68,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("remediation_plans"):
+        # Fresh installs never create the code-fix tables (removed in
+        # i5d6e7f8a9b0), so there is nothing to change.
+        return
     op.drop_column("remediation_plans", "error")
     op.drop_column("remediation_plans", "status")

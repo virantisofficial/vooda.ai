@@ -166,11 +166,6 @@ export const createSavedView = (data: { name: string; filters: Record<string, st
 export const deleteSavedView = (id: string) =>
   api.delete(`/saved-views/${id}`);
 
-export const requestRemediation = (id: string) =>
-  api.post(`/findings/${id}/remediate`, {});
-export const approvePatch = (id: string, data: { action: string; comment?: string }) =>
-  api.post(`/findings/${id}/approve`, data);
-
 // Metrics
 export const getMetricsOverview = (days?: number, withDelta = false) =>
   api.get("/metrics/overview", {
@@ -199,8 +194,6 @@ export const markNotificationRead = (id: string) =>
 export const markAllNotificationsRead = () =>
   api.post("/notifications/read-all");
 export const getFindingsMetrics = () => api.get("/metrics/findings");
-export const getRemediationMetrics = (repoId?: string) =>
-  api.get("/metrics/remediation", { params: repoId ? { repository_id: repoId } : {} });
 export const getMTTRMetrics = () => api.get("/metrics/mttr");
 export const getFindingsBreakdown = () => api.get("/metrics/findings-breakdown");
 
@@ -343,9 +336,6 @@ export const getRuleOverrides = (params?: Record<string, string | number | boole
 export const getRuleOverrideStats = () => api.get("/rule-overrides/stats");
 export const getAvailableRules = (params?: { q?: string }) =>
   api.get("/rule-overrides/available-rules", { params });
-// Queue draft-fix generation for open true positives that lack one.
-export const backfillRemediation = (opts?: { dry_run?: boolean; limit?: number; repository_id?: string }) =>
-  api.post("/findings/remediation/backfill", opts ?? {});
 
 export const createRuleOverride = (data: {
   scanner_rule_id: string;

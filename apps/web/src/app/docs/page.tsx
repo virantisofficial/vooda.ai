@@ -338,7 +338,7 @@ function OverviewContent() {
         <InfoCard title="Compliance Reporting" color="green">Maps findings to SOC 2 Type II, PCI-DSS, ISO 27001, NIST CSF, and NIST 800-53. Exports auditor-ready evidence packages.</InfoCard>
       </Grid2>
 
-      <Img src="/docs/screenshots/dashboard.png" alt="Vooda AI dashboard" caption="Figure 1.1 — The dashboard at /dashboard summarizes security score, findings by severity, MTTR, and remediation rate. Each tile links to the corresponding deep-dive page." />
+      <Img src="/docs/screenshots/dashboard.png" alt="Vooda AI dashboard" caption="Figure 1.1 — The dashboard at /dashboard summarizes security score, findings by severity, active credentials, and MTTR. Each tile links to the corresponding deep-dive page." />
 
       <H2>Core Concepts</H2>
       <Tbl headers={["Term", "Definition"]} rows={[
@@ -470,9 +470,9 @@ function QuickstartContent() {
 
       <H3>What to do if it&apos;s a real critical finding</H3>
       <ol className="space-y-2 my-3 list-decimal list-inside text-[15px] text-slate-400">
-        <li>Click <strong>Remediate</strong> — Vooda drafts a rotation plan (rotate-via-vault, open PR removing the literal, notify owners).</li>
-        <li>A security lead clicks <strong>Approve</strong>; the rotation event lands in <code>/rotation-events</code> for the audit trail.</li>
-        <li>Vooda automatically re-verifies the credential after rotation — when verified-dead, the finding flips to <code>remediation_status=resolved</code>.</li>
+        <li>Open the <strong>Rotation</strong> tab in the finding panel and rotate the credential at the provider using its playbook.</li>
+        <li>Mark it rotated; the rotation event lands in <code>/rotation-events</code> for the audit trail.</li>
+        <li>Vooda automatically re-verifies the credential after rotation — when verified-dead, the finding is resolved.</li>
       </ol>
 
       <H2>Step 4 — Add it to CI (≈ 2 min, optional but recommended)</H2>
@@ -508,7 +508,7 @@ jobs:
       </P>
       <Tbl headers={["Role", "When to assign", "Scope"]} rows={[
         ["admin",             "You and one backup", "Everything, including key management + SSO config."],
-        ["security_lead",     "AppSec engineers approving rotations", "All findings + remediation approval + rule overrides."],
+        ["security_lead",     "AppSec engineers approving rotations", "All findings + rotation approval + rule overrides."],
         ["security_reviewer", "Triagers across the org", "Read findings, classify TP/FP, comment."],
         ["developer",         "Engineering team using push-protection + reading their team's findings", "Scoped to their Business Unit's repos."],
         ["viewer",            "Auditors, compliance staff", "Read-only, no triage power."],
@@ -854,7 +854,7 @@ function RolesContent() {
       <Tbl headers={["Role", "Intended for", "Can do"]} rows={[
         ["org-admin", "Tenant administrators", "Everything: user management, SSO, billing, integrations, deletes."],
         ["security-lead", "Security & DevSecOps", "All scan/finding operations across the tenant, including allowlist and suppression management. Cannot manage users or billing."],
-        ["developer", "Engineers", "View findings on their BU/repos, triage, request remediation. Cannot manage users."],
+        ["developer", "Engineers", "View findings on their BU/repos and triage. Cannot manage users."],
         ["auditor", "Compliance / external", "Read-only across findings, audit log, reports. No write."],
         ["agent", "Service accounts", "Programmatic scope for CI/CD: trigger scans, ingest findings via SARIF."],
       ]} />
@@ -1281,7 +1281,7 @@ function FindingsContent() {
       <Tbl headers={["Field", "Values"]} rows={[
         ["review_status", "UNREVIEWED → REVIEWED → ACCEPTED_RISK"],
         ["classification", "TRUE_POSITIVE | FALSE_POSITIVE | TEST_CREDENTIAL | RESOLVED_FILE_DELETED | RESOLVED_ITEM_DELETED"],
-        ["remediation_status", "NONE → IN_PROGRESS → ROTATED | REVOKED"],
+        ["remediation_status", "NONE → APPLIED (resolved)"],
       ]} />
 
       <H2>Finding Attributes</H2>
@@ -1290,7 +1290,7 @@ function FindingsContent() {
         ["rule_id", "Stable identifier of the detector (e.g. AWS-001, GH-003)"],
         ["classification", "TP / FP / Test / tombstone family — see the Triage findings guide"],
         ["review_status", "UNREVIEWED | REVIEWED | ACCEPTED_RISK"],
-        ["remediation_status", "NONE | IN_PROGRESS | ROTATED | REVOKED"],
+        ["remediation_status", "NONE | APPLIED"],
         ["ai_confidence", "0.0–1.0, post-calibration"],
         ["ai_confidence_raw", "0.0–1.0, pre-calibration (debug)"],
         ["validation_status", "active | inactive | not_validated | error"],
@@ -1375,7 +1375,7 @@ function FindingsContent() {
 
       <NextSteps items={[
         { label: "AI Triage Engine", href: "/docs?section=ai-triage", desc: "How verdicts and confidence scores get computed." },
-        { label: "Remediation & Rotation", href: "/docs?section=remediation", desc: "Fix what's found — rotation playbooks + PR-on-approve." },
+        { label: "Remediation & Rotation", href: "/docs?section=remediation", desc: "Fix what's found — rotation playbooks and ticketing." },
         { label: "Glossary", href: "/docs?section=glossary", desc: "TP / FP / Incident / Verified-live — the precise definitions." },
       ]} />
     </>
@@ -1423,7 +1423,7 @@ function AiTriageContent() {
       </Step>
       <Step n={3} title="Pick model + role">
         Each provider can hold multiple models, each routed to one or more <em>tasks</em>:
-        <code> triage</code>, <code>verifier-fallback</code>, <code>remediation</code>, <code>rotation-playbook</code>.
+        <code> triage</code>, <code>verifier-fallback</code>, <code>rotation-playbook</code>.
       </Step>
       <Step n={4} title="Set rate limits">
         <strong>Max requests / min</strong> and <strong>Max tokens / min</strong> are enforced per provider to
@@ -1581,40 +1581,7 @@ function DetectorsContent() {
 function RemediationContent() {
   return (
     <>
-      <RoleBox role="developer (initiate); security-lead (approve, bulk, credential rotation)" see="api" />
-
-      <H2>Remediation Workflow</H2>
-      <Code>{`finding (TP) → plan_created → patch_generated → approval_pending → applied → verified
-                                                   ↘ rejected → re-plan`}</Code>
-      <P>
-        Each finding can produce a remediation plan. The plan covers what to remove from code (or rotate at
-        the provider), and contains the AI-generated patch and the rotation playbook.
-      </P>
-
-      <H2>Auto-Patch Generation</H2>
-      <P>
-        Vooda generates a Pull Request that removes the leaked secret and replaces it with an environment-variable
-        reference. The PR description includes the finding ID, masked value, recommended vault path, and
-        rotation guidance.
-      </P>
-      <Code>{`curl -X POST https://vooda.acme.com/api/v1/findings/finding_01H.../auto-patch \\
-  -H "Authorization: Bearer $TOKEN" \\
-  -d '{ "branch": "vooda/remove-secret-finding-01H...", "open_pr": true }'
-
-# Response
-{ "patch_id": "p_01H...", "pr_url": "https://github.com/acme/repo/pull/4242", "status": "pr_open" }`}</Code>
-      <Warn>The auto-patch removes the secret from the working tree at <em>HEAD</em>. It does <strong>not</strong> rewrite history. Always rotate the credential in addition to removing the source-tree reference.</Warn>
-
-      <H2>Approval Flow</H2>
-      <P>
-        Auto-patches require approval before merging. The approver must hold <code>findings:triage</code> on the
-        repo's BU. The approval is recorded with actor, timestamp, and the patch diff hash so it cannot be
-        forged retroactively.
-      </P>
-
-      <H2>Bulk Remediation</H2>
-      <P>Group findings by correlation (the Triage findings guide) and apply the same patch across all members:</P>
-      <Endpoint method="POST" path="/api/v1/correlations/{id}/bulk-remediate" desc="Generate one patch per affected file across all correlated findings" />
+      <RoleBox role="developer (initiate); security-lead (credential rotation)" see="api" />
 
       <H2>MTTR Metrics</H2>
       <P>Mean Time to Remediate is calculated as <code>mean(remediated_at − detected_at)</code> across all findings remediated in the chosen window. Available per severity, per BU, per repo.</P>
@@ -1652,7 +1619,7 @@ git reflog expire --expire=now --all && git gc --prune=now --aggressive`}</Code>
       <NextSteps items={[
         { label: "Findings", href: "/docs?section=findings", desc: "Find what needs remediating." },
         { label: "Integrations", href: "/docs?section=integrations", desc: "Where rotation events get auto-routed (Jira, Slack, PagerDuty)." },
-        { label: "API Reference — Remediation", href: "/docs?section=api", desc: "Programmatic remediation + rotation-event ledger." },
+        { label: "API Reference — Rotation", href: "/docs?section=api", desc: "Rotation endpoints and the rotation-event ledger." },
       ]} />
     </>
   );
@@ -1671,7 +1638,7 @@ function IntegrationsContent() {
       <Img src="/docs/screenshots/integrations.png" alt="Integrations page" caption="Figure 16.1 — The Integrations hub at /integrations. Four categories in the community edition: AI Provider, Notifications, Webhooks (Inbound), and Ticketing. (Vault & Secret Managers and SIEM forwarding are Enterprise-only.)" />
 
       <H2>GitHub — Repository Scanner Integration</H2>
-      <P><strong>Purpose:</strong> Clone repositories over HTTPS, receive push/PR webhook events, post commit-status checks, and (optionally) open auto-remediation PRs.</P>
+      <P><strong>Purpose:</strong> Clone repositories over HTTPS, receive push/PR webhook events, and post commit-status checks.</P>
 
       <H3>Choose: GitHub App vs Personal Access Token</H3>
       <Tbl headers={["Auth method", "When to use", "Trade-offs"]} rows={[
@@ -1694,7 +1661,6 @@ function IntegrationsContent() {
         <ul className="space-y-1 mt-2">
           <Li><strong>Contents:Read</strong> — clone repository content for scanning</Li>
           <Li><strong>Metadata:Read</strong> — required automatically by GitHub</Li>
-          <Li><strong>Pull requests:Write</strong> — open auto-remediation PRs (optional; only requested if Auto-Patch is enabled)</Li>
           <Li><strong>Commit statuses:Write</strong> — post the gate-check status on PRs</Li>
           <Li><strong>Webhooks:Read</strong> — receive push and pull-request events</Li>
         </ul>
@@ -1722,7 +1688,6 @@ function IntegrationsContent() {
         <ul className="space-y-1 mt-2">
           <Li><strong>Contents</strong> → Read</Li>
           <Li><strong>Metadata</strong> → Read (auto)</Li>
-          <Li><strong>Pull requests</strong> → Write (only if Auto-Patch is enabled)</Li>
           <Li><strong>Commit statuses</strong> → Write</Li>
         </ul>
       </Step>
@@ -1755,7 +1720,6 @@ function IntegrationsContent() {
         ["403 on clone", "App or PAT missing Contents:Read", "Reinstall app with corrected permissions, or regenerate PAT."],
         ["Webhook ping fails with 401", "HMAC secret mismatch", "Re-copy the secret from GitHub into Integrations → Webhooks → GitHub."],
         ["No PR commit-status appearing", "Commit statuses:Write missing", "Add the permission and reinstall."],
-        ["Auto-PR fails with 403", "Pull requests:Write missing or branch protection blocks app", "Add app to bypass list in branch protection rules, or disable Auto-Patch."],
       ]} />
 
       <H2>GitLab</H2>
@@ -1819,7 +1783,7 @@ X-GitHub-Event: push
       <H2>AI Providers — Detailed Walkthrough</H2>
       <P>
         Vooda's AI triage engine accepts any of the providers below. You can configure several at once and route
-        different tasks (triage, verifier-fallback, remediation, rotation playbook) to different providers.
+        different tasks (triage, verifier-fallback, rotation playbook) to different providers.
       </P>
 
       <Img src="/docs/screenshots/integrations-ai.png" alt="AI Provider integration page" caption="Figure 16.16 — The AI Provider page at /integrations/ai. Click any provider tile to add a new connection." />
@@ -2128,7 +2092,6 @@ function ReportingContent() {
         <InfoCard title="Open findings" color="orange">Counts by severity. Trend chart vs prior 30 days.</InfoCard>
         <InfoCard title="MTTR" color="purple">Mean time to remediate, current vs prior period, broken down by severity.</InfoCard>
         <InfoCard title="AI accuracy">Per-tenant AI precision and recall versus team feedback.</InfoCard>
-        <InfoCard title="Remediation rate" color="blue">Percentage of TPs remediated within their SLA window.</InfoCard>
       </Grid2>
       <Endpoint method="GET" path="/api/v1/metrics/snapshot" desc="Single-call dashboard snapshot" />
       <Endpoint method="GET" path="/api/v1/metrics/trends?metric=mttr&window=90d&bucket=day" desc="Time-series for one metric" />
@@ -2484,19 +2447,6 @@ Retry-After: 23
   }
 }`}</Code>
 
-      <H3>remediation.started / completed / failed</H3>
-      <Code>{`{
-  "event_type": "remediation.completed",
-  "data": {
-    "finding_id": "finding_01H...",
-    "plan_id": "plan_01H...",
-    "rotation_event_id": "rot_01H...",
-    "pr_url": "https://github.com/acme/payments-api/pull/4271",
-    "verified_dead_after": true,
-    "duration_seconds": 132
-  }
-}`}</Code>
-
       <H3>policy.violated</H3>
       <P><strong>Trigger:</strong> a push-protection check or rule-override gate denies an action.</P>
       <Code>{`{
@@ -2824,7 +2774,7 @@ app.post("/vooda-hook", verifyHmac, async (req, res) => {
       ]} />
       <P>Notes:</P>
       <ul className="space-y-2 my-3">
-        <Li><code>remediation_status</code> is independent: <code>open → in_progress → rotated → resolved</code> (or <code>wontfix</code>) — flips automatically when a rotation event lands or manually via the Remediation Approve flow.</Li>
+        <Li><code>remediation_status</code> is independent: <code>open → in_progress → rotated → resolved</code> (or <code>wontfix</code>) — flips automatically when a rotation event lands.</Li>
         <Li>Every transition writes an <code>audit_events</code> row with the actor, before/after values, and the optimistic-lock version.</Li>
         <Li>Concurrent edits raise <code>409 stale_version</code>; clients must reload and re-issue with the new <code>expected_version</code>.</Li>
       </ul>
@@ -3368,8 +3318,7 @@ function GlossaryContent() {
       <Tbl headers={["Term", "Definition", "Not to be confused with"]} rows={[
         ["Tenant",           "One isolated customer organization in Vooda's multi-tenant database.", "Business Unit."],
         ["Business Unit (BU)", "Org-level grouping for access control and metrics. Repos + Sources + Users can be tagged.", "Tenant (we are multi-tenant, but BU is intra-tenant)."],
-        ["Rotation Event",   "An audit-logged record that a specific secret was rotated, by whom, when, and verified-dead-after.", "Remediation Plan."],
-        ["Remediation Plan", "An AI-generated step-by-step rotation playbook — must be approved before execution.", "Rotation Event."],
+        ["Rotation Event",   "An audit-logged record that a specific secret was rotated, by whom, when, and verified-dead-after.", "Audit Event."],
         ["Audit Event",      "A row in audit_events recording any state-changing action (auth, triage, rotation, config change).", "Rotation Event (which is a specific kind of audit event)."],
         ["Verifier",         "A small adapter that calls the upstream service to confirm a credential is live. 90+ secret types have one.", "AI triage (verifier is deterministic, doesn't use an LLM)."],
       ]} />
@@ -3491,7 +3440,7 @@ function AirgappedContent() {
         and set the endpoint to <code>http://host.docker.internal:11434</code> (containers reach the host at
         <code> host.docker.internal</code>, not <code>localhost</code>). Leave the API key blank. Click
         <strong> Validate &amp; Load Models</strong> and pick your model. <em>Result:</em> the provider shows
-        <strong> Triage</strong> and <strong>Remediation</strong> enabled.
+        <strong> Triage</strong> enabled.
       </Step>
       <Step n={3} title="Verify end to end">
         Add a repository, run a scan, and open a finding. <em>Result:</em> the finding shows an AI verdict and
@@ -3702,14 +3651,13 @@ function DashboardContent() {
         ["Time range (top-right)", "Every number and chart is limited to this window — Last 24 hours through All time. Change it to see today’s picture or a long-term trend. “— vs Previous” on a tile means there is no earlier period to compare against yet."],
       ]} />
 
-      <H2>The five headline tiles</H2>
+      <H2>The four headline tiles</H2>
       <P>The top row is your at-a-glance scorecard. Left to right:</P>
       <Tbl headers={["Tile", "What it tells you", "What to do with it"]} rows={[
         ["Open Secrets", "Real secrets still open and needing attention — what Vooda detected, minus everything it filtered out as noise (false positives). The small line shows that split, e.g. “1,935 detected · 1,788 filtered as noise.”", "This is your working backlog. Drive it toward zero."],
         ["Severity Mix", "How urgent those open secrets are, split into Critical, High, Medium and Low.", "Work Critical and High first — those are the ones that hurt."],
         ["Active Credentials", "Secrets Vooda tested against the real provider and confirmed are still live. The most dangerous kind — a working key someone could use this minute.", "Rotate these immediately. This number should be zero. Anything above zero flips your posture to “At Risk.”"],
         ["Mean Time to Remediate", "The average time from a secret being found to being fixed. A dash means nothing has been resolved yet, so there is no average to show — not that it is zero.", "Watch it trend downward over weeks. It is a measure of how fast your team closes exposures."],
-        ["Auto-Fix", "How many open secrets already have a ready-made draft fix Vooda generated, and how many of those you have applied. “61 of 147 have a draft fix · 0 applied.”", "Review the drafts and apply the good ones. Use “Generate missing fixes” to draft fixes for the rest."],
       ]} />
       <Tip>A dash (“—”) anywhere on the dashboard means “not enough data to show a number yet,” never “zero.” It disappears on its own once there is something real to measure.</Tip>
 
@@ -3718,7 +3666,7 @@ function DashboardContent() {
         ["Findings Trend", "New secrets found across the selected time range, day by day. A downward slope is good — fewer new leaks are appearing."],
         ["Findings by Source", "Where your secrets come from — code repositories versus DevOps sources — as a share of the total, so you know where to focus prevention."],
         ["Top Leaking Repositories", "Your worst repositories, ranked by open secrets, each with its Critical and High counts. The header line — Configured · Scanned · Leaking — tells you coverage at a glance."],
-        ["Quick Actions", "One-click jumps to the work that matters most: live credentials to rotate, the triage queue awaiting review, draft fixes awaiting your approval, and secrets awaiting rotation. Each shows a live count."],
+        ["Quick Actions", "One-click jumps to the work that matters most: live credentials to rotate, the triage queue awaiting review, and secrets awaiting rotation. Each shows a live count."],
         ["Verifier Breakdown", "Of the secrets Vooda checked against the live provider, how many came back live, inactive, or still unverified. The “Top Secret Types” list beneath it shows what kinds of secrets you have across all findings (AWS, SSH, Postgres, and so on)."],
         ["AI Triage Confidence", "How confident Vooda’s AI was across its verdicts, and — once your team has confirmed some — how often it agreed with your reviewers. A dash for accuracy means no human confirmations yet."],
         ["Recent Activity", "The latest actions across your workspace — scans, triage decisions, rule changes — with who did each and when. Your audit trail at a glance."],
@@ -3730,7 +3678,6 @@ function DashboardContent() {
         <Li><strong>Glance at the posture banner and Active Credentials.</strong> Anything confirmed live gets rotated now — nothing else on the page is more urgent.</Li>
         <Li><strong>Work the Severity Mix top-down.</strong> Clear Critical, then High. Click the tile to open those findings.</Li>
         <Li><strong>Use Top Leaking Repositories to focus.</strong> A handful of repos usually holds most of the risk — fix those first.</Li>
-        <Li><strong>Review Auto-Fix drafts.</strong> Approve the good ones; the fix ships as a pull request. Generate the missing ones if you want fuller coverage.</Li>
         <Li><strong>Check the Trend and Mean Time to Remediate weekly.</strong> Both should move the right way over time — fewer new leaks, faster fixes.</Li>
       </ul>
 
@@ -3738,7 +3685,7 @@ function DashboardContent() {
 
       <NextSteps items={[
         { label: "Triage findings", href: "/docs?section=findings", desc: "What to do once you click into a tile — confirm, dismiss, or accept a finding." },
-        { label: "Remediate and rotate secrets", href: "/docs?section=remediation", desc: "Turn a draft fix into a merged pull request, and rotate a live credential safely." },
+        { label: "Remediate and rotate secrets", href: "/docs?section=remediation", desc: "Rotate a live credential safely and track it to closure." },
         { label: "Generate reports", href: "/docs?section=reporting", desc: "Turn the dashboard picture into a shareable report for stakeholders." },
       ]} />
     </>

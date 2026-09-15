@@ -6,6 +6,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import { getFindings, getRotationSummary, getRotationEvents, triageFinding } from "@/lib/api";
+import { providerConsole } from "@/lib/providerConsoles";
 
 // ── Helpers ────────────────────────────────────────────────────────
 // Full unit names with proper singular/plural — matches the dashboard's
@@ -468,13 +469,22 @@ export default function RotationPage() {
                       </td>
                       <td className="py-2.5 px-3">
                         <div className="flex items-center justify-end gap-1.5">
-                          <Link
-                            href={`/findings/${item.id}#rotation`}
-                            className="text-[10px] px-2 py-1 rounded bg-white/[0.04] text-slate-400 hover:bg-white/[0.08] hover:text-slate-200 transition-colors"
-                            title="Open rotation playbook for this provider"
-                          >
-                            Playbook
-                          </Link>
+                          {(() => {
+                            // Every row is verified live, so the useful jump
+                            // is the provider page where it gets revoked.
+                            const c = providerConsole(item.provider, item.secret_type);
+                            return c ? (
+                              <a
+                                href={c.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[10px] px-2 py-1 rounded bg-white/[0.04] text-slate-400 hover:bg-white/[0.08] hover:text-slate-200 transition-colors"
+                                title={`Revoke and reissue in ${c.label}`}
+                              >
+                                Console ↗
+                              </a>
+                            ) : null;
+                          })()}
                           <button
                             onClick={() => handleMarkRotated(item.id)}
                             disabled={actionLoading === item.id}

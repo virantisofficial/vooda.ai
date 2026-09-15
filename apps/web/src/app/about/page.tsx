@@ -7,7 +7,6 @@ import AppShell from "@/components/layout/AppShell";
 const COMPONENTS = [
   { name: "Vooda AI Engine", desc: "Pattern-based security analysis engine", status: "Active", color: "text-red-400", bg: "bg-red-500/10" },
   { name: "AI Triage", desc: "False positive reduction with framework awareness", status: "Active", color: "text-purple-400", bg: "bg-purple-500/10" },
-  { name: "AI Remediation", desc: "Secure code patch generation", status: "Active", color: "text-green-400", bg: "bg-green-500/10" },
   { name: "Scanner Bridge", desc: "Multi-scanner import and correlation", status: "Active", color: "text-orange-400", bg: "bg-orange-500/10" },
 ];
 
@@ -43,8 +42,8 @@ export default function AboutPage() {
         <div className="card">
           <p className="text-sm text-slate-400 leading-relaxed">
             Vooda AI AI combines industry-leading static analysis detection engines with proprietary AI-powered
-            false positive reduction and auto-remediation technology. The platform validates, correlates,
-            and prioritizes findings from any scanner — then generates secure code fixes automatically.
+            false positive reduction technology. The platform validates, correlates,
+            and prioritizes findings from any scanner.
           </p>
         </div>
 

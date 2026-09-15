@@ -129,7 +129,6 @@ export interface FindingDetail extends FindingListItem {
   is_suppressed: boolean;
   evidence: Evidence[];
   decisions: Decision[];
-  remediation_plans: RemediationPlanSummary[];
   updated_at: string;
 }
 
@@ -148,10 +147,4 @@ export interface Decision {
   user_id: string;
   previous_classification: string | null;
   new_classification: string | null;
-}
-
-export interface RemediationPlanSummary {
-  id: string;
-  summary: string;
-  confidence: number | null;
 }

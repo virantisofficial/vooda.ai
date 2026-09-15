@@ -53,7 +53,7 @@ const PAGE_SIZE = 50;
 // file for the implementation + the `kind` prop that toggles between
 // findings (/reports/export/{format}) and incidents (/incidents/export/csv).
 
-type SortField = "priority" | "created_at" | "severity" | "classification" | "ai_confidence" | "title" | "remediation_status";
+type SortField = "priority" | "created_at" | "severity" | "classification" | "ai_confidence" | "title";
 type SortDir = "asc" | "desc";
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -81,36 +81,6 @@ function getSlaStatus(severity: string, createdAt: string): { color: string; lab
   if (days > threshold) return { color: "bg-red-400", label: `${days - threshold}d overdue`, overdue: true };
   if (days > threshold * 0.8) return { color: "bg-yellow-400", label: `${threshold - days}d left`, overdue: false };
   return { color: "bg-green-400", label: `${threshold - days}d left`, overdue: false };
-}
-
-// ── Remediation status icon ───────────────────────────
-function RemediationIcon({ status }: { status: string }) {
-  if (status === "patch_generated" || status === "proposed") return (
-    <span className="flex items-center gap-1 text-[10px] text-red-400" title="Patch ready">
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
-    </span>
-  );
-  if (status === "approved") return (
-    <span className="flex items-center gap-1 text-[10px] text-green-400" title="Approved">
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-    </span>
-  );
-  if (status === "applied") return (
-    <span className="flex items-center gap-1 text-[10px] text-green-400" title="Applied">
-      <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-    </span>
-  );
-  if (status === "rejected") return (
-    <span className="flex items-center gap-1 text-[10px] text-red-400" title="Rejected">
-      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-    </span>
-  );
-  if (status === "pending" || status === "in_progress") return (
-    <span className="flex items-center gap-1 text-[10px] text-yellow-400" title="Generating...">
-      <div className="w-3 h-3 border border-yellow-400/50 border-t-yellow-400 rounded-full animate-spin" />
-    </span>
-  );
-  return <span className="text-[10px] text-slate-700" title="No fix">—</span>;
 }
 
 // ── Sort header ───────────────────────────────────────
@@ -148,12 +118,10 @@ function FindingsPageInner() {
   const repoIdFromUrl = searchParams?.get("repository_id") || "";
   const classificationFromUrl = searchParams?.get("classification") || "";
   const scanSourceIdFromUrl = searchParams?.get("scan_source_id") || "";
-  // Dashboard Quick Actions deeplink here with ?validation_status=active
-  // (Active Credentials) and ?remediation_status=PATCH_GENERATED (Pending
-  // Patches). Both URL filters need to be honored on the initial render
-  // so the Quick Action lands on a pre-filtered list, not "all findings".
+  // The dashboard's Active Credentials quick action deeplinks here with
+  // ?validation_status=active. The URL filter must be honored on the
+  // initial render so it lands on a pre-filtered list, not "all findings".
   const validationStatusFromUrl = searchParams?.get("validation_status") || "";
-  const remediationStatusFromUrl = searchParams?.get("remediation_status") || "";
   // Tab state removed — Suppressions and Schedules moved to Settings
 
   const [findings, setFindings] = useState<FindingListItem[]>([]);
@@ -176,7 +144,6 @@ function FindingsPageInner() {
     tag: "",
     scanner_name: "",
     validation_status: validationStatusFromUrl,
-    remediation_status: remediationStatusFromUrl,
   });
   // List of connected sources (id + name + source_type) — populated
   // once on mount and used to render the "Source" filter dropdown.
@@ -515,7 +482,6 @@ function FindingsPageInner() {
     if (filters.scan_source_id) params.scan_source_id = filters.scan_source_id;
     if (filters.tag) params.tag = filters.tag;
     if (filters.validation_status) params.validation_status = filters.validation_status;
-    if (filters.remediation_status) params.remediation_status = filters.remediation_status;
     if (includeArchivedSources) params.include_archived_sources = "true";
 
     getFindings(params)
@@ -910,16 +876,10 @@ function FindingsPageInner() {
                   <button onClick={() => { setFilters((f) => ({ ...f, validation_status: "" })); setPage(1); window.history.replaceState(null, "", "/findings"); }} className="ml-1 hover:text-white"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
                 </span>
               )}
-              {filters.remediation_status && (
-                <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/20 font-medium">
-                  Remediation: {filters.remediation_status.replace(/_/g, " ").toLowerCase()}
-                  <button onClick={() => { setFilters((f) => ({ ...f, remediation_status: "" })); setPage(1); window.history.replaceState(null, "", "/findings"); }} className="ml-1 hover:text-white"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
-                </span>
-              )}
             </div>
           </div>
-          {(repoName || filters.classification || filters.severity || filters.tag || filters.validation_status || filters.remediation_status || filters.scan_source_id) && (
-            <button onClick={() => { setFilters({ severity: "", classification: "", search: "", repository_id: "", scan_source_id: "", tag: "", scanner_name: "", validation_status: "", remediation_status: "" }); setRepoName(null); setPage(1); window.history.replaceState(null, "", "/findings"); }}
+          {(repoName || filters.classification || filters.severity || filters.tag || filters.validation_status || filters.scan_source_id) && (
+            <button onClick={() => { setFilters({ severity: "", classification: "", search: "", repository_id: "", scan_source_id: "", tag: "", scanner_name: "", validation_status: "" }); setRepoName(null); setPage(1); window.history.replaceState(null, "", "/findings"); }}
               className="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear all filters</button>
           )}
         </div>

@@ -9,7 +9,7 @@ import {
   getExecutiveSummary, getAgingReport, getRepoRiskReport,
   getDeveloperActivity, getComplianceReport,
   getOWASPReport, getTrendData, getAIAccuracy,
-  getRemediationMetrics, getFindingsMetrics, getRepositories, getBusinessUnits,
+  getFindingsMetrics, getRepositories, getBusinessUnits,
   getReleaseReadiness, getSecurityDebt, getFixPriority,
   getDeveloperReport,
 } from "@/lib/api";
@@ -123,7 +123,7 @@ function ExportDropdown({ reportType = "executive", repositoryId }: { reportType
 }
 
 // ── Types ─────────────────────────────────────────────
-type ReportTab = "executive" | "compliance" | "aging" | "trends" | "repo_risk" | "ai" | "remediation" | "developer" | "release_readiness" | "security_debt" | "fix_priority" | "developer_report";
+type ReportTab = "executive" | "compliance" | "aging" | "trends" | "repo_risk" | "ai" | "developer" | "release_readiness" | "security_debt" | "fix_priority" | "developer_report";
 
 // Governance tab removed 2026-05-16 alongside the governance product surface.
 const TABS: { key: ReportTab; label: string; icon: string; group?: string }[] = [
@@ -136,7 +136,6 @@ const TABS: { key: ReportTab; label: string; icon: string; group?: string }[] = 
   { key: "trends", label: "Trends", icon: "📈", group: "Analytics" },
   { key: "repo_risk", label: "Repo Risk", icon: "🏢", group: "Analytics" },
   { key: "ai", label: "AI Performance", icon: "🧠", group: "Analytics" },
-  { key: "remediation", label: "Rotation Status", icon: "🔧", group: "Operations" },
   { key: "developer", label: "Activity", icon: "👤", group: "Operations" },
 ];
 
@@ -347,41 +346,8 @@ function ExecutiveReport({ repoId }: { repoId?: string }) {
         </div>
       </div>
 
-      {/* ═══ Section 5: Remediation Pipeline + AI Performance + SLA ═══ */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Remediation pipeline */}
-        <div className="card">
-          <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Remediation Pipeline</h3>
-          {(() => {
-            const p = data.remediation_pipeline || {};
-            const stages = [
-              { label: "Open", value: (p["RemediationStatus.NONE"] ?? 0) + (p["none"] ?? 0), color: "bg-slate-500" },
-              { label: "Pending", value: (p["RemediationStatus.PENDING"] ?? 0) + (p["pending"] ?? 0), color: "bg-yellow-500" },
-              { label: "Patch Generated", value: (p["RemediationStatus.PATCH_GENERATED"] ?? 0) + (p["patch_generated"] ?? 0), color: "bg-purple-500" },
-              { label: "Approved", value: (p["RemediationStatus.APPROVED"] ?? 0) + (p["approved"] ?? 0), color: "bg-red-500" },
-              { label: "Applied", value: (p["RemediationStatus.APPLIED"] ?? 0) + (p["applied"] ?? 0), color: "bg-green-500" },
-            ];
-            const total = stages.reduce((s, st) => s + st.value, 0) || 1;
-            return (
-              <div className="space-y-2">
-                {/* Funnel bar */}
-                <div className="flex gap-0.5 h-3 rounded-full overflow-hidden bg-white/[0.03]">
-                  {stages.filter(s => s.value > 0).map(s => (
-                    <div key={s.label} className={`${s.color} transition-all`} style={{ width: `${(s.value / total) * 100}%` }} title={`${s.label}: ${s.value}`} />
-                  ))}
-                </div>
-                {stages.map(s => (
-                  <div key={s.label} className="flex items-center gap-2 text-xs">
-                    <span className={`w-2 h-2 rounded-full ${s.color} shrink-0`} />
-                    <span className="text-slate-400 flex-1">{s.label}</span>
-                    <span className="font-semibold text-slate-300">{s.value}</span>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-        </div>
-
+      {/* ═══ Section 5: AI Performance + SLA ═══ */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* AI Performance */}
         <div className="card">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">AI Performance</h3>
@@ -1076,134 +1042,6 @@ function AIReport({ repoId }: { repoId?: string }) {
   );
 }
 
-function RemediationReport({ repoId }: { repoId?: string }) {
-  const [data, setData] = useState<any>(null);
-  useEffect(() => { setData(null); getRemediationMetrics(repoId).then(r => setData(r.data)).catch(() => {}); }, [repoId]);
-  if (!data) return <Spinner />;
-
-  const statuses = data.by_remediation_status || {};
-  const entries = Object.entries(statuses).map(([k, v]) => [k.replace("RemediationStatus.", "").replace(/_/g, " "), v as number] as [string, number]);
-  const maxVal = Math.max(...entries.map(([, v]) => v), 1);
-  const bySev = data.by_severity || {};
-  const patchRate = data.patch_rate || 0;
-
-  const SEV_COLORS: Record<string, { text: string; bg: string }> = {
-    critical: { text: "text-red-400", bg: "bg-red-500/15" },
-    high: { text: "text-orange-400", bg: "bg-orange-500/15" },
-    medium: { text: "text-yellow-400", bg: "bg-yellow-500/15" },
-    low: { text: "text-blue-400", bg: "bg-blue-500/15" },
-  };
-
-  const ActionTable = ({ title, items, color }: { title: string; items: any[]; color: string }) => {
-    if (!items || items.length === 0) return null;
-    return (
-      <div className={`card border-${color}-500/20`}>
-        <h3 className={`text-xs font-semibold text-${color}-400 uppercase tracking-wider mb-2`}>{title}</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs table-fixed">
-            <colgroup>
-              <col style={{ width: "22%" }} />
-              <col style={{ width: "8%" }} />
-              <col style={{ width: "10%" }} />
-              <col style={{ width: "7%" }} />
-              <col style={{ width: "13%" }} />
-              <col style={{ width: "12%" }} />
-              <col style={{ width: "28%" }} />
-            </colgroup>
-            <thead>
-              <tr className="border-b border-white/[0.06]">
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase">Finding</th>
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase">Severity</th>
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase">Status</th>
-                <th className="py-1.5 text-right text-[9px] font-semibold text-slate-500 uppercase">Age</th>
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase pl-2">Repository</th>
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase">Owner</th>
-                <th className="py-1.5 text-left text-[9px] font-semibold text-slate-500 uppercase">Location</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((f: any) => {
-                const sc = SEV_COLORS[f.severity] || { text: "text-slate-400", bg: "bg-slate-500/15" };
-                return (
-                  <tr key={f.id} className="border-b border-white/[0.03] last:border-0 hover:bg-white/[0.02]">
-                    <td className="py-1.5 pr-2 truncate">
-                      <Link href={`/findings/${f.id}`} className="text-xs text-slate-300 hover:text-red-400">{f.title}</Link>
-                    </td>
-                    <td className="py-1.5"><span className={`text-[10px] px-1.5 py-0.5 rounded ${sc.bg} ${sc.text}`}>{f.severity}</span></td>
-                    <td className="py-1.5 text-xs text-slate-400 truncate">{f.status}</td>
-                    <td className="py-1.5 text-right text-xs text-slate-400">{f.age_days}d</td>
-                    <td className="py-1.5 text-left text-xs text-slate-400 truncate pl-2">{f.repo_name || "—"}</td>
-                    <td className="py-1.5 text-left truncate">
-                      <span className={`text-xs ${f.assignee === "Unassigned" ? "text-amber-400 font-medium" : "text-slate-400"}`}>{f.assignee}</span>
-                    </td>
-                    <td className="py-1.5 text-left text-[10px] text-slate-500 truncate font-mono">{f.file || "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="space-y-4">
-      {/* KPI Cards — compact row */}
-      <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-        <StatCard label="Total" value={data.total_findings || 0} color="text-red-400" />
-        <StatCard label="Patched" value={data.patched || 0} color="text-green-400" />
-        <StatCard label="Fix Rate" value={`${patchRate}%`} color={patchRate > 50 ? "text-green-400" : "text-yellow-400"} />
-        <StatCard label="Pending" value={data.pending_review || 0} color={data.pending_review > 0 ? "text-orange-400" : "text-green-400"} />
-        <StatCard label="Stalled" value={data.stalled_count || 0} sub=">7 days" color={data.stalled_count > 0 ? "text-red-400" : "text-green-400"} />
-        <StatCard label="Unassigned" value={data.unassigned_count || 0} color={data.unassigned_count > 0 ? "text-red-400" : "text-green-400"} />
-      </div>
-
-      {/* Pipeline by Status */}
-      <div className="card">
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Pipeline by Status</h3>
-        {entries.length === 0 ? (
-          <p className="text-sm text-slate-500 py-4 text-center">No remediation data</p>
-        ) : entries.map(([status, count]) => (
-          <BarH key={status} label={status} value={count} max={maxVal}
-            color={status.includes("applied") ? "#22c55e" : status.includes("approved") ? "#22d3ee" : status.includes("generated") || status.includes("patch") ? "#a855f7" : status.includes("pending") ? "#f97316" : "#64748b"} />
-        ))}
-      </div>
-
-      {/* Pipeline by Severity */}
-      {Object.keys(bySev).length > 0 && (
-        <div className="card">
-          <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Pipeline by Severity</h3>
-          <div className="space-y-1.5">
-            {["critical", "high", "medium", "low"].map(sev => {
-              const sevData = bySev[sev];
-              if (!sevData) return null;
-              const total = Object.values(sevData as Record<string, number>).reduce((a: number, b: number) => a + b, 0);
-              const fixed = (sevData.approved || 0) + (sevData.applied || 0) + (sevData.patch_generated || 0);
-              const pct = total > 0 ? Math.round((fixed / total) * 100) : 0;
-              const sc = SEV_COLORS[sev] || { text: "text-slate-400", bg: "" };
-              return (
-                <div key={sev} className="flex items-center gap-2">
-                  <span className={`text-[9px] uppercase w-14 font-semibold ${sc.text}`}>{sev}</span>
-                  <div className="flex-1 h-2.5 rounded-full bg-white/[0.04] overflow-hidden">
-                    <div className="h-full rounded-full transition-all duration-500 bg-red-500/60" style={{ width: `${pct}%` }} />
-                  </div>
-                  <span className="text-[10px] text-slate-400 w-24 text-right">{fixed}/{total} fixed ({pct}%)</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Actionable tables */}
-      <ActionTable title={`Awaiting Approval (${data.awaiting_approval_count || 0})`} items={data.awaiting_approval || []} color="purple" />
-      <ActionTable title={`Stalled > 7 Days (${data.stalled_count || 0})`} items={data.stalled || []} color="red" />
-      <ActionTable title={`Unassigned (${data.unassigned_count || 0})`} items={data.unassigned || []} color="amber" />
-    </div>
-  );
-}
-
 function DeveloperReport() {
   const [data, setData] = useState<any>(null);
   const [days, setDays] = useState(30);
@@ -1468,7 +1306,6 @@ function getContent(tab: ReportTab, repoId?: string): React.ReactNode {
     case "trends": return <TrendsReport />;
     case "repo_risk": return <RepoRiskReport />;
     case "ai": return <AIReport key={repoId || "all"} repoId={repoId} />;
-    case "remediation": return <RemediationReport key={repoId || "all"} repoId={repoId} />;
     case "developer": return <DeveloperReport />;
     case "release_readiness": return <ReleaseReadinessReport key={repoId || "all"} repoId={repoId} />;
     case "security_debt": return <SecurityDebtReport key={repoId || "all"} repoId={repoId} />;

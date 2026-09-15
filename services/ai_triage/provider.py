@@ -397,59 +397,34 @@ def create_provider(
 
 async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[AIProvider]:
     """
-    Look up the configured model for a specific task and return a provider.
-    Falls back to env vars if no DB config exists.
+    Return a provider for the tenant's AI model — there is exactly one per
+    tenant — falling back to env vars when none is configured or it is
+    disabled. Triage is the only AI task; `task` is kept for callers.
     Pass `db` session when calling from Celery workers to avoid event loop issues.
     """
     from apps.api.app.models.ai_model import AIModelConfig
     from sqlalchemy import select
 
+    query = select(AIModelConfig).where(
+        AIModelConfig.tenant_id == tenant_id,
+        AIModelConfig.is_active == True,
+    ).limit(1)
     if db:
         # Use provided session (from worker's own event loop)
-        result = await db.execute(
-            select(AIModelConfig).where(
-                AIModelConfig.tenant_id == tenant_id,
-                AIModelConfig.is_active == True,
-            ).order_by(AIModelConfig.is_primary.desc())
-        )
-        models = result.scalars().all()
+        m = (await db.execute(query)).scalar_one_or_none()
     else:
         # Create own session (for API context)
         from apps.api.app.core.database import async_session_factory
         async with async_session_factory() as session:
-            result = await session.execute(
-                select(AIModelConfig).where(
-                    AIModelConfig.tenant_id == tenant_id,
-                    AIModelConfig.is_active == True,
-                ).order_by(AIModelConfig.is_primary.desc())
-            )
-            models = result.scalars().all()
+            m = (await session.execute(query)).scalar_one_or_none()
 
-    # Find model assigned to this task
-    for m in models:
-        if task in (m.tasks or []):
-            return create_provider(
-                m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
-                extra_payload=m.provider_config or None,
-            )
+    if m:
+        return create_provider(
+            m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
+            extra_payload=m.provider_config or None,
+        )
 
-    # Remediation is opt-in by explicit model assignment: if no model is
-    # assigned to it, remediation simply does not run (the tenant chose
-    # identification-only). No primary/env fallback — otherwise
-    # "triage-only" would still generate fixes. Triage keeps the
-    # fallback below so a single configured model still triages.
-    if task == "remediation":
-        return None
-
-    # Fallback: primary model regardless of task
-    for m in models:
-        if m.is_primary and m.api_key_encrypted:
-            return create_provider(
-                m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
-                extra_payload=m.provider_config or None,
-            )
-
-    # Final fallback: env vars
+    # Fallback: env vars
     from apps.api.app.core.config import settings
     if settings.ANTHROPIC_API_KEY:
         return create_provider("claude", settings.ANTHROPIC_API_KEY, settings.AI_MODEL)

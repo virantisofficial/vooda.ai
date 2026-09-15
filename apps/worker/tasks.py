@@ -509,7 +509,7 @@ async def _emit_triage_health_signal(
     """Stamp model health + notify admins when triage is silently failing.
 
     When parse_failure_rate exceeds the threshold, update
-    ai_model_configs.last_error on the primary model so the config card
+    ai_model_configs.last_error on the tenant's model so the config card
     shows a "broken" badge, and insert a row into the notifications
     table so the header bell can surface it. The `failure_summary` dict
     (from _run_ai_triage) picks the message variant — upstream errors,
@@ -526,16 +526,16 @@ async def _emit_triage_health_signal(
         _select(AIModelConfig).where(
             AIModelConfig.tenant_id == tenant_id,
             AIModelConfig.is_active == True,  # noqa: E712
-        ).order_by(AIModelConfig.is_primary.desc()).limit(1)
+        ).limit(1)
     )
-    primary = mc_q.scalars().first()
-    if not primary:
+    model_cfg = mc_q.scalars().first()
+    if not model_cfg:
         return
 
     if triaged == 0 or parse_failure_rate < _TRIAGE_PARSE_FAILURE_THRESHOLD:
         # Healthy run — clear any stale "triage_parse_failure:" warning.
-        if primary.last_error and primary.last_error.startswith("triage_parse_failure:"):
-            primary.last_error = None
+        if model_cfg.last_error and model_cfg.last_error.startswith("triage_parse_failure:"):
+            model_cfg.last_error = None
             await db.flush()
         return
 
@@ -551,7 +551,7 @@ async def _emit_triage_health_signal(
         f"triage_parse_failure: {failed}/{triaged} findings — {short_summary} "
         f"(failure_type={dominant_type})."
     )
-    primary.last_error = err_msg[:500]
+    model_cfg.last_error = err_msg[:500]
 
     user_q = await db.execute(
         _select(User.id).where(User.tenant_id == tenant_id).limit(1)
@@ -564,14 +564,14 @@ async def _emit_triage_health_signal(
     notif = Notification(
         tenant_id=tenant_id,
         user_id=user_id,
-        title=f"AI triage failing on {primary.name}",
+        title=f"AI triage failing on {model_cfg.name}",
         body=f"{failed} of {triaged} findings: {short_summary}. {full_body}",
         notification_type="triage_health",
         resource_type="ai_model",
-        resource_id=str(primary.id),
+        resource_id=str(model_cfg.id),
         is_read=False,
         metadata_={
-            "model_id": primary.model_id,
+            "model_id": model_cfg.model_id,
             "scan_job_id": str(scan_job_id),
             "triaged": triaged,
             "classified": classified,
@@ -5203,58 +5203,6 @@ async def _run_scan_job(scan_job_id: str):
                 job.progress_pct = 75
                 await db.commit()
 
-            # ── Step 5b: Auto-generate remediation for ALL true positives ──
-            # Only when a model is assigned to the remediation task. If the
-            # tenant configured triage-only (or no model), remediation does
-            # not run — Vooda is identification-only, and no empty "failed"
-            # plans are created.
-            from services.ai_triage.provider import get_provider_for_task as _gpft
-            _rem_provider = None
-            try:
-                _rem_provider = await _gpft("remediation", str(job.tenant_id), db=db)
-            except Exception:
-                _rem_provider = None
-            auto_remediated = 0
-            if triaged > 0 and has_ai and _rem_provider is not None:
-                try:
-                    # Find ALL true positives from this scan
-                    tp_findings = await db.execute(
-                        select(NormalizedFinding).where(
-                            NormalizedFinding.scan_job_id == job.id,
-                            NormalizedFinding.classification == Cls.LIKELY_TRUE_POSITIVE,
-                        )
-                    )
-                    tp_list = tp_findings.scalars().all()
-
-                    if tp_list:
-                        job.status_message = f"[7b/8] Auto Remediation — generating secure code fixes for {len(tp_list)} true positives..."
-                        job.progress_pct = 85
-                        try:
-                            await _emit_phase("analyzing", 85, job.status_message, step=7)
-                        except Exception:
-                            pass
-                        await db.commit()
-
-                    for finding in tp_list:
-                        finding.remediation_status = "pending"
-                        generate_remediation.delay(str(finding.id))
-                        auto_remediated += 1
-
-                    if auto_remediated > 0:
-                        await db.commit()
-                        logger.info("auto_remediation_queued", scan_job_id=scan_job_id, count=auto_remediated)
-
-                except Exception as ar_err:
-                    logger.warning("auto_remediation_failed", error=str(ar_err)[:200])
-
-            elif created_count > 0 and not has_ai:
-                if skip_ai:
-                    job.status_message = "[7b/8] Auto Remediation skipped by user"
-                else:
-                    job.status_message = "[7b/8] Auto Remediation not enabled (no remediation model configured)"
-                job.progress_pct = 90
-                await db.commit()
-
             # ── Step 5c: Secret Validation (verify if detected secrets are active) ──
             try:
                 from services.secret_validation.engine import SecretValidationEngine, ValidationStatus
@@ -5426,8 +5374,6 @@ async def _run_scan_job(scan_job_id: str):
                     triaged=triaged,
                     findings_total=created_count,
                 )
-            if auto_remediated > 0:
-                parts.append(f"{auto_remediated} fixes generated")
             if created_count > 0 and triaged == 0:
                 if skip_ai:
                     parts.append("AI triage skipped (user choice)")
@@ -5473,7 +5419,6 @@ async def _run_scan_job(scan_job_id: str):
                 # `triaged` OR an inherited verdict), so a clean re-scan reads
                 # "N AI-triaged" instead of a false "AI triage pending".
                 "ai_triaged": max(triaged, ai_classified_count),
-                "auto_remediated": auto_remediated,
                 "cache_hits": cache_hits,
                 "cache_invalidated": cache_invalidated,
                 "cache_new": cache_new,
@@ -6120,7 +6065,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
     from services.code_context.extractor import extract_rich_context
 
     # Load AI Engine Settings from DB
-    ai_settings = {"context_mode": "smart", "analysis_mode": "batch_similar", "skip_ai_for_info": True,
+    ai_settings = {"context_mode": "smart", "skip_ai_for_info": True,
                     "ai_confidence_threshold": 0.6, "max_tokens_per_finding": 4096}
     try:
         from apps.api.app.models.ai_engine_settings import AIEngineSettings
@@ -6129,7 +6074,6 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if db_settings:
             ai_settings = {
                 "context_mode": db_settings.context_mode,
-                "analysis_mode": db_settings.analysis_mode,
                 "skip_ai_for_info": db_settings.skip_ai_for_info,
                 "ai_confidence_threshold": db_settings.ai_confidence_threshold,
                 "max_tokens_per_finding": db_settings.max_tokens_per_finding,
@@ -6137,7 +6081,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 "max_concurrent": db_settings.max_concurrent,
                 "rate_limit_rpm": db_settings.rate_limit_rpm,
             }
-        logger.info("ai_engine_settings_loaded", **{k: v for k, v in ai_settings.items() if k in ("context_mode", "analysis_mode", "skip_ai_for_info")})
+        logger.info("ai_engine_settings_loaded", **{k: v for k, v in ai_settings.items() if k in ("context_mode", "skip_ai_for_info")})
     except Exception as se:
         logger.warning("ai_engine_settings_fallback", error=str(se)[:100])
 
@@ -6158,7 +6102,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 select(AIModelConfig).where(
                     AIModelConfig.tenant_id == job.tenant_id,
                     AIModelConfig.is_active == True,
-                ).order_by(AIModelConfig.is_primary.desc())
+                ).limit(1)
             )
             mc = mc_result.scalars().first()
             if mc:
@@ -6429,42 +6373,17 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if (_hb_i + 1) % 50 == 0:
             await _stamp_heartbeat_main(job, db, commit=True)
 
-    # ── Pre-AI Deduplication (honours the "Finding Analysis" setting) ──
-    # `batch_similar` groups same CWE + file + rule findings — triage ONE,
-    # apply the verdict to all members. `individual` gives every finding
-    # its own AI call, which is what the UI promises for that option.
-    #
-    # This gate is the fix for a dead control: `analysis_mode` was read
-    # from the database and logged, but nothing ever branched on it, so
-    # grouping ran unconditionally and choosing "Individual" changed
-    # nothing. A setting that silently does nothing is worse than no
-    # setting — the operator believes they made a decision.
+    # ── Pre-AI Deduplication ──
+    # Findings sharing CWE + file + rule + snippet fingerprint are
+    # byte-identical and always receive the same verdict, so they are
+    # triaged once and the result is applied to every member.
     from services.ai_triage.dedup import (
-        group_findings_for_triage, apply_group_results, FindingGroup,
+        group_findings_for_triage, apply_group_results,
     )
 
-    _analysis_mode = (ai_settings.get("analysis_mode") or "batch_similar").lower()
-    if _analysis_mode == "individual":
-        # One AI call per finding: every finding is its own single-member
-        # group. Must be real FindingGroup objects — apply_group_results
-        # reads `group.member_ids`, so a plain list would raise here.
-        deduped_list = list(finding_data_list)
-        groups_map = {}
-        for _f in finding_data_list:
-            _fid = str(_f.get("id"))
-            groups_map[_fid] = FindingGroup(
-                representative_id=_fid,
-                member_ids=[_fid],
-                group_key=f"individual:{_fid}",
-                cwe=_f.get("cwe", "") or "",
-                file_path=_f.get("file_path", "") or "",
-                rule_id=_f.get("scanner_rule_id", "") or "",
-            )
-        dedup_saved = 0
-    else:
-        deduped_list, groups_map = group_findings_for_triage(finding_data_list)
-        dedup_saved = len(finding_data_list) - len(deduped_list)
-    logger.info("pre_ai_dedup_applied", analysis_mode=_analysis_mode,
+    deduped_list, groups_map = group_findings_for_triage(finding_data_list)
+    dedup_saved = len(finding_data_list) - len(deduped_list)
+    logger.info("pre_ai_dedup_applied",
                 original=len(finding_data_list), deduped=len(deduped_list), saved=dedup_saved)
 
     # Collect security evidence from the repo
@@ -6886,191 +6805,6 @@ async def _normalize_and_triage(scan_job_id: str):
 
             triaged, _dedup, _failure_summary = await _run_ai_triage(db, job, repo_path)
             logger.info("ai_triage_complete", scan_job_id=str(job.id), triaged=triaged)
-
-
-@celery_app.task(bind=True, max_retries=3)
-def generate_remediation(self, finding_id: str):
-    """Generate AI-powered remediation for a finding."""
-    logger.info("remediation_started", finding_id=finding_id)
-    run_async(_generate_remediation(finding_id))
-
-
-async def _generate_remediation(finding_id: str):
-    from apps.api.app.models.finding import NormalizedFinding
-    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch, PatchStatus
-    from apps.api.app.models.repository import RepositorySnapshot
-    from services.ai_triage.provider import create_provider, get_provider_for_task
-    from services.ai_remediation.engine import RemediationEngine
-    from services.code_context.extractor import extract_rich_context
-
-    async with await _get_db_session() as db:
-        result = await db.execute(
-            select(NormalizedFinding).where(NormalizedFinding.id == UUID(finding_id))
-        )
-        finding = result.scalar_one_or_none()
-        if not finding:
-            return
-
-        # The plan row is the attempt record, created before anything
-        # that can fail; every exit below settles its status, so a
-        # failed attempt is queryable rather than invisible.
-        plan = RemediationPlan(
-            finding_id=finding.id,
-            generated_by=f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
-            vulnerability_summary="",
-            root_cause="",
-            fix_rationale="",
-            status="generating",
-        )
-        db.add(plan)
-        await db.commit()
-
-        async def _settle(status: str, error: str | None = None,
-                          finding_status: str = "none") -> None:
-            plan.status = status
-            plan.error = (error or "")[:2000] or None
-            finding.remediation_status = finding_status
-            await db.commit()
-
-        # Get AI provider — DB model first, env vars fallback
-        provider = await get_provider_for_task("remediation", str(finding.tenant_id), db=db)
-        if not provider:
-            if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
-                logger.warning("no_ai_key_for_remediation", finding_id=finding_id)
-                await _settle("failed", "no AI provider configured for remediation")
-                return
-            provider = create_provider(
-                settings.AI_PROVIDER,
-                settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY,
-                settings.AI_MODEL,
-            )
-
-        snap_result = await db.execute(
-            select(RepositorySnapshot)
-            .where(RepositorySnapshot.repository_id == finding.repository_id)
-            .order_by(RepositorySnapshot.created_at.desc())
-            .limit(1)
-        )
-        snapshot = snap_result.scalar_one_or_none()
-        repo_path = snapshot.storage_path if snapshot else ""
-
-        try:
-            code_ctx = extract_rich_context(repo_path, finding.file_path, finding.line_start)
-        except Exception as ctx_err:
-            # A context failure must settle the attempt too, or the plan
-            # sits at 'generating' forever — the exact stuck state this
-            # trail exists to prevent, one step earlier.
-            await _settle("failed", f"context extraction: {ctx_err}")
-            return
-        code_ctx["vulnerable_code"] = code_ctx.get("code_snippet", "")
-        code_ctx["available_imports"] = ""
-
-        engine = RemediationEngine(provider)
-
-        finding_data = {
-            "title": finding.title,
-            "description": finding.description,
-            "vulnerability_category": finding.vulnerability_category,
-            "severity": finding.severity.value if hasattr(finding.severity, 'value') else str(finding.severity),
-            "cwe": finding.cwe,
-            "file_path": finding.file_path,
-            "line_start": finding.line_start,
-            "line_end": finding.line_end,
-        }
-        triage_result = {"reasoning_summary": finding.ai_explanation or ""}
-        repo_ctx = {"framework_context": ""}
-
-        try:
-            rem_result = await engine.generate_remediation(finding_data, triage_result, code_ctx, repo_ctx)
-        except Exception as gen_err:
-            logger.warning(
-                "remediation_generation_failed",
-                finding_id=finding_id, error=str(gen_err)[:200],
-            )
-            await _settle("failed", str(gen_err))
-            return
-
-        # G1b — the AI remediation result is free text that can echo the
-        # secret: the summary/root-cause/fix-rationale/notes describe the
-        # finding, and the patch_diff's `-` line is the original secret line.
-        # Scrub every string in the result before it's persisted + served.
-        from services.secret_scan.engine import scrub_secrets_in_obj as _scrub_obj
-        rem_result = _scrub_obj(rem_result)
-        plan.vulnerability_summary = rem_result.get("summary", "")
-        plan.root_cause = rem_result.get("root_cause", "")
-        plan.fix_rationale = rem_result.get("fix_rationale", "")
-        plan.developer_notes = rem_result.get("developer_notes", [])
-        plan.validation_steps = rem_result.get("validation_steps", [])
-        plan.risk_of_breakage = rem_result.get("risk_of_breakage", "unknown")
-        plan.confidence_score = rem_result.get("confidence_score")
-        await db.flush()
-
-        # PATCH_GENERATED claims a draft fix exists, so it is only
-        # stamped when a patch with a real diff is persisted alongside
-        # it. A plan-only result (no diff from the model) leaves the
-        # finding PENDING so it re-enters the queue instead of being
-        # reported as covered.
-        _diff = (rem_result.get("patch_diff") or "").strip()
-        if len(_diff) > 20:
-            patch = RemediationPatch(
-                plan_id=plan.id,
-                patch_diff=rem_result["patch_diff"],
-                files_changed=rem_result.get("files_changed", []),
-                status=PatchStatus.PROPOSED,
-                confidence_score=rem_result.get("confidence_score"),
-                safety_score=rem_result.get("safety_score"),
-            )
-            db.add(patch)
-            plan.status = "patched"
-            finding.remediation_status = "patch_generated"
-        else:
-            # NONE (a settled "no fix") keeps the finding re-queueable;
-            # PENDING would read as still in progress.
-            plan.status = "no_patch"
-            plan.error = "model returned a plan but no patch diff"
-            finding.remediation_status = "none"
-            logger.info(
-                "remediation_plan_only",
-                finding_id=str(finding.id),
-                detail="model returned a plan but no patch diff",
-            )
-        await db.commit()
-
-    logger.info("remediation_complete", finding_id=finding_id)
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  PR CREATION — push fixes to git
-# ═══════════════════════════════════════════════════════════════════
-
-@celery_app.task(bind=True, max_retries=2)
-def create_fix_pr(self, finding_id: str):
-    """Create a PR with the approved fix for a finding."""
-    logger.info("pr_creation_started", finding_id=finding_id)
-    run_async(_create_fix_pr(finding_id))
-
-
-async def _create_fix_pr(finding_id: str):
-    from services.pr_pipeline.engine import PRPipelineEngine
-
-    async with await _get_db_session() as db:
-        engine = PRPipelineEngine()
-        result = await engine.create_fix_pr(db, UUID(finding_id))
-        await db.commit()
-
-        if result.success:
-            logger.info("pr_created", finding_id=finding_id, pr_url=result.pr_url)
-        else:
-            logger.error("pr_creation_failed", finding_id=finding_id, error=result.error)
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  BATCH REMEDIATION — fix multiple findings at once
-# ═══════════════════════════════════════════════════════════════════
-
-# (An earlier batch_remediate here was shadowed by the definition
-# below — same task name — so only the later one ran. Removed to avoid
-# the trap; the fan-out variant below is the live one.)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -7865,118 +7599,6 @@ async def _dispatch_findings_to_tickets(scan_job_id: str):
                            scan_job_id=scan_job_id,
                            channel=r.channel, error=r.error)
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  PR CREATION — push fixes to git after patch approval
-# ═══════════════════════════════════════════════════════════════════
-
-@celery_app.task(bind=True, max_retries=2)
-def create_fix_pr(self, finding_id: str):
-    """Create a PR or push branch with the approved patch."""
-    logger.info("create_fix_pr_started", finding_id=finding_id)
-    run_async(_create_fix_pr(finding_id))
-
-
-async def _create_fix_pr(finding_id: str):
-    from apps.api.app.models.finding import NormalizedFinding
-    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch, PatchStatus
-    from apps.api.app.models.repository import Repository
-
-    async with await _get_db_session() as db:
-        finding = (await db.execute(
-            select(NormalizedFinding).where(NormalizedFinding.id == UUID(finding_id))
-        )).scalar_one_or_none()
-        if not finding:
-            logger.error("finding_not_found_for_pr", finding_id=finding_id)
-            return
-
-        # Get the latest approved patch
-        patch_result = await db.execute(
-            select(RemediationPatch)
-            .join(RemediationPlan, RemediationPatch.plan_id == RemediationPlan.id)
-            .where(RemediationPlan.finding_id == finding.id)
-            .order_by(RemediationPatch.created_at.desc())
-            .limit(1)
-        )
-        patch = patch_result.scalar_one_or_none()
-
-        if not patch or not patch.patch_diff:
-            logger.warning("no_patch_for_pr", finding_id=finding_id)
-            return
-
-        # Get repo info
-        repo = (await db.execute(
-            select(Repository).where(Repository.id == finding.repository_id)
-        )).scalar_one_or_none()
-
-        if not repo:
-            logger.error("repo_not_found_for_pr", finding_id=finding_id)
-            return
-
-        try:
-            from services.git_integration.pr_manager import PRManager
-            pr_mgr = PRManager()
-            result = await pr_mgr.create_fix_pr(
-                repo=repo,
-                finding=finding,
-                patch_diff=patch.patch_diff,
-                files_changed=patch.files_changed or [],
-                branch_name="vooda-secure-code",
-            )
-
-            if result.get("pr_url"):
-                patch.pr_url = result["pr_url"]
-                patch.status = PatchStatus.APPLIED
-                finding.remediation_status = "applied"
-                logger.info("pr_created", finding_id=finding_id, pr_url=result["pr_url"])
-            else:
-                logger.info("branch_pushed", finding_id=finding_id, branch=result.get("branch"))
-
-            await db.commit()
-
-        except Exception as e:
-            logger.error("pr_creation_failed", finding_id=finding_id, error=str(e)[:300])
-            # Don't fail the task — patch is still approved, PR creation is best-effort
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  BATCH REMEDIATION — generate fixes for multiple findings
-# ═══════════════════════════════════════════════════════════════════
-
-@celery_app.task(bind=True, max_retries=2)
-def batch_remediate(self, repository_id: str, finding_ids: list, tenant_id: str):
-    """Generate AI remediation for multiple findings."""
-    logger.info("batch_remediate_started", repo=repository_id, count=len(finding_ids))
-    run_async(_batch_remediate(repository_id, finding_ids, tenant_id))
-
-
-async def _batch_remediate(repository_id: str, finding_ids: list, tenant_id: str):
-    from apps.api.app.models.finding import NormalizedFinding
-
-    async with await _get_db_session() as db:
-        for fid in finding_ids:
-            try:
-                finding = (await db.execute(
-                    select(NormalizedFinding).where(
-                        NormalizedFinding.id == UUID(fid),
-                        NormalizedFinding.tenant_id == UUID(tenant_id),
-                    )
-                )).scalar_one_or_none()
-
-                if finding and finding.remediation_status in ("none", "rejected"):
-                    finding.remediation_status = "pending"
-                    await db.flush()
-                    # Queue individual remediation
-                    generate_remediation.delay(fid)
-                    logger.info("batch_remediate_queued", finding_id=fid)
-
-            except Exception as e:
-                logger.warning("batch_remediate_item_failed", finding_id=fid, error=str(e)[:200])
-                continue
-
-        await db.commit()
-
-    logger.info("batch_remediate_done", count=len(finding_ids))
 
 # ── Secret Verification Task ─────────────────────────────────
 

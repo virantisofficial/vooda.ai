@@ -7,7 +7,7 @@ import { useSearchParams } from "next/navigation";
 
 import AppShell from "@/components/layout/AppShell";
 import { useAuthStore } from "@/lib/store";
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel, testAIModel, getAITaskRouting, getUsers, createUser, updateUser, deleteUser, activateUser, changeMyPassword, getRoles, getPermissions, createRole, updateRole, deleteRole, resetRole, getBusinessUnits, createBusinessUnit, updateBusinessUnit, deleteBusinessUnit, getAccessGrants, createAccessGrant, deleteAccessGrant, getRepositories, getAPIKeys, getAPIKeyScopes, createAPIKey, revokeAPIKey, rotateAPIKey, getAPIKeyUsage, updateAPIKey, getAuditEvents, exportAuditCSV, enforceRetention, getAuditStats, getIntegrations, deleteIntegration, updateIntegration } from "@/lib/api";
+import { getUsers, createUser, updateUser, deleteUser, activateUser, changeMyPassword, getRoles, getPermissions, createRole, updateRole, deleteRole, resetRole, getBusinessUnits, createBusinessUnit, updateBusinessUnit, deleteBusinessUnit, getAccessGrants, createAccessGrant, deleteAccessGrant, getRepositories, getAPIKeys, getAPIKeyScopes, createAPIKey, revokeAPIKey, rotateAPIKey, getAPIKeyUsage, updateAPIKey, getAuditEvents, exportAuditCSV, enforceRetention, getAuditStats, getIntegrations, deleteIntegration, updateIntegration } from "@/lib/api";
 // PoliciesContent import removed 2026-05-16 — governance components/governance/
 // directory was deleted to refocus on the secret-scanner core.
 import { SuppressionsContent } from "@/components/secrets/SuppressionsContent";
@@ -204,418 +204,6 @@ function SearchableChecklist({ label, placeholder, items, selectedIds, onChange,
                 <button type="button" onClick={() => onChange([])} className="text-[10px] text-slate-500 hover:text-red-400">Clear all</button>
               )}
               <button type="button" onClick={() => setOpen(false)} className="text-[10px] text-slate-400 hover:text-red-400">Done</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════
-   AI MODELS SECTION
-   ═══════════════════════════════════════════════════════ */
-function AIModelsSection() {
-  const [models, setModels] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [editingModel, setEditingModel] = useState<any>(null);
-  const [form, setForm] = useState({
-    name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: [] as string[], is_primary: false,
-    max_tokens: 4096, temperature: 0.1, context_window: 4096, stop_sequences: [] as string[],
-    supports_json_mode: false, system_prompt_override: "", use_compact_prompt: false,
-  });
-  const [testResult, setTestResult] = useState<{ status: string; message: string; latency_ms?: number } | null>(null);
-  const [testLoading, setTestLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [menuOpen, setMenuOpen] = useState<string | null>(null);
-  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
-  const [discovering, setDiscovering] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-
-  const PROVIDERS = [
-    { value: "anthropic", label: "Anthropic (Claude)", models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3.5-haiku-20241022"], color: "bg-orange-500/10 text-orange-400",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3L4 9v6l8 6 8-6V9l-8-6z" strokeLinejoin="round" /><path d="M12 9v6M9 12h6" strokeLinecap="round" /></svg>),
-    },
-    { value: "openai", label: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1-preview"], color: "bg-green-500/10 text-green-400",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" strokeLinecap="round" /></svg>),
-    },
-    { value: "azure_openai", label: "Azure OpenAI", models: [], color: "bg-blue-500/10 text-blue-400",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 17l6-12h6l6 12" strokeLinecap="round" strokeLinejoin="round" /><path d="M7.5 17h9" strokeLinecap="round" /><path d="M12 5l-3 6h6l-3-6z" fill="currentColor" stroke="none" opacity="0.3" /></svg>),
-    },
-    { value: "aws_bedrock", label: "AWS Bedrock", models: [], color: "bg-yellow-500/10 text-yellow-400",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3v18M3 12h18" strokeLinecap="round" /><path d="M12 3l-5 5M12 3l5 5M12 21l-5-5M12 21l5-5M3 12l5-5M3 12l5 5M21 12l-5-5M21 12l-5 5" strokeLinecap="round" strokeLinejoin="round" opacity="0.5" /></svg>),
-    },
-    { value: "google", label: "Google (Gemini)", models: ["gemini-2.0-flash", "gemini-1.5-pro"], color: "bg-red-500/10 text-red-400",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2a10 10 0 100 20 10 10 0 000-20z" /><path d="M12 7l3 5-3 5-3-5 3-5z" fill="currentColor" stroke="none" opacity="0.3" /><path d="M12 7v10M7 12h10" strokeLinecap="round" /></svg>),
-    },
-    { value: "ollama", label: "Ollama (Local)", models: [], color: "bg-cyan-500/10 text-cyan-400", noApiKey: true, showEndpoint: true, defaultEndpoint: "http://localhost:11434",
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="8" r="4" /><path d="M5 20v-2a7 7 0 0114 0v2" strokeLinecap="round" /><path d="M12 12v4" strokeLinecap="round" opacity="0.5" /></svg>),
-    },
-    { value: "custom", label: "Custom / Self-Hosted", models: [], color: "bg-purple-500/10 text-purple-400", showEndpoint: true,
-      icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M9 9l3 3-3 3M13 15h3" strokeLinecap="round" strokeLinejoin="round" /></svg>),
-    },
-  ];
-
-  // Only the two tasks the worker actually dispatches on are shown —
-  // `code_analysis` and `summarization` were aspirational placeholders that
-  // no code path calls. Kept out of the UI to avoid false promises.
-  const TASKS = [
-    { key: "triage", label: "AI Triage", description: "False positive reduction and finding classification" },
-    { key: "remediation", label: "Auto Remediation", description: "Secure code patch generation" },
-  ];
-
-  const loadModels = useCallback(() => {
-    getAIModels().then((r) => setModels(r.data || [])).catch(() => {}).finally(() => setLoading(false));
-  }, []);
-  useEffect(() => { loadModels(); }, [loadModels]);
-
-  const selectedProviderDef = PROVIDERS.find((p) => p.value === form.provider);
-  const providerFor = (p: string) => PROVIDERS.find((pr) => pr.value === p);
-
-  const resetForm = () => {
-    setForm({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: [], is_primary: false, max_tokens: 4096, temperature: 0.1, context_window: 4096, stop_sequences: [], supports_json_mode: false, system_prompt_override: "", use_compact_prompt: false });
-    setEditingModel(null); setTestResult(null); setShowForm(false); setDiscoveredModels([]);
-  };
-
-  const openEdit = (model: any) => {
-    setForm({ name: model.name, provider: model.provider, model_id: model.model_id, api_key: "", endpoint_url: model.endpoint_url || "", tasks: model.tasks || [], is_primary: model.is_primary, max_tokens: model.max_tokens || 4096, temperature: model.temperature || 0.1, context_window: model.context_window || 4096, stop_sequences: model.stop_sequences || [], supports_json_mode: model.supports_json_mode || false, system_prompt_override: model.system_prompt_override || "", use_compact_prompt: model.use_compact_prompt || false });
-    setEditingModel(model); setShowForm(true); setTestResult(null); setMenuOpen(null);
-  };
-
-  const discoverModels = async () => {
-    setDiscovering(true); setDiscoveredModels([]);
-    try {
-      const endpoint = form.endpoint_url || (form.provider === "ollama" ? "http://localhost:11434" : "");
-      if (!endpoint) return;
-      const r = await fetch(`${endpoint}/api/tags`).then(res => res.json());
-      const models = (r.models || []).map((m: any) => m.name || m.model);
-      setDiscoveredModels(models);
-    } catch {
-      // Try OpenAI-compatible /v1/models
-      try {
-        const endpoint = form.endpoint_url || "";
-        const r = await fetch(`${endpoint}/v1/models`).then(res => res.json());
-        const models = (r.data || []).map((m: any) => m.id);
-        setDiscoveredModels(models);
-      } catch { setDiscoveredModels([]); }
-    } finally { setDiscovering(false); }
-  };
-
-  const toggleTask = (taskKey: string) => {
-    setForm((f) => ({ ...f, tasks: f.tasks.includes(taskKey) ? f.tasks.filter((t) => t !== taskKey) : [...f.tasks, taskKey] }));
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const payload: any = { ...form };
-      if (!payload.api_key) delete payload.api_key;
-      if (!payload.endpoint_url) delete payload.endpoint_url;
-      if (editingModel) {
-        await updateAIModel(editingModel.id, payload);
-      } else {
-        await createAIModel(payload);
-      }
-      resetForm(); loadModels();
-    } catch { /* toast error */ } finally { setSaving(false); }
-  };
-
-  const handleTest = async () => {
-    setTestLoading(true); setTestResult(null);
-    try {
-      const payload: any = editingModel
-        ? { model_config_id: editingModel.id }
-        : { provider: form.provider, model_id: form.model_id, api_key: form.api_key, endpoint_url: form.endpoint_url || undefined };
-      const r = await testAIModel(payload);
-      setTestResult(r.data);
-    } catch { setTestResult({ status: "error", message: "Request failed" }); }
-    finally { setTestLoading(false); }
-  };
-
-  const handleDelete = async () => {
-    if (!confirmDelete) return;
-    await deleteAIModel(confirmDelete).catch(() => {});
-    setConfirmDelete(null); loadModels();
-  };
-
-  const handleSetPrimary = async (id: string) => {
-    await updateAIModel(id, { is_primary: true }).catch(() => {});
-    setMenuOpen(null); loadModels();
-  };
-
-  return (
-    <div>
-      <SectionHeader title="AI Model Configuration" description="Configure AI models for different security analysis tasks. Assign specific models to specific tasks for cost optimization and compliance." />
-
-      {/* Task routing overview */}
-      <div className="card mb-5">
-        <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4">Task Routing</h4>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {TASKS.map((task) => {
-            const assigned = models.filter((m: any) => m.is_active && (m.tasks || []).includes(task.key));
-            return (
-              <div key={task.key} className="bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm font-medium text-slate-200">{task.label}</span>
-                  {assigned.length > 0 ? (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">Active</span>
-                  ) : (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/15 text-yellow-400 border border-yellow-500/20">Not configured</span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-500">{task.description}</p>
-                {assigned.length > 0 && (
-                  <div className="mt-2 flex gap-1.5 flex-wrap">
-                    {assigned.map((m: any) => (
-                      <span key={m.id} className="text-xs px-2 py-0.5 rounded bg-red-500/10 text-red-400">{m.name}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Registered models */}
-      <div className="card mb-5">
-        <div className="flex items-center justify-between mb-4">
-          <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Registered Models</h4>
-          <button onClick={() => { resetForm(); setShowForm(true); }} className="btn-primary text-xs px-3 py-1.5">+ Add Model</button>
-        </div>
-        {loading ? (
-          <div className="text-center py-8"><div className="w-5 h-5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin mx-auto" /></div>
-        ) : models.length === 0 ? (
-          <div className="text-center py-10">
-            <p className="text-sm text-slate-500">No models configured</p>
-            <p className="text-xs text-slate-600 mt-1">Add an AI model to enable triage and remediation</p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {models.map((model: any) => {
-              const pDef = providerFor(model.provider);
-              return (
-                <div key={model.id} className={`bg-white/[0.02] border rounded-lg p-4 flex items-center gap-4 ${model.is_active ? "border-white/[0.04]" : "border-white/[0.02] opacity-50"}`}>
-                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${pDef?.color || "bg-slate-500/10 text-slate-400"}`}>
-                    {pDef?.icon || <span className="text-sm font-bold">?</span>}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium text-slate-200">{model.name}</span>
-                      {model.is_primary && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/20">Primary</span>}
-                      {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500 border border-slate-500/20">Disabled</span>}
-                    </div>
-                    <p className="text-xs text-slate-500 mt-0.5 font-mono">{model.model_id}</p>
-                    <div className="flex gap-1.5 mt-1.5 flex-wrap">
-                      {(model.tasks || []).map((t: string) => (
-                        <span key={t} className="text-[10px] px-2 py-0.5 rounded bg-white/[0.04] text-slate-400 capitalize">{t.replace("_", " ")}</span>
-                      ))}
-                    </div>
-                    {/* Usage stats */}
-                    {model.total_requests > 0 && (
-                      <div className="flex gap-4 mt-2 text-[10px] text-slate-600">
-                        <span>{model.total_requests.toLocaleString()} requests</span>
-                        <span>{((model.total_input_tokens + model.total_output_tokens) / 1000).toFixed(0)}K tokens</span>
-                        {model.total_cost_usd > 0 && <span>${model.total_cost_usd.toFixed(2)}</span>}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {model.api_key_set ? (
-                      <span className="text-xs text-green-400 flex items-center gap-1">
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                        Key set
-                      </span>
-                    ) : (
-                      <span className="text-xs text-yellow-400">Key needed</span>
-                    )}
-                    {model.last_error && (
-                      <span className="text-xs text-red-400" title={model.last_error}>Error</span>
-                    )}
-                    {/* Actions menu */}
-                    <div className="relative">
-                      <button onClick={() => setMenuOpen(menuOpen === model.id ? null : model.id)} className="p-1.5 rounded hover:bg-white/[0.06]">
-                        <svg className="w-4 h-4 text-slate-500" fill="currentColor" viewBox="0 0 20 20"><path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" /></svg>
-                      </button>
-                      {menuOpen === model.id && (
-                        <>
-                          <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(null)} />
-                          <div className="absolute right-0 top-8 z-20 w-44 py-1 rounded-xl border border-white/[0.08] shadow-2xl overflow-hidden" style={{ background: "rgba(8,11,28,0.95)",  }}>
-                            <button onClick={() => openEdit(model)} className="block w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-white/[0.04]">Edit</button>
-                            <button onClick={() => { handleTest(); setMenuOpen(null); }} className="block w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-white/[0.04]">Test Connection</button>
-                            {!model.is_primary && (
-                              <button onClick={() => handleSetPrimary(model.id)} className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-white/[0.04]">Set as Primary</button>
-                            )}
-                            <button onClick={() => updateAIModel(model.id, { is_active: !model.is_active }).then(loadModels)} className="block w-full text-left px-4 py-2 text-sm text-yellow-400 hover:bg-white/[0.04]">
-                              {model.is_active ? "Disable" : "Enable"}
-                            </button>
-                            <div className="border-t border-white/[0.06] my-1" />
-                            <button onClick={() => { setConfirmDelete(model.id); setMenuOpen(null); }} className="block w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-red-500/5">Delete</button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Add/Edit model form */}
-      {showForm && (
-        <div className="card border-red-500/20">
-          <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4">{editingModel ? "Edit Model" : "Add New Model"}</h4>
-          <div className="space-y-4">
-            <FieldGroup label="Provider">
-              <select value={form.provider} onChange={(e) => setForm((f) => ({ ...f, provider: e.target.value, model_id: "" }))} className="select-dark w-full" disabled={!!editingModel}>
-                {PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-              </select>
-            </FieldGroup>
-            <FieldGroup label="Display Name" description="Friendly name for this model">
-              <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Claude Sonnet (Production)" className="input-dark" />
-            </FieldGroup>
-            <FieldGroup label="Model ID" description="API model identifier">
-              {selectedProviderDef && selectedProviderDef.models.length > 0 ? (
-                <select value={form.model_id} onChange={(e) => setForm((f) => ({ ...f, model_id: e.target.value }))} className="select-dark w-full">
-                  <option value="">Select model...</option>
-                  {selectedProviderDef.models.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              ) : (
-                <input value={form.model_id} onChange={(e) => setForm((f) => ({ ...f, model_id: e.target.value }))} placeholder="Model ID or deployment name" className="input-dark" />
-              )}
-            </FieldGroup>
-            {["azure_openai", "aws_bedrock", "custom", "ollama"].includes(form.provider) && (
-              <FieldGroup label="API Endpoint" description={form.provider === "ollama" ? "Ollama server URL (default: http://localhost:11434)" : "Base URL for the model API (OpenAI-compatible)"}>
-                <div className="flex gap-2">
-                  <input value={form.endpoint_url} onChange={(e) => setForm((f) => ({ ...f, endpoint_url: e.target.value }))} placeholder={form.provider === "ollama" ? "http://localhost:11434" : "https://your-model.internal.com/v1"} className="input-dark flex-1" />
-                  {["ollama", "custom"].includes(form.provider) && (
-                    <button onClick={discoverModels} disabled={discovering} className="btn-secondary text-xs px-3 whitespace-nowrap">
-                      {discovering ? "Discovering..." : "Discover Models"}
-                    </button>
-                  )}
-                </div>
-                {discoveredModels.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {discoveredModels.map((m) => (
-                      <button key={m} onClick={() => setForm((f) => ({ ...f, model_id: m }))} className={`text-xs px-2 py-1 rounded border transition-all ${form.model_id === m ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/30" : "bg-white/[0.02] text-slate-400 border-white/[0.06] hover:border-white/[0.12]"}`}>
-                        {m}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </FieldGroup>
-            )}
-            {!(selectedProviderDef as any)?.noApiKey && (
-              <FieldGroup label="API Key" description={editingModel ? "Leave empty to keep existing key" : "Encrypted at rest, never exposed in UI"}>
-                <input type="password" value={form.api_key} onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value }))} placeholder={editingModel ? "••••••••  (unchanged)" : "sk-..."} className="input-dark" />
-              </FieldGroup>
-            )}
-            <FieldGroup label="Assign Tasks" description="Which AI tasks should use this model">
-              <div className="flex flex-wrap gap-2">
-                {TASKS.map((t) => (
-                  <label key={t.key} onClick={() => toggleTask(t.key)} className={`flex items-center gap-2 text-sm cursor-pointer rounded-lg px-3 py-2 border transition-all ${form.tasks.includes(t.key) ? "bg-red-500/10 text-red-400 border-red-500/20" : "bg-white/[0.02] text-slate-400 border-white/[0.04] hover:border-white/[0.08]"}`}>
-                    <svg className={`w-4 h-4 ${form.tasks.includes(t.key) ? "text-red-400" : "text-slate-600"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      {form.tasks.includes(t.key) ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /> : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 12H4" />}
-                    </svg>
-                    {t.label}
-                  </label>
-                ))}
-              </div>
-            </FieldGroup>
-            <FieldGroup label="Model Parameters">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div>
-                  <label className="text-xs text-slate-500 mb-1 block">Max Tokens</label>
-                  <input type="number" value={form.max_tokens} onChange={(e) => setForm((f) => ({ ...f, max_tokens: parseInt(e.target.value) || 4096 }))} className="input-dark" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500 mb-1 block">Temperature</label>
-                  <input type="number" step="0.05" min="0" max="2" value={form.temperature} onChange={(e) => setForm((f) => ({ ...f, temperature: parseFloat(e.target.value) || 0.1 }))} className="input-dark" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500 mb-1 block">Context Window</label>
-                  <input type="number" value={form.context_window} onChange={(e) => setForm((f) => ({ ...f, context_window: parseInt(e.target.value) || 4096 }))} className="input-dark" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500 mb-1 block">Stop Sequences</label>
-                  <input value={(form.stop_sequences || []).join(", ")} onChange={(e) => setForm((f) => ({ ...f, stop_sequences: e.target.value ? e.target.value.split(",").map((s) => s.trim()) : [] }))} placeholder='e.g. }, \n\n' className="input-dark" />
-                </div>
-              </div>
-            </FieldGroup>
-            <FieldGroup label="Output Control">
-              <div className="space-y-3">
-                <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer" onClick={() => setForm((f) => ({ ...f, supports_json_mode: !f.supports_json_mode }))}>
-                  <div className={`w-9 h-5 rounded-full transition-colors relative ${form.supports_json_mode ? "bg-cyan-500" : "bg-slate-600"}`}>
-                    <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${form.supports_json_mode ? "left-[18px]" : "left-0.5"}`} />
-                  </div>
-                  <div>
-                    <span className="block">JSON Mode</span>
-                    <span className="text-[10px] text-slate-600">Force structured JSON output (supported by Ollama, OpenAI, Gemini)</span>
-                  </div>
-                </label>
-                <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer" onClick={() => setForm((f) => ({ ...f, use_compact_prompt: !f.use_compact_prompt }))}>
-                  <div className={`w-9 h-5 rounded-full transition-colors relative ${form.use_compact_prompt ? "bg-cyan-500" : "bg-slate-600"}`}>
-                    <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${form.use_compact_prompt ? "left-[18px]" : "left-0.5"}`} />
-                  </div>
-                  <div>
-                    <span className="block">Compact Prompt</span>
-                    <span className="text-[10px] text-slate-600">Use simplified prompt for small models (&lt;7B params). Reduces token usage by ~80%</span>
-                  </div>
-                </label>
-              </div>
-            </FieldGroup>
-            <FieldGroup label="Custom System Prompt" description="Override the default triage system prompt (leave empty to use default)">
-              <textarea value={form.system_prompt_override} onChange={(e) => setForm((f) => ({ ...f, system_prompt_override: e.target.value }))} placeholder="You are a security scanner false positive analyzer..." className="input-dark h-24 resize-y font-mono text-xs" />
-            </FieldGroup>
-            <FieldGroup label="Options">
-              <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer" onClick={() => setForm((f) => ({ ...f, is_primary: !f.is_primary }))}>
-                <div className={`w-9 h-5 rounded-full transition-colors relative ${form.is_primary ? "bg-red-500" : "bg-slate-600"}`}>
-                  <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${form.is_primary ? "left-[18px]" : "left-0.5"}`} />
-                </div>
-                Set as primary model (fallback for all tasks)
-              </label>
-            </FieldGroup>
-
-            {/* Test connection result */}
-            {testResult && (
-              <div className={`p-3 rounded-lg border text-sm ${testResult.status === "success" ? "bg-green-500/5 border-green-500/20 text-green-400" : "bg-red-500/5 border-red-500/20 text-red-400"}`}>
-                <div className="flex items-center gap-2">
-                  {testResult.status === "success" ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                  ) : (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                  )}
-                  <span>{testResult.message}</span>
-                  {testResult.latency_ms && <span className="text-xs text-slate-500 ml-auto">{testResult.latency_ms}ms</span>}
-                </div>
-              </div>
-            )}
-
-            <div className="flex gap-3 pt-2">
-              <button onClick={handleSave} disabled={saving || !form.name || !form.model_id} className="btn-primary text-sm">
-                {saving ? "Saving..." : editingModel ? "Update Model" : "Save Model"}
-              </button>
-              <button onClick={handleTest} disabled={testLoading || (!editingModel && (!form.api_key || !form.model_id))} className="btn-secondary text-sm">
-                {testLoading ? "Testing..." : "Test Connection"}
-              </button>
-              <button onClick={resetForm} className="text-sm text-slate-400 hover:text-slate-200 px-3">Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete confirmation */}
-      {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="card border-red-500/20 max-w-md w-full mx-4">
-            <h3 className="text-base font-semibold text-white mb-2">Delete AI Model?</h3>
-            <p className="text-sm text-slate-400 mb-5">This will permanently remove the model configuration. Tasks using this model will fall back to the primary model.</p>
-            <div className="flex gap-3 justify-end">
-              <button onClick={() => setConfirmDelete(null)} className="btn-secondary text-sm">Cancel</button>
-              <button onClick={handleDelete} className="btn-danger text-sm">Delete Model</button>
             </div>
           </div>
         </div>
@@ -1410,7 +998,7 @@ function NotificationsSection() {
 
   return (
     <div>
-      <SectionHeader title="Notification Channels" description="Configure where to send alerts for new findings, scan completions, and remediation updates." />
+      <SectionHeader title="Notification Channels" description="Configure where to send alerts for new findings and scan completions." />
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {CHANNELS.map((ch) => (
           <div key={ch.name} className={`card card-hover border ${ch.borderColor}`}>
@@ -2446,8 +2034,8 @@ function AuditSection() {
   const ACTION_COLORS: Record<string, string> = {
     login_success: "text-green-400", login_failed: "text-red-400", login_blocked: "text-red-400",
     user_created: "text-green-400", user_updated: "text-blue-400", user_deactivated: "text-yellow-400", user_activated: "text-green-400",
-    finding_triaged: "text-purple-400", remediation_requested: "text-orange-400", patch_approved: "text-green-400", patch_rejected: "text-red-400",
-    finding_assigned: "text-red-400", batch_remediation: "text-orange-400",
+    finding_triaged: "text-purple-400",
+    finding_assigned: "text-red-400",
     scan_started: "text-red-400", scan_completed: "text-green-400", scan_cancelled: "text-yellow-400",
     repo_created: "text-green-400", repo_deleted: "text-red-400",
     bu_created: "text-amber-400", bu_updated: "text-blue-400", bu_deleted: "text-red-400",
@@ -2462,7 +2050,7 @@ function AuditSection() {
     business_unit: "\u{1F3D7}\u{FE0F}", access_grant: "\u{1F511}", api_key: "\u{1F510}", role: "\u{1F6E1}\u{FE0F}", import: "\u{1F4E5}", policy: "\u{1F4CB}", auth: "\u{1F512}", integration: "\u{1F517}",
   };
 
-  const ACTIONS = ["login_success","login_failed","login_blocked","user_created","user_updated","user_deactivated","user_activated","finding_triaged","remediation_requested","patch_approved","batch_remediation","finding_assigned","comment_added","tags_updated","scan_started","scan_cancelled","repo_created","repo_updated","repo_archived","repo_uploaded","repo_deleted","integration_created","integration_deleted","notification_rules_updated","grant_created","grant_revoked","api_key_created","api_key_revoked","role_created","role_updated","role_deleted","role_reset","bu_created","bu_updated","bu_deleted","import_completed"];
+  const ACTIONS = ["login_success","login_failed","login_blocked","user_created","user_updated","user_deactivated","user_activated","finding_triaged","finding_assigned","comment_added","tags_updated","scan_started","scan_cancelled","repo_created","repo_updated","repo_archived","repo_uploaded","repo_deleted","integration_created","integration_deleted","notification_rules_updated","grant_created","grant_revoked","api_key_created","api_key_revoked","role_created","role_updated","role_deleted","role_reset","bu_created","bu_updated","bu_deleted","import_completed"];
   const RESOURCES = ["auth","user","finding","scan_job","repository","business_unit","access_grant","api_key","role","import","policy","integration","notification_rule"];
 
   const timeAgo = (ts: string) => {
@@ -2808,7 +2396,7 @@ function OrganizationSection() {
             <p className="text-sm text-slate-400 leading-relaxed">
               Vooda AI is a self-hosted secret scanner. It finds leaked credentials across your code and
               connected sources, verifies whether each one is still live, and runs an AI triage pass to cut
-              false positives — then generates secure fixes automatically.
+              false positives.
             </p>
           </div>
 
@@ -2838,18 +2426,6 @@ function OrganizationSection() {
                   <p className="text-xs text-slate-500 mt-0.5">AI-powered false positive reduction with evidence-grounded classification</p>
                 </div>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20 shrink-0">Source-available</span>
-              </div>
-              <div className="flex items-start gap-3 p-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                <div className="w-8 h-8 rounded-lg bg-green-500/10 flex items-center justify-center shrink-0 mt-0.5">
-                  <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                  </svg>
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-slate-200">Vooda AI Remediation Engine</p>
-                  <p className="text-xs text-slate-500 mt-0.5">Automatic secure code patch generation with validation and PR delivery</p>
-                </div>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20 shrink-0">Source-available</span>
               </div>
             </div>
           </div>
@@ -3325,7 +2901,7 @@ function AdminSettingsContent() {
   }, [searchParams]);
 
   const SECTION_MAP: Record<SettingsTab, React.ReactNode> = {
-    ai: <AIModelsSection />,
+    ai: null, // redirected to /integrations (movedTabs)
     users: <UsersSection />,
     roles: <RolesSection />,
     access_control: <AccessControlSection />,

@@ -7,7 +7,7 @@ import { ToastProvider } from "@/components/ui/Toast";
 
 export const metadata: Metadata = {
   title: "Vooda AI - AppSec Platform",
-  description: "AI-powered application security scanning and remediation",
+  description: "AI-powered application security scanning and triage",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",

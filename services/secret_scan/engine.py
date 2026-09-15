@@ -979,11 +979,9 @@ def scrub_secrets_in_obj(obj):
     """Recursively mask unambiguous secret shapes in any str / list / dict.
 
     For AI-generated FREE TEXT that may echo a detected secret back into prose
-    we persist and serve via API/UI — triage reasoning + TP/FP reasons, and
-    remediation summaries / root-cause / patch diffs. The model is given the
+    we persist and serve via API/UI — triage reasoning + TP/FP reasons. The model is given the
     value (it needs it to triage), so it quotes things like "Real AWS key
-    (AKIA…) with sufficient entropy" or emits a patch whose `-` line carries
-    the raw secret. This applies the same at-rest guarantee as code_snippet
+    (AKIA…) with sufficient entropy". This applies the same at-rest guarantee as code_snippet
     (G1b). No-op on any string without a provider shape, so non-secret prose
     is untouched; non-str/list/dict values pass through unchanged.
     """
@@ -2377,6 +2375,11 @@ class SecretScanner:
                 secret_value = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group()
 
                 line_num = content[:match.start()].count("\n") + 1
+                # Block-capture matches (PEM private keys) span lines; record
+                # where they end so the UI can highlight the whole block. Use
+                # the last matched char, not match.end(), so a trailing
+                # newline doesn't push the end onto the next line.
+                match_line_end = content[:max(match.start(), match.end() - 1)].count("\n") + 1
                 line_content = lines[line_num - 1] if line_num <= len(lines) else ""
 
                 # ── Phase 3 B2: skip non-crypto rules inside PEM bodies ──
@@ -2489,6 +2492,7 @@ class SecretScanner:
                     rule_id=rule.rule_id,
                     file_path=file_path,
                     line_start=line_num,
+                    line_end=match_line_end,
                     code_snippet=snippet,
                     confidence=confidence,
                     raw_data={

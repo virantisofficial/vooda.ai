@@ -28,6 +28,7 @@ healthy database). No downgrade: restoring a false status would only
 re-create the lie, so ``downgrade`` is a no-op.
 """
 from alembic import op
+import sqlalchemy as sa
 
 revision = "c9d0e1f2a3b4"
 down_revision = "b8c9d0e1f2a3"
@@ -36,6 +37,10 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("remediation_plans"):
+        # Fresh installs never create the code-fix tables (removed in
+        # i5d6e7f8a9b0), so there is nothing to change.
+        return
     op.execute(
         """
         UPDATE normalized_findings f

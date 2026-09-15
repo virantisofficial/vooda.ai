@@ -115,11 +115,10 @@ celery_app.conf.update(
     # ── Queue routing (scan-slot isolation) ──────────────────────────
     # User-facing scans get their own `scans` queue + dedicated worker
     # pool (docker-compose `worker-scans`), so a backlog of best-effort
-    # background jobs (generate_remediation, create_fix_pr, ticket
-    # dispatch, notifications, …) on the default `celery` queue can
-    # never occupy every prefork slot and starve a scan — the live
-    # failure observed when 2 generate_remediation tasks pinned both
-    # slots and a queued scan sat PENDING at 0%.
+    # background jobs (ticket dispatch, notifications, …) on the default
+    # `celery` queue can never occupy every prefork slot and starve a
+    # scan — the live failure observed when 2 long-running background
+    # tasks pinned both slots and a queued scan sat PENDING at 0%.
     #
     # Routing is by task NAME, so every dispatch path is covered with
     # zero call-site changes: `.delay()` from the API/scheduler and

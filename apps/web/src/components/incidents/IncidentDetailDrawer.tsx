@@ -52,6 +52,7 @@ import {
   verifyIncident,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
+import { providerConsole } from "@/lib/providerConsoles";
 import SuggestionChips from "@/components/suggestions/SuggestionChips";
 
 interface IncidentLite {
@@ -110,7 +111,7 @@ interface Props {
   onMutate?: () => void;
 }
 
-type TabKey = "overview" | "occurrences" | "rotation" | "history";
+type TabKey = "overview" | "occurrences" | "next_steps" | "history";
 
 interface HistoryEntry {
   id: string;
@@ -569,7 +570,7 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
   const sections = [
     { key: "overview" as const, label: "Overview" },
     { key: "occurrences" as const, label: "Occurrences", count: data?.occurrences.length },
-    { key: "rotation" as const, label: "Rotation" },
+    { key: "next_steps" as const, label: "Next Steps" },
     { key: "history" as const, label: "History", count: history?.length },
   ];
 
@@ -1133,77 +1134,119 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                 </div>
               )}
 
-              {/* ── Rotation ───────────────────────────────────── */}
-              {activeTab === "rotation" && (
+              {/* ── Next Steps ─────────────────────────────────
+                  Mirrors FindingPanel's Next Steps: a status line from the
+                  incident's state, the owner's steps at the provider, and
+                  the rotation record Vooda keeps. Vooda doesn't rotate
+                  credentials itself. */}
+              {activeTab === "next_steps" && (() => {
+                const cls = (data.classification || "").toLowerCase();
+                const validation = (data.validation_status || "").toLowerCase();
+                const secretType = (data.secret_type || "").toLowerCase();
+                // Incidents carry no provider field; secret types are
+                // prefixed with it (aws_access_key, github_pat, …).
+                const consoleLink = providerConsole(secretType.split("_")[0], secretType);
+                const inRepo = data.occurrences.some((o) => !!o.repository_id && !o.scan_source_id);
+                type Tone = "red" | "amber" | "green" | "slate";
+                const status: { tone: Tone; text: string; showSteps: boolean } =
+                  rotated
+                    ? { tone: "green", text: `✓ Rotated ${fmtAge(data.rotated_at)}. All ${data.occurrence_count} occurrence(s) are covered by this rotation event.`, showSteps: false }
+                  : ["likely_false_positive", "confirmed_false_positive", "test_credential"].includes(cls)
+                    ? { tone: "slate", text: `No action needed — classified as ${cls.replace(/_/g, " ")}.`, showSteps: false }
+                  : cls === "accepted_risk"
+                    ? { tone: "slate", text: "Risk accepted — no rotation is planned for this credential.", showSteps: false }
+                  : validation === "active"
+                    ? { tone: "red", text: "Verified live — anyone who can see it can use it. Revoke it at the provider now, then mark it rotated below.", showSteps: true }
+                  : validation === "inactive" || validation === "revoked"
+                    ? { tone: "green", text: "The provider no longer accepts this credential. Confirm it was revoked on purpose, then mark it rotated below.", showSteps: false }
+                  : { tone: "amber", text: "Not verified live. Treat it as exposed, rotate it as a precaution, then mark it rotated below.", showSteps: true };
+                const toneCls: Record<Tone, string> = {
+                  red: "bg-red-500/5 border-red-500/15 text-red-300",
+                  amber: "bg-amber-500/5 border-amber-500/15 text-amber-300",
+                  green: "bg-emerald-500/5 border-emerald-500/15 text-emerald-300",
+                  slate: "bg-white/[0.02] border-white/[0.05] text-slate-400",
+                };
+                return (
                 <div className="space-y-4">
-                  <div className="rounded border border-white/[0.05] bg-white/[0.02] px-4 py-3">
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1.5">
-                      Current rotation status
-                    </p>
-                    {rotated ? (
-                      <>
-                        <p className="text-sm text-emerald-400 font-semibold">
-                          ✓ Rotated {fmtAge(data.rotated_at)}
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-1">
-                          All {data.occurrence_count} occurrence(s) covered by this rotation event.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-sm text-amber-400 font-semibold">Not rotated</p>
-                        <p className="text-[11px] text-slate-500 mt-1">
-                          This credential has not been marked as rotated.  Rotate the secret in the
-                          issuing system, then click below to record it.
-                        </p>
-                      </>
-                    )}
-                  </div>
+                  <div className={`rounded border px-4 py-3 text-xs leading-relaxed ${toneCls[status.tone]}`}>{status.text}</div>
 
-                  {!rotated && (
-                    <div className="space-y-2">
-                      {confirmRotate && (
-                        <div className="rounded border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200 leading-relaxed">
-                          About to mark this incident as rotated.  {data.occurrence_count} finding{data.occurrence_count === 1 ? "" : "s"} will be linked to a CredentialRotationEvent for MTTR analytics.  Click <span className="font-semibold">Confirm rotation</span> to commit.
-                        </div>
+                  {status.showSteps && (
+                    <div className="rounded border border-white/[0.05] bg-white/[0.02] px-4 py-3">
+                      <ol className="space-y-2">
+                        {[
+                          `Issue a new credential ${consoleLink ? `in ${consoleLink.label}` : "at the provider"}.`,
+                          "Update everything that uses it — applications, CI/CD pipelines, and secret stores.",
+                          "Revoke the old credential.",
+                          "Re-verify from the Overview tab — it should report Inactive — then mark it rotated below.",
+                        ].map((step, i) => (
+                          <li key={i} className="flex gap-2 text-xs text-slate-300 leading-relaxed">
+                            <span className="text-slate-500 font-mono shrink-0">{i + 1}.</span>
+                            <span>{step}</span>
+                          </li>
+                        ))}
+                      </ol>
+                      {consoleLink && (
+                        <a href={consoleLink.url} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 mt-3 text-xs text-red-400 hover:text-red-300">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                          Open {consoleLink.label}
+                        </a>
                       )}
-                      <div className="flex gap-2">
-                        <button
-                          onClick={handleMarkRotated}
-                          disabled={rotating}
-                          className={`flex-1 inline-flex items-center justify-center gap-2 text-xs px-3 py-2 rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                            confirmRotate
-                              ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40 hover:bg-amber-500/30"
-                              : "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-                          }`}
-                        >
-                          {rotating && (
-                            <span className="w-3 h-3 border-[1.5px] border-current/30 border-t-current rounded-full animate-spin" />
-                          )}
-                          {rotating ? "Recording rotation…" : confirmRotate ? "Confirm rotation" : "Mark as rotated"}
-                        </button>
-                        {confirmRotate && !rotating && (
-                          <button
-                            onClick={() => setConfirmRotate(false)}
-                            className="px-3 py-2 rounded text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-white/[0.06] transition-colors"
-                          >
-                            Cancel
-                          </button>
-                        )}
-                      </div>
                     </div>
                   )}
 
-                  <div className="text-[10px] text-slate-500 leading-relaxed">
-                    <p className="font-medium text-slate-400 mb-1">What this does</p>
-                    <ul className="space-y-1 list-disc list-inside marker:text-slate-600">
-                      <li>Sets the incident's rotation status to <span className="text-emerald-400">rotated</span>.</li>
-                      <li>Records a CredentialRotationEvent for MTTR analytics on the Rotation page.</li>
-                      <li>Does NOT call your cloud provider to actually rotate the key — that's a manual step.</li>
-                    </ul>
-                  </div>
+                    {!rotated && (
+                      <div className="space-y-2">
+                        {confirmRotate && (
+                          <div className="rounded border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200 leading-relaxed">
+                            About to mark this incident as rotated.  {data.occurrence_count} finding{data.occurrence_count === 1 ? "" : "s"} will be linked to a CredentialRotationEvent for MTTR analytics.  Click <span className="font-semibold">Confirm rotation</span> to commit.
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <button
+                            onClick={handleMarkRotated}
+                            disabled={rotating}
+                            className={`flex-1 inline-flex items-center justify-center gap-2 text-xs px-3 py-2 rounded font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                              confirmRotate
+                                ? "bg-amber-500/20 text-amber-200 ring-1 ring-amber-500/40 hover:bg-amber-500/30"
+                                : "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                            }`}
+                          >
+                            {rotating && (
+                              <span className="w-3 h-3 border-[1.5px] border-current/30 border-t-current rounded-full animate-spin" />
+                            )}
+                            {rotating ? "Recording rotation…" : confirmRotate ? "Confirm rotation" : "Mark as rotated"}
+                          </button>
+                          {confirmRotate && !rotating && (
+                            <button
+                              onClick={() => setConfirmRotate(false)}
+                              className="px-3 py-2 rounded text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-white/[0.06] transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                  {inRepo && status.tone !== "slate" && (
+                    <div className="rounded border border-white/[0.05] bg-white/[0.02] px-4 py-3">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Git history</p>
+                      <p className="text-[11px] text-slate-400">The old value stays in git history. Once it&apos;s revoked it can&apos;t be used, so purging history (<code className="text-slate-300 text-[10px]">git filter-repo</code> or BFG) is optional — it rewrites shared history and needs coordination with everyone who has cloned the repository.</p>
+                    </div>
+                  )}
+
+                    <div className="text-[10px] text-slate-500 leading-relaxed">
+                      <p className="font-medium text-slate-400 mb-1">What this does</p>
+                      <ul className="space-y-1 list-disc list-inside marker:text-slate-600">
+                        <li>Sets the incident's rotation status to <span className="text-emerald-400">rotated</span>.</li>
+                        <li>Records a CredentialRotationEvent for MTTR analytics on the Rotation page.</li>
+                        <li>Does NOT call your cloud provider to actually rotate the key — that's a manual step.</li>
+                      </ul>
+                    </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* ── History ───────────────────────────────────────
                   Audit timeline mirroring FindingPanel's History

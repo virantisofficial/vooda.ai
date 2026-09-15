@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Virantis
 # SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
-from sqlalchemy import Column, String, Boolean, Float, Integer, Text
+from sqlalchemy import Column, String, Boolean, Float, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 
 from apps.api.app.core.database import Base
@@ -9,16 +9,16 @@ from apps.api.app.models.base import UUIDMixin, TimestampMixin, TenantMixin
 
 
 class AIModelConfig(Base, UUIDMixin, TimestampMixin, TenantMixin):
-    """Registered AI model configuration with task routing."""
+    """The tenant's AI model configuration — exactly one per tenant."""
     __tablename__ = "ai_model_configs"
+    __table_args__ = (UniqueConstraint("tenant_id", name="uq_ai_model_configs_tenant_id"),)
 
     name = Column(String(255), nullable=False)              # Display name
     provider = Column(String(50), nullable=False)           # anthropic, openai, azure_openai, aws_bedrock, google, ollama, custom
     model_id = Column(String(255), nullable=False)          # claude-sonnet-4-20250514, gpt-4o, phi3.5, etc.
     api_key_encrypted = Column(String(1024), nullable=True) # Encrypted API key (never returned to frontend; optional for local models)
     endpoint_url = Column(String(1024), nullable=True)      # Custom endpoint for self-hosted / Azure / Bedrock / Ollama
-    tasks = Column(JSONB, default=list)                     # ["triage", "remediation"] — the two task keywords the worker dispatches on. Column is kept flexible so additional task types can be added without a migration if product scope grows.
-    is_primary = Column(Boolean, default=False)
+    tasks = Column(JSONB, default=list)                     # ["triage"] — the task keyword the worker dispatches on. Column is kept flexible so additional task types can be added without a migration if product scope grows.
     is_active = Column(Boolean, default=True)
 
     # Model parameters

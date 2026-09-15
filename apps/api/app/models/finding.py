@@ -88,12 +88,9 @@ class ReviewStatus(str, enum.Enum):
 
 
 class RemediationStatus(str, enum.Enum):
+    # Open vs resolved. APPLIED marks a resolved finding (e.g. one
+    # auto-resolved because a rescan no longer detects it).
     NONE = "none"
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    PATCH_GENERATED = "patch_generated"
-    APPROVED = "approved"
-    REJECTED = "rejected"
     APPLIED = "applied"
 
 
@@ -258,7 +255,6 @@ class NormalizedFinding(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # Relations
     evidence = relationship("FindingEvidence", back_populates="finding", cascade="all, delete-orphan")
     decisions = relationship("FindingDecision", back_populates="finding", cascade="all, delete-orphan")
-    remediation_plans = relationship("RemediationPlan", back_populates="finding", cascade="all, delete-orphan")
     incident = relationship("SecretIncident", back_populates="occurrences", foreign_keys=[incident_id])
 
 

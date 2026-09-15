@@ -78,7 +78,7 @@ class NotificationPayload:
     title: str
     body: str
     severity: str = "info"  # info, warning, critical
-    event_type: str = "scan_complete"  # scan_complete, critical_finding, remediation, approval
+    event_type: str = "scan_complete"  # scan_complete, scan_failed, critical_finding, ...
     resource_type: Optional[str] = None
     resource_id: Optional[str] = None
     url: Optional[str] = None  # deep link to the resource

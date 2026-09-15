@@ -32,7 +32,6 @@ ALL_PERMISSIONS = [
     {"key": "manage_policies", "label": "Manage Policies", "group": "Security", "description": "Create and edit security policies and automation rules"},
     {"key": "view_findings", "label": "View Findings", "group": "Security", "description": "View scan results, findings, and evidence"},
     {"key": "triage_findings", "label": "Triage Findings", "group": "Security", "description": "Mark findings as true/false positive, accept risk"},
-    {"key": "approve_remediation", "label": "Approve Remediation", "group": "Security", "description": "Approve or reject AI-generated code patches"},
     {"key": "run_scans", "label": "Run Scans", "group": "Operations", "description": "Trigger scans and import scanner findings"},
     {"key": "manage_repositories", "label": "Manage Repositories", "group": "Operations", "description": "Add, edit, and delete repositories"},
     {"key": "view_audit", "label": "View Audit Logs", "group": "Compliance", "description": "View audit trail and compliance reports"},
@@ -50,12 +49,12 @@ BUILTIN_ROLES = [
     },
     {
         "name": "Security Engineer", "slug": "security_engineer", "color": "purple",
-        "description": "Full access to security operations. Can triage, remediate, and manage scan configurations.",
-        "permissions": ["view_findings", "triage_findings", "approve_remediation", "run_scans", "manage_integrations", "manage_policies", "manage_repositories", "export_reports"],
+        "description": "Full access to security operations. Can triage findings and manage scan configurations.",
+        "permissions": ["view_findings", "triage_findings", "run_scans", "manage_integrations", "manage_policies", "manage_repositories", "export_reports"],
     },
     {
         "name": "Developer", "slug": "developer", "color": "cyan",
-        "description": "Can view findings for assigned repositories, request remediations, and mark false positives.",
+        "description": "Can view findings for assigned repositories and mark false positives.",
         "permissions": ["view_findings", "triage_findings", "run_scans", "manage_repositories", "export_reports"],
     },
     {

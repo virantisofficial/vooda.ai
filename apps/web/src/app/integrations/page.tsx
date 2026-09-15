@@ -390,14 +390,6 @@ const AI_PROVIDERS = [
     icon: (<svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M9 9l3 3-3 3M13 15h3" strokeLinecap="round" strokeLinejoin="round" /></svg>) },
 ];
 
-// A model can be assigned to identification (triage) and/or auto
-// remediation. Remediation is opt-in: assign a capable model to it, or
-// Vooda stays identification-only.
-const AI_TASKS = [
-  { key: "triage", label: "AI Triage (identification)", description: "False-positive reduction and finding classification" },
-  { key: "remediation", label: "Auto Remediation", description: "Secure code-fix generation — assign a capable model" },
-];
-
 function AIModelsFullSection() {
   // Register header action with the page-level breadcrumb — see
   // SectionActionContext at the top of the file for the contract.
@@ -407,11 +399,9 @@ function AIModelsFullSection() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  // `tasks` is set implicitly to ["triage", "remediation"] — the only two
-  // task strings the worker actually dispatches on. No UI surface; Vooda's
-  // product model is one primary does everything, with task-level routing
-  // reserved as a backend capability for future hybrid setups.
-  const [form, setForm] = useState({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [] as string[], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null as string | null, provider_config_json: "{}" });
+  // `tasks` is always ["triage"] — triage is the only AI task, so there is
+  // no task picker.
+  const [form, setForm] = useState({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [] as string[], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null as string | null, provider_config_json: "{}" });
   // Transient per-model test-connection status — replaces the jarring alert()
   // popups. Auto-dismisses ~5s after each test completes.
   const [testStatus, setTestStatus] = useState<Record<string, { status: string; message: string; at: number }>>({});
@@ -513,10 +503,9 @@ function AIModelsFullSection() {
   };
 
   const resetForm = () => {
-    // Tasks always = triage + remediation (the only two keywords the worker
-    // dispatches on). Routing is uniform across providers — the primary
-    // fallback in get_provider_for_task handles everything.
-    setForm({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], is_primary: false, max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null, provider_config_json: "{}" });
+    // Tasks default to triage (the only keyword the worker dispatches
+    // on).
+    setForm({ name: "", provider: "anthropic", model_id: "", api_key: "", endpoint_url: "", tasks: ["triage"], max_tokens: 4096, temperature: 0, context_window: 4096, stop_sequences: [], supports_json_mode: false, use_compact_prompt: false, system_prompt_override: "", prompt_strategy: "recommended", model_size_class: null, provider_config_json: "{}" });
     setDiscoveredModels([]);
     setDiscoverStatus(null);
     setKeyValidated(false);
@@ -538,8 +527,7 @@ function AIModelsFullSection() {
       model_id: model.model_id || "",
       api_key: "",
       endpoint_url: model.endpoint_url || "",
-      tasks: model.tasks || ["triage", "remediation"],
-      is_primary: model.is_primary || false,
+      tasks: ["triage"],
       max_tokens: model.max_tokens || 4096,
       temperature: model.temperature ?? 0,
       context_window: model.context_window || 4096,
@@ -604,17 +592,12 @@ function AIModelsFullSection() {
       return;
     }
 
-    if (!form.tasks || form.tasks.length === 0) {
-      setProviderConfigError("Assign this model to at least one task (AI Triage and/or Auto Remediation).");
-      return;
-    }
-
     setSaving(true);
     try {
       if (editingId) {
         // Update existing model
         const updateData: any = {
-          name: form.name, model_id: form.model_id, tasks: form.tasks, is_primary: form.is_primary,
+          name: form.name, model_id: form.model_id, tasks: form.tasks,
           max_tokens: form.max_tokens, temperature: form.temperature, context_window: form.context_window,
           stop_sequences: form.stop_sequences, supports_json_mode: form.supports_json_mode,
           use_compact_prompt: form.use_compact_prompt, system_prompt_override: form.system_prompt_override || null,
@@ -648,17 +631,6 @@ function AIModelsFullSection() {
     }
     setMenuOpen(null); setConfirmDelete(null);
     if (editingId === id) { setShowForm(false); resetForm(); }
-    loadModels();
-  };
-
-  const handleSetPrimary = async (id: string) => {
-    setMenuOpen(null);
-    try {
-      await updateAIModel(id, { is_primary: true });
-    } catch (e: any) {
-      alert(`Failed to set as primary: ${apiErr(e, "Unknown error")}`);
-      return;
-    }
     loadModels();
   };
 
@@ -720,16 +692,16 @@ function AIModelsFullSection() {
 
   return (
     <div>
-      {/* ── Configured Providers ──
+      {/* ── AI Provider — one model per tenant ──
           Header is a flex row so the Add Provider button can sit
           inline with the title — same pattern as Notifications and
           (visually) the Vault "+ Add Vault" affordance.  Button
-          hides while the form is open so the user has a single Add
-          surface to focus on. */}
+          shows only when no model is configured (Vooda uses one AI
+          model) and hides while the form is open. */}
       <div className="card mb-5">
         <div className="flex items-center justify-between mb-4 gap-3">
-          <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Configured Providers</h4>
-          {!showForm && (
+          <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">AI Provider</h4>
+          {!showForm && !loading && models.length === 0 && (
             <button onClick={() => openAddRef.current()} className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5 shrink-0">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
@@ -738,6 +710,12 @@ function AIModelsFullSection() {
             </button>
           )}
         </div>
+        {/* Setups from before one-model had several; only one is used. */}
+        {!loading && models.length > 1 && (
+          <p className="text-xs text-amber-400 bg-amber-500/[0.06] border border-amber-500/20 rounded-lg px-3 py-2 mb-3">
+            Vooda uses one AI model for triage. Keep the one you want and remove the others.
+          </p>
+        )}
         {loading ? (
           <div className="text-center py-8"><div className="w-5 h-5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin mx-auto" /></div>
         ) : models.length === 0 ? (
@@ -757,10 +735,7 @@ function AIModelsFullSection() {
                   <div className={`flex-1 min-w-0 ${!model.is_active ? "opacity-50" : ""}`}>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium text-slate-200">{model.name}</span>
-                      {model.is_primary && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/20">Primary</span>}
                       {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500">Disabled</span>}
-                      {(model.tasks || []).includes("triage") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">Triage</span>}
-                      {(model.tasks || []).includes("remediation") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">Auto Remediation</span>}
                       {model.last_error && String(model.last_error).startsWith("triage_parse_failure:") && (
                         <span
                           title={String(model.last_error).replace(/^triage_parse_failure:\s*/, "")}
@@ -787,9 +762,6 @@ function AIModelsFullSection() {
                           "bg-slate-500/10 text-slate-400 border-slate-500/20"
                         }`}>{model.prompt_strategy === "strict" ? "🛡️ Strict" : model.prompt_strategy === "sensitive" ? "🔍 Sensitive" : "✏️ Custom"}</span>
                       )}
-                      {(model.tasks || []).map((t: string) => (
-                        <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.03] text-slate-500 border border-white/[0.04] capitalize">{t}</span>
-                      ))}
                     </div>
                     {model.total_requests > 0 && (
                       <div className="flex gap-4 mt-2 text-[10px] text-slate-600">
@@ -849,12 +821,6 @@ function AIModelsFullSection() {
                                 Test Connection
                               </span>
                             </button>
-                            {!model.is_primary && models.length > 1 && <button onClick={() => handleSetPrimary(model.id)} className="block w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-white/[0.04]">
-                              <span className="flex items-center gap-2">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" /></svg>
-                                Set as Primary
-                              </span>
-                            </button>}
                             <button onClick={() => handleToggleActive(model.id)} className="block w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-white/[0.04]">
                               <span className="flex items-center gap-2">
                                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
@@ -1045,40 +1011,15 @@ function AIModelsFullSection() {
             </div>
           )}
 
-          {/* ── Essentials: Name + Primary + task assignment ──
+          {/* ── Essentials: Name ──
               Rendered whenever a model is set (discovery OR manual
-              entry), so tasks are always configurable — not only on
-              successful auto-discovery. */}
+              entry), not only on successful auto-discovery. */}
           {(keyValidated || editingId) && form.model_id && (
             <div className="mb-5">
               <label className="text-xs text-slate-500 mb-1.5 block">Display Name</label>
               <input value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder={form.model_id || "e.g. Production Primary"} className="input-dark" />
-              <label className="flex items-center gap-2 cursor-pointer mt-3">
-                <input type="checkbox" checked={form.is_primary}
-                  onChange={(e) => setForm((f) => ({ ...f, is_primary: e.target.checked }))}
-                  className="w-4 h-4 rounded border-slate-600 bg-dark-950 text-red-500" />
-                <span className="text-sm text-slate-300">Set as primary provider</span>
-              </label>
-              <div className="mt-4">
-                <label className="text-xs text-slate-500 mb-1.5 block">Used for</label>
-                <div className="space-y-2">
-                  {AI_TASKS.map((t) => (
-                    <label key={t.key} className="flex items-start gap-2 cursor-pointer">
-                      <input type="checkbox" checked={form.tasks.includes(t.key)}
-                        onChange={(e) => setForm((f) => ({ ...f, tasks: e.target.checked ? Array.from(new Set([...f.tasks, t.key])) : f.tasks.filter((x) => x !== t.key) }))}
-                        className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-dark-950 text-red-500" />
-                      <span className="text-sm text-slate-300">{t.label}
-                        <span className="block text-[11px] text-slate-500">{t.description}</span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-                {form.tasks.length === 0 && (
-                  <p className="text-[11px] text-amber-400 mt-1.5">Select at least one — a model with no task assigned does nothing.</p>
-                )}
-              </div>
+                placeholder={form.model_id || "e.g. Production triage model"} className="input-dark" />
             </div>
           )}
 
@@ -2657,7 +2598,7 @@ function TicketingSection() {
                     { key: "accepted_risk", label: "Accepted Risk", default: true,
                       tooltip: "Findings explicitly accepted by the security team" },
                     { key: "rotated", label: "Already Rotated", default: true,
-                      tooltip: "Findings whose remediation has already been applied" },
+                      tooltip: "Findings already marked resolved" },
                   ].map((ex) => {
                     const isExcluded = form[`_exclude_${ex.key}`] !== "false";
                     return (
@@ -3887,7 +3828,7 @@ function NotificationsFullSection() {
             {notifRules.map((rule, idx) => {
               const eventIcons: Record<string, string> = {
                 scan_complete: "\u{1F50D}", critical_finding: "\u{1F6A8}", policy_violation: "\u{1F6AB}",
-                remediation_ready: "\u{1F527}", finding_assigned: "\u{1F464}", patch_approved: "\u2705",
+                finding_assigned: "\u{1F464}",
                 sla_breach: "\u23F0", import_completed: "\u{1F4E5}",
               };
               // Map: "disabled" means not configured; is_enabled=false
@@ -4014,7 +3955,6 @@ function RichSelect({ label, description, value, options, onChange }: {
 // the TS errors we hit in 2026-04 (undeclared keys on inferred
 // type).
 type AIEngineSettings = {
-  analysis_mode: string;
   skip_ai_for_info: boolean;
   ai_confidence_threshold: number;
   max_concurrent: number;
@@ -4026,7 +3966,7 @@ type AIEngineSettings = {
 
 function AIEngineSettingsSection() {
   const [settings, setSettings] = useState<AIEngineSettings>({
-    analysis_mode: "batch_similar", skip_ai_for_info: true,
+    skip_ai_for_info: true,
     ai_confidence_threshold: 0.6,
     // Balanced preset — must match the API defaults and the option
     // flagged "recommended", so a first-run install is self-consistent.
@@ -4053,23 +3993,10 @@ function AIEngineSettingsSection() {
         )}
       </div>
 
-      {/* Row 1: Finding Analysis + AI Confidence
-          "Context Extraction" removed. Smart/Full/Minimal were offered
-          but `extract_rich_context()` takes no mode argument, so all
-          three did exactly the same thing. A dropdown whose options are
-          indistinguishable is worse than no dropdown: it invites the
-          operator to tune something that cannot be tuned. Vooda always
-          sends the enclosing function plus imports — documented rather
-          than presented as a choice. */}
+      {/* "Context Extraction" and "Finding Analysis" removed: neither was a
+          real choice (identical behaviour). Triage always groups identical
+          findings and sends the enclosing function plus imports. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
-        <RichSelect label="Finding Analysis"
-          description="Determines how multiple secrets of the same type in the same file are processed by the AI. Batching groups similar findings into a single AI call, reducing API usage without sacrificing accuracy — since the AI sees all related findings together."
-          value={settings.analysis_mode} onChange={(v) => update("analysis_mode", v)}
-          options={[
-            { value: "batch_similar", label: "Batch Similar", desc: "Findings sharing a rule, file and code snippet are triaged once and the verdict applied to the whole group. Savings depend on the repository: large where one rule repeats within a file, near zero where findings are spread across many files.", recommended: true },
-            { value: "individual", label: "Individual", desc: "Every finding gets its own dedicated AI call. Most thorough, but uses the most tokens and takes the longest — on a large repository this means one call per finding.", },
-          ]}
-        />
         <RichSelect label="AI Confidence Level"
           description="Sets the minimum confidence threshold for AI decisions. When the AI's confidence falls below this level, the finding is automatically marked as 'Needs Review' and routed to a human analyst for manual verification. Higher thresholds mean more human review but fewer incorrect classifications."
           value={[0.8, 0.6, 0.4].includes(settings.ai_confidence_threshold) ? String(settings.ai_confidence_threshold) : "custom"}
@@ -4080,20 +4007,18 @@ function AIEngineSettingsSection() {
             { value: "0.4", label: "Aggressive (0.4)", desc: "Accepts most AI decisions (40%+). Minimizes human review workload but increases the risk of incorrect true/false positive classifications." },
           ]}
         />
-
+        <RichSelect label="Severity Filter"
+          description="Controls which severity levels are sent to the AI for false-positive analysis. Skipping informational findings saves tokens on items that rarely require AI judgment — they can still be reviewed manually."
+          value={settings.skip_ai_for_info ? "skip_info" : "all"}
+          onChange={(v) => update("skip_ai_for_info", v === "skip_info")}
+          options={[
+            { value: "skip_info", label: "Skip Info", desc: "Analyze Critical, High, Medium and Low severity findings. Info-level findings are left as 'Needs Review' for manual triage.", recommended: true },
+            { value: "all", label: "Analyze All", desc: "AI reviews every finding regardless of severity, including Info. Uses more tokens but provides complete automated classification across all severity levels." },
+          ]}
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
-        <RichSelect label="Severity Filter"
-          description="Controls which severity levels are sent to the AI for false positive analysis. Skipping low-severity and informational findings saves tokens and processing time on items that rarely require AI judgment — they can still be reviewed manually."
-          value={settings.skip_ai_for_info ? "skip_low" : "all"}
-          onChange={(v) => update("skip_ai_for_info", v === "skip_low")}
-          options={[
-            { value: "skip_low", label: "Skip Low & Info", desc: "Only analyze Critical, High, and Medium severity findings. Low and Info severity findings remain as 'Needs Review' for manual triage.", recommended: true },
-            { value: "all", label: "Analyze All", desc: "AI reviews every finding regardless of severity. Uses more tokens but provides complete automated classification across all severity levels." },
-          ]}
-        />
-
         {/* "Max Tokens per Finding" was removed from this panel: it
             duplicated ai_model_configs.max_tokens and only the per-model
             value was ever honoured. Throughput takes its place — the
@@ -4119,9 +4044,6 @@ function AIEngineSettingsSection() {
             { value: "custom", label: "Custom", desc: "Values set outside this panel (via the API) are preserved and shown here as Custom." },
           ]}
         />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Credential Verification"
           description="When enabled, Vooda automatically tests detected secrets against their provider APIs during the scan (e.g., calling GitHub's /user endpoint with a found token). This determines whether credentials are still active or have been revoked — critical for prioritizing remediation of live exposures."
           value={settings.auto_verify_credentials !== false ? "enabled" : "disabled"}
@@ -4131,7 +4053,9 @@ function AIEngineSettingsSection() {
             { value: "disabled", label: "Disabled", desc: "Skip credential verification. Scans complete faster but you won't know which secrets are still live until manually verified." },
           ]}
         />
+      </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Test File Handling"
           description="Controls how secrets found in test and spec files (e.g., *Test.java, *.spec.ts, *_test.go) are treated. Test files often contain intentional hardcoded credentials for automated testing — these are real secrets in the codebase but lower priority than production configuration leaks."
           /* Modern values are the strings "normal" | "deprioritize" |
@@ -4156,12 +4080,7 @@ function AIEngineSettingsSection() {
             { value: "exclude", label: "Exclude from AI", desc: "Skip AI false positive analysis for test file findings entirely. Saves AI tokens — findings are still detected and stored but not AI-classified." },
           ]}
         />
-      </div>
 
-      {/* Trailing single control: kept in a 2-col grid so it
-          keeps the same column width as the rows above rather
-          than stretching across the panel. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-stretch">
         <RichSelect label="Scan Scope"
           description="Defines which file types the secret scanner includes during repository analysis. Standard covers all common code and configuration files. Extended adds documentation and extensionless files which occasionally contain leaked credentials in examples or READMEs."
           value={settings.scan_scope || "standard"}

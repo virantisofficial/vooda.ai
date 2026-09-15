@@ -240,7 +240,7 @@ def compute_mttr(findings: list[dict]) -> dict:
                 continue
 
         rem = f.get("remediation_status", "none").lower()
-        if rem in ("applied", "approved"):
+        if rem == "applied":
             updated = f.get("updated_at")
             if isinstance(updated, str):
                 try:
@@ -383,7 +383,7 @@ def evaluate_release_readiness(
         total_actionable += 1
 
         rem = f.get("remediation_status", "none").lower()
-        if rem not in ("applied", "approved"):
+        if rem != "applied":
             open_count += 1
 
         rev = f.get("review_status", "unreviewed").lower()

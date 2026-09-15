@@ -103,6 +103,19 @@ def test_multiline_private_key_is_detected_and_kept(scanner, kind):
     )
 
 
+def test_multiline_private_key_records_its_line_range(scanner):
+    """The finding spans the whole BEGIN..END block, so the UI highlights
+    the key itself rather than stopping on the BEGIN header line."""
+    content = f"# deploy key\nKEY = '''\n{_pem('OPENSSH PRIVATE KEY')}\n'''\n"
+    hits = _privkey_findings(scanner, content)
+    assert hits, "OpenSSH key not detected"
+    best = max(hits, key=lambda f: f.confidence)
+    # Line 3 is BEGIN, lines 4-5 the body, line 6 END.
+    assert (best.line_start, best.line_end) == (3, 6), (
+        f"expected lines 3-6, got {best.line_start}-{best.line_end}"
+    )
+
+
 def test_bare_header_string_literal_is_not_flagged(scanner):
     """A bare BEGIN header as a string constant (no END line) is naming
     the delimiter, not leaking a key. Block-capture can't match it, so it

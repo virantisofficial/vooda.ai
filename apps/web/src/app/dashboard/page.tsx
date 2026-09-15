@@ -6,7 +6,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
-  getMetricsOverview, getFindingsMetrics, getRemediationMetrics,
+  getMetricsOverview, getFindingsMetrics,
   getRepositories, getMTTRMetrics, getTrendData,
   getFindingsByCategory, getTopLeakingRepos,
   getFindingsBreakdown, getAIAccuracy, getAuditEvents,
@@ -99,8 +99,8 @@ function severityBlendedColor(sev: { critical: number; high: number; medium: num
    the user to glance back up at the picker for context.
 
    `goodDirection` flips the colour semantics: for most metrics
-   (Criticals, Active Leaks) rising is bad → red.  For Auto-Fix
-   coverage, rising is good → green. */
+   (Criticals, Active Leaks) rising is bad → red; pass "up" for a
+   metric where rising is good. */
 function DeltaBadge({ curr, prev, prevLabel, goodDirection = "down" }: {
   curr: number;
   prev: number | undefined;
@@ -299,7 +299,6 @@ export default function DashboardPage() {
 
   const [metrics, setMetrics] = useState<any>(null);
   const [findingsM, setFindingsM] = useState<any>(null);
-  const [remediationM, setRemediationM] = useState<any>(null);
   const [repoCount, setRepoCount] = useState(0);
   const [mttrData, setMttrData] = useState<any>(null);
   const [trendData, setTrendData] = useState<any>(null);
@@ -331,7 +330,6 @@ export default function DashboardPage() {
       // prev-window query in the same response.
       getMetricsOverview(daysParam, daysParam !== undefined).then(r => setMetrics(r.data)),
       getFindingsMetrics().then(r => setFindingsM(r.data)),
-      getRemediationMetrics().then(r => setRemediationM(r.data)),
       getRepositories({ page_size: 1 }).then(r => {
         const d = r.data;
         setRepoCount(d?.total ?? (Array.isArray(d) ? d.length : (d?.items?.length || 0)));
@@ -397,27 +395,6 @@ export default function DashboardPage() {
       )
     : undefined;
   const prevActive: number | undefined = prev?.active_secrets;
-
-  // Auto-Remediation — split into Covered (engine drafted any patch) and
-  // Applied (human approved/applied so the fix actually landed).  Single
-  // "Remediation Rate" number that lived here previously was misleading.
-  // Numerators come from the overview response, computed under the SAME
-  // open + time-window scope as `total` — a percentage only means
-  // something when both sides of the division share a scope. The
-  // standalone /remediation endpoint counts all-time across every
-  // classification; dividing that by a windowed open denominator
-  // inflates the figure and can exceed 100%. It remains the fallback
-  // for an older API.
-  const remStats = remediationM?.by_remediation_status ?? {};
-  const _remCount = (k: string) =>
-    (remStats[k] ?? 0) + (remStats[`RemediationStatus.${k.toUpperCase()}`] ?? 0);
-  const remediationCovered = metrics?.remediation_covered
-    ?? (_remCount("patch_generated") + _remCount("approved") + _remCount("applied"));
-  const remediationApplied = metrics?.remediation_applied
-    ?? (_remCount("approved") + _remCount("applied"));
-  const pendingPatches = remediationCovered - remediationApplied;
-  const appliedPatches = metrics?.remediation_applied ?? _remCount("applied");
-  const coveragePct = total > 0 ? Math.min(100, Math.round((remediationCovered / total) * 100)) : 0;
 
   // ── Posture status — three tiers driven by KPI signal strength ────
   //   At Risk:        any verifier-confirmed live credentials
@@ -563,8 +540,8 @@ export default function DashboardPage() {
       <AppShell pageTitle="Overview">
         <div className="space-y-4 max-w-[1400px]">
           <Skeleton w="100%" h={48} radius={8} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-            {Array.from({ length: 5 }).map((_, i) => <SkeletonKpiTile key={i} />)}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => <SkeletonKpiTile key={i} />)}
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
             <div className="lg:col-span-3"><SkeletonCard rows={5} /></div>
@@ -631,13 +608,12 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ══════ ROW 2 — KPI STRIP (5 EQUAL TILES) ════════════════════
-            Total · Severity Mix · Active · MTTR · Auto-Fix.  Each
+        {/* ══════ ROW 2 — KPI STRIP (4 EQUAL TILES) ════════════════════
+            Total · Severity Mix · Active · MTTR.  Each
             tile shows a current value, a delta badge vs the previous
-            window of the same size, and a one-line helper.  Delta
-            colour follows whether the metric is "good rising" (only
-            Auto-Fix) or "bad rising" (the rest). */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            window of the same size, and a one-line helper.  Every
+            tile's delta treats rising as bad. */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Tile 1: Total Secrets — helper drops the repo count (banner
               already carries "N Repository Scanned") and instead surfaces
               the per-repo density, which is the more decision-grade
@@ -697,23 +673,6 @@ export default function DashboardPage() {
               <span className="text-[10px] text-slate-600">{mttrResolved > 0 ? `${mttrResolved} Resolved` : "No Resolved Findings Yet"}</span>
             </div>
             <p className="text-[11px] text-slate-500 mt-1">Average Time-To-Fix</p>
-          </div>
-
-          {/* Tile 5: Auto-Fix coverage / applied (Vooda differentiator) */}
-          <div className="card p-4">
-            <p className="text-[10px] text-cyan-400 uppercase tracking-wider font-medium">Auto-Fix</p>
-            {/* Count first ("N of M have a draft fix"); coverage % is
-                a trailing annotation, "applied" is what landed. */}
-            <div className="flex items-baseline gap-1.5 mt-1.5">
-              <span className={`text-3xl font-bold ${remediationCovered > 0 ? "text-cyan-400" : "text-slate-500"}`}>{remediationCovered}</span>
-              <span className="text-[11px] text-slate-500">of {total} have a draft fix</span>
-            </div>
-            <div className="mt-1 flex items-baseline gap-1.5">
-              <span className={`text-sm font-semibold ${remediationApplied > 0 ? "text-emerald-400" : "text-slate-600"}`}>{appliedPatches}</span>
-              <span className="text-[10px] text-slate-500">
-                applied{remediationCovered > 0 ? ` · ${coveragePct}% coverage` : ""}
-              </span>
-            </div>
           </div>
         </div>
 
@@ -870,13 +829,6 @@ export default function DashboardPage() {
                   desc: needsReview > 0 ? `${needsReview} Findings Need Review` : "Queue Clear",
                   color: "bg-yellow-500/15", tc: "text-yellow-400",
                   icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />,
-                },
-                {
-                  href: "/findings?remediation_status=PATCH_GENERATED",
-                  label: "Pending Patches",
-                  desc: pendingPatches > 0 ? `${pendingPatches} Fixes Await Approval` : "No Patches Pending",
-                  color: "bg-purple-500/15", tc: "text-purple-400",
-                  icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 13l4 4L19 7" />,
                 },
                 {
                   href: "/secrets/rotation",

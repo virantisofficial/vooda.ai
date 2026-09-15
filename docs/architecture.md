@@ -50,9 +50,6 @@ Repository --> Clone --> File Analysis --> Pattern Scan (rules + entropy)
   --> Multi-Scanner Correlation
   --> AI Triage (parallel batch, framework-aware, evidence-enriched)
   --> Metrics Snapshot --> Notifications
-  --> [User approves remediation]
-  --> AI Patch Generation (with templates) --> Fix Validation
-  --> PR Creation (GitHub / GitLab / Bitbucket)
 ```
 
 ## Component Overview
@@ -62,7 +59,7 @@ Repository --> Clone --> File Analysis --> Pattern Scan (rules + entropy)
 The FastAPI application serves as the central coordination layer. It handles HTTP requests, WebSocket connections for real-time scan progress, and orchestrates work across services.
 
 - **Entry point**: `apps/api/app/main.py`
-- **28 routers** under `/api/v1/`, exposing 199 endpoints
+- **28 routers** under `/api/v1/`, exposing 194 endpoints
 - **Swagger UI** at `/api/docs`
 - **Authentication**: JWT tokens with RBAC (admin, security_engineer, developer, viewer)
 - **Multi-tenancy**: All models include `tenant_id` for data isolation
@@ -73,7 +70,7 @@ Celery workers process asynchronous tasks including repository scanning, non-git
 
 - **Broker**: Redis
 - **Concurrency**: 4 (configurable)
-- **Task types**: scan, source scan, triage, remediation, reporting
+- **Task types**: scan, source scan, triage, reporting
 
 ### Web Frontend (`apps/web/`)
 
@@ -109,16 +106,12 @@ All domain logic lives in the `services/` directory. Each service module is inde
 | **Integration Errors** | `services/integration_errors/` | Provider-specific classification of integration failures (GitHub, Atlassian, Azure, MS Graph) |
 | **Code Context** | `services/code_context/` | AST-aware context extraction for AI triage enrichment |
 | **AI Triage** | `services/ai_triage/` | Multi-provider AI classification with batch processing, deduplication, and Bayesian calibration |
-| **AI Remediation** | `services/ai_remediation/` | AI-generated code patches for secret removal |
 | **Evidence Collector** | `services/evidence/` | Security pattern discovery and context enrichment |
 | **Correlation** | `services/correlation/` | Cross-scanner finding deduplication |
 | **Normalization** | `services/normalization/` | Finding normalization with stability IDs and decision caching |
 | **Learning** | `services/learning/` | Org-wide false positive pattern learning and suppression |
 | **Git Integration** | `services/git_integration/` | GitHub, GitLab, Bitbucket API abstraction with factory pattern |
 | **Git History** | `services/git_history/` | Historical commit scanning |
-| **PR Pipeline** | `services/pr_pipeline/` | End-to-end pull request creation for remediation |
-| **Fix Validation** | `services/fix_validation/` | Re-scan of generated patches before PR submission |
-| **Batch Remediation** | `services/batch_remediation/` | Bulk remediation across multiple findings |
 | **Incidents** | `services/incidents/` | Incident tracking and response workflows |
 | **Scheduler** | `services/scheduler/` | Celery Beat scan scheduling (on-demand, daily, weekly) |
 | **Notifications** | `services/notifications/` | Slack, Teams, email, and webhook notification channels |
@@ -170,7 +163,7 @@ The `services/secret_scan/detectors/` directory contains 31+ detector modules:
 ### AI Architecture
 
 - **Provider abstraction**: Unified interface for Claude, GPT-4, Gemini, Azure OpenAI, and custom endpoints
-- **Multi-model routing**: Different models can be assigned per task (triage, remediation, analysis)
+- **One model per tenant**: Triage runs on the tenant's configured model, falling back to the env-var model when none is set
 - **Framework-aware prompts**: 12 frameworks with security-specific context
 - **Confidence calibration**: Bayesian adjustment from user feedback loops
 - **Groundedness validation**: Strips ungrounded evidence from AI output
@@ -179,7 +172,7 @@ The `services/secret_scan/detectors/` directory contains 31+ detector modules:
 
 ## Database Models
 
-The platform uses 37 PostgreSQL application tables organized by domain
+The platform uses 34 PostgreSQL application tables organized by domain
 (plus Alembic's `alembic_version`). All models use UUID primary keys with timestamp and tenant isolation mixins.
 
 ### Core / Auth (7 tables)
@@ -223,13 +216,10 @@ The platform uses 37 PostgreSQL application tables organized by domain
 | `secret_incidents` | SecretIncident | One row per unique credential per tenant — the primary triage entity, aggregating its occurrences |
 | `rule_overrides` | RuleOverride | Per-repo or global muting of individual scanner rules |
 
-### Remediation (4 tables)
+### Rotation (1 table)
 
 | Table | Model | Purpose |
 |-------|-------|---------|
-| `remediation_plans` | RemediationPlan | AI-generated remediation strategies |
-| `remediation_patches` | RemediationPatch | Generated code patches for secret removal |
-| `review_feedback` | ReviewFeedback | User feedback on AI-generated patches |
 | `credential_rotation_events` | CredentialRotationEvent | Rotation lifecycle events per credential |
 
 ### Audit (1 table)
@@ -252,7 +242,7 @@ The platform uses 37 PostgreSQL application tables organized by domain
 ## API Router Structure
 
 The API server mounts 28 routers, all versioned under `/api/v1/`,
-exposing 199 endpoints:
+exposing 194 endpoints:
 
 ```
 /api/v1/
@@ -260,7 +250,7 @@ exposing 199 endpoints:
   repositories/          -- CRUD, scan triggers, scan history, stats
   scan-jobs/             -- Job status and phase events
   scan-sources/          -- Non-git scan targets and their scans
-  findings/              -- Query, triage, assign, remediate, verify
+  findings/              -- Query, triage, assign, verify
   incidents/             -- Credential-level aggregation and bulk triage
   imports/               -- CLI/CI client-side findings ingest
   suppressions/          -- Suppression rules and learning

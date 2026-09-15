@@ -180,10 +180,10 @@ services:
 
   # Dedicated scan worker pool (scan-slot isolation). Consumes ONLY the
   # `scans` queue, so user-facing scans always have reserved prefork
-  # slots that a backlog of generate_remediation / PR / ticket /
-  # notification jobs (which live on the default `celery` queue) can
-  # never occupy. This is the fix for the live starvation where two
-  # generate_remediation tasks pinned both worker slots and a queued
+  # slots that a backlog of ticket / notification jobs (which live on
+  # the default `celery` queue) can never occupy. This is the fix for the
+  # live starvation where two long-running background tasks pinned both
+  # worker slots and a queued
   # scan sat PENDING at 0%. Scale horizontally by raising replicas for
   # more concurrent-scan throughput; SCANS_CONCURRENCY tunes per-pod
   # parallelism independently of the background worker's CELERY_CONCURRENCY.

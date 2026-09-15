@@ -126,7 +126,6 @@ class FindingDetail(BaseModel):
 
     evidence: list[dict] = []
     decisions: list[dict] = []
-    remediation_plans: list[dict] = []
 
     # Optimistic-lock counter.  Mirrors the field on FindingListItem;
     # repeated here so the detail GET also returns it.  Defaults to 1
@@ -193,15 +192,6 @@ class TriageRequest(BaseModel):
             ],
         },
     }
-
-
-class RemediateRequest(BaseModel):
-    auto_apply: bool = False
-
-
-class ApprovalRequest(BaseModel):
-    action: str  # approve, reject
-    comment: Optional[str] = None
 
 
 class FindingFilters(BaseModel):

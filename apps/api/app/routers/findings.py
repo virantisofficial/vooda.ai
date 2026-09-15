@@ -24,13 +24,10 @@ from apps.api.app.models.finding import (
     Classification,
     ReviewStatus,
 )
-from apps.api.app.models.remediation import RemediationPlan
 from apps.api.app.schemas.finding import (
     FindingListItem,
     FindingDetail,
     TriageRequest,
-    RemediateRequest,
-    ApprovalRequest,
 )
 
 router = APIRouter()
@@ -361,9 +358,6 @@ async def get_finding(
         .where(FindingDecision.finding_id == finding.id)
         .order_by(FindingDecision.created_at.desc())
     )
-    plans_result = await db.execute(
-        select(RemediationPlan).where(RemediationPlan.finding_id == finding.id)
-    )
 
     # Resolve user names for decisions
     from apps.api.app.models.user import User as UserModel
@@ -415,34 +409,7 @@ async def get_finding(
             }
             for d in decision_list
         ],
-        "remediation_plans": [],
     }
-
-    # Load full remediation plans with patches
-    from apps.api.app.models.remediation import RemediationPatch
-    plans = plans_result.scalars().all()
-    for p in plans:
-        patches_r = await db.execute(
-            select(RemediationPatch).where(RemediationPatch.plan_id == p.id).order_by(RemediationPatch.created_at.desc())
-        )
-        patches = patches_r.scalars().all()
-        plan_data = {
-            "id": str(p.id),
-            "summary": p.vulnerability_summary,
-            "root_cause": p.root_cause,
-            "fix_rationale": p.fix_rationale,
-            "confidence": p.confidence_score,
-            "risk_of_breakage": p.risk_of_breakage,
-            "developer_notes": p.developer_notes or [],
-            "validation_steps": p.validation_steps or [],
-            "generated_by": p.generated_by,
-            "patch_diff": patches[0].patch_diff if patches else None,
-            "files_changed": patches[0].files_changed if patches else [],
-            "patch_status": patches[0].status.value if patches and hasattr(patches[0].status, 'value') else (patches[0].status if patches else None),
-            "safety_score": patches[0].safety_score if patches else None,
-            "pr_url": patches[0].pr_url if patches else None,
-        }
-        finding_dict["remediation_plans"].append(plan_data)
 
     return finding_dict
 
@@ -514,12 +481,6 @@ async def triage_finding(
             decision_id=decision.id,
         )
     finding.review_status = ReviewStatus.REVIEWED
-
-    # Confirming a finding does NOT auto-generate a fix. AI fix drafting
-    # is on-demand only (the per-finding "Generate fix" action), which
-    # is how secret-scanning tools handle it at scale — a leaked secret's
-    # remediation is revoke + rotate, and a code patch is a deliberate,
-    # per-incident request, not a side effect of a triage verdict.
 
     # ── Case-B: cascade triage UP to the parent incident ──
     # Per-finding triage is a decision about the CREDENTIAL, not just
@@ -909,169 +870,6 @@ async def get_blast_radius(
         return br_result.to_dict()
 
     return {"error": "Blast radius analysis not available for this provider"}
-
-
-@router.post("/{finding_id}/remediate")
-async def request_remediation(
-    finding_id: UUID,
-    body: RemediateRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    finding = await _get_finding_with_access_check(finding_id, db, user)
-
-    # Remediation is only available when a model is assigned to it. If
-    # the tenant is identification-only, say so plainly rather than
-    # queueing a job that would have nothing to run.
-    from services.ai_triage.provider import get_provider_for_task
-    if await get_provider_for_task("remediation", str(user.tenant_id), db=db) is None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "AI remediation is not enabled. Assign a model to the "
-                "Auto Remediation task in Settings -> AI Models to generate fixes."
-            ),
-        )
-
-    from apps.worker.tasks import generate_remediation
-    generate_remediation.delay(str(finding.id))
-
-    finding.remediation_status = "pending"
-    await db.flush()
-
-    from apps.api.app.core.audit import log_audit
-    await log_audit(db, user, "remediation_requested", "finding", finding_id, f"Remediation requested for {finding.title[:60]}")
-
-    return {"status": "remediation_requested"}
-
-
-@router.post("/{finding_id}/approve")
-async def approve_patch(
-    finding_id: UUID,
-    body: ApprovalRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    finding = await _get_finding_with_access_check(finding_id, db, user)
-
-    decision = FindingDecision(
-        finding_id=finding.id,
-        user_id=user.id,
-        action=f"patch_{body.action}",
-        comment=body.comment,
-    )
-    db.add(decision)
-
-    if body.action == "approve":
-        finding.remediation_status = "approved"
-        # Dispatch PR creation task
-        from apps.worker.tasks import create_fix_pr
-        create_fix_pr.delay(str(finding.id))
-    elif body.action == "reject":
-        finding.remediation_status = "rejected"
-
-    await db.flush()
-
-    from apps.api.app.core.audit import log_audit
-    await log_audit(db, user, f"patch_{body.action}", "finding", finding_id, f"Patch {body.action}d: {body.comment or ''}")
-
-    return {"status": body.action, "pr_creating": body.action == "approve"}
-
-
-@router.post("/remediation/backfill")
-async def backfill_remediation(
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Queue draft-fix generation for open true positives that have none.
-
-    Selection matches the dashboard's Auto-Fix coverage set (open,
-    likely-true-positive, no patch with a real diff). `dry_run` returns
-    the count without queueing; `limit` caps the batch. NEEDS_REVIEW
-    findings are out of scope — fixes are only drafted for findings
-    judged real.
-    """
-    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch
-    from apps.api.app.models.finding import Classification
-
-    dry_run = bool(body.get("dry_run", False))
-    limit = min(int(body.get("limit", 100) or 100), 500)
-    repository_id = body.get("repository_id")
-
-    covered = (
-        select(RemediationPlan.finding_id)
-        .join(RemediationPatch, RemediationPatch.plan_id == RemediationPlan.id)
-        .where(func.length(func.coalesce(RemediationPatch.patch_diff, "")) > 20)
-        .scalar_subquery()
-    )
-    conditions = [
-        NormalizedFinding.tenant_id == user.tenant_id,
-        NormalizedFinding.is_suppressed == False,  # noqa: E712
-        NormalizedFinding.classification == Classification.LIKELY_TRUE_POSITIVE,
-        NormalizedFinding.id.not_in(covered),
-        # A repository snapshot is what generation patches against;
-        # source-only findings have nothing to diff.
-        NormalizedFinding.repository_id.is_not(None),
-    ]
-    if repository_id:
-        conditions.append(NormalizedFinding.repository_id == UUID(str(repository_id)))
-
-    from apps.api.app.core.access_control import get_accessible_repo_ids
-    accessible = await get_accessible_repo_ids(db, user)
-    if accessible is not None:
-        conditions.append(NormalizedFinding.repository_id.in_(accessible))
-
-    rows = (await db.execute(
-        select(NormalizedFinding).where(*conditions)
-        .order_by(NormalizedFinding.created_at.desc()).limit(limit)
-    )).scalars().all()
-
-    if dry_run:
-        return {"eligible": len(rows), "queued": 0, "dry_run": True}
-
-    from apps.worker.tasks import generate_remediation
-    queued = 0
-    for f in rows:
-        f.remediation_status = "pending"
-        generate_remediation.delay(str(f.id))
-        queued += 1
-    await db.flush()
-
-    if queued:
-        from apps.api.app.core.audit import log_audit
-        await log_audit(
-            db, user, "remediation_backfill", "finding", None,
-            f"Queued draft-fix generation for {queued} finding(s)",
-            metadata={"queued": queued, "repository_id": repository_id},
-        )
-    return {"eligible": len(rows), "queued": queued, "dry_run": False}
-
-
-@router.post("/batch-remediate")
-async def batch_remediate_findings(
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Generate AI remediation for multiple findings at once."""
-    finding_ids = body.get("finding_ids", [])
-    repository_id = body.get("repository_id")
-    if not finding_ids or not repository_id:
-        raise HTTPException(status_code=400, detail="finding_ids and repository_id required")
-
-    # Access control — verify user can access this repository
-    from apps.api.app.core.access_control import can_access_repository
-    if not await can_access_repository(db, user, repository_id):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    from apps.worker.tasks import batch_remediate
-    batch_remediate.delay(repository_id, finding_ids, str(user.tenant_id))
-
-    from apps.api.app.core.audit import log_audit
-    await log_audit(db, user, "batch_remediation", "finding", repository_id, f"Batch remediation for {len(finding_ids)} findings")
-
-    return {"status": "batch_remediation_started", "findings": len(finding_ids)}
 
 
 @router.post("/{finding_id}/comment")

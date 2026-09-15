@@ -73,7 +73,7 @@ interface Notification {
   id: string;
   title: string;
   body: string;
-  type: "scan" | "finding" | "remediation" | "system" | "triage_health";
+  type: "scan" | "finding" | "system" | "triage_health";
   severity: "info" | "warning" | "critical";
   time: string;
   read: boolean;

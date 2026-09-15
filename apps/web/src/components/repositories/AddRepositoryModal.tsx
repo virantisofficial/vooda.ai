@@ -506,7 +506,7 @@ export default function AddRepositoryModal({ onClose, onSubmit }: AddRepositoryM
         <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto flex-1">
 
           <div className="space-y-4">
-            <p className="text-xs text-slate-500">Vooda AI scans your code using 3,000+ security rules, performs AI false positive analysis, and generates secure code fixes.</p>
+            <p className="text-xs text-slate-500">Vooda AI scans your code using 3,000+ security rules, and performs AI false positive analysis.</p>
 
               <CodeSourceToggle value={codeSourceVooda} onChange={setCodeSourceVooda} />
 

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
+from sqlalchemy import select
 
 from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
@@ -31,7 +31,6 @@ class AIModelCreate(StrictModel):
     api_key: Optional[str] = None
     endpoint_url: Optional[str] = None
     tasks: list[str] = []
-    is_primary: bool = False
     max_tokens: int = 4096
     temperature: float = 0.1
     context_window: int = 4096
@@ -50,7 +49,6 @@ class AIModelUpdate(StrictModel):
     api_key: Optional[str] = None
     endpoint_url: Optional[str] = None
     tasks: Optional[list[str]] = None
-    is_primary: Optional[bool] = None
     is_active: Optional[bool] = None
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
@@ -71,7 +69,6 @@ class AIModelResponse(BaseModel):
     model_id: str
     endpoint_url: Optional[str]
     tasks: list[str]
-    is_primary: bool
     is_active: bool
     api_key_set: bool
     max_tokens: int
@@ -127,7 +124,6 @@ def _to_response(m: AIModelConfig) -> dict:
         "model_id": m.model_id,
         "endpoint_url": m.endpoint_url,
         "tasks": m.tasks or [],
-        "is_primary": m.is_primary,
         "is_active": m.is_active,
         "api_key_set": bool(m.api_key_encrypted),
         "max_tokens": m.max_tokens or 4096,
@@ -158,7 +154,7 @@ async def ai_status(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Check if AI is configured and ready for triage and remediation."""
+    """Check if AI is configured and ready for triage."""
     from apps.api.app.core.config import settings
 
     # Check DB-configured models
@@ -176,27 +172,13 @@ async def ai_status(
 
     is_ready = has_db_models or has_env_key
 
-    # Capability is defined by which tasks have a model assigned. Triage
-    # can run off any configured model (env fallback included); remediation
-    # runs only when a model is explicitly assigned to it — so a tenant can
-    # be identification-only or full-remediation by configuration alone.
-    triage_enabled = is_ready
-    remediation_enabled = any(
-        "remediation" in (m.tasks or []) and m.api_key_encrypted for m in db_models
-    )
-
     return {
         "ai_configured": is_ready,
         "has_db_models": has_db_models,
         "has_env_key": has_env_key,
         "active_models": len(db_models),
-        "triage_enabled": triage_enabled,
-        "remediation_enabled": remediation_enabled,
-        "message": (
-            "AI remediation is enabled." if remediation_enabled
-            else "Identification only — assign a model to Auto Remediation to enable fixes." if is_ready
-            else "No AI model configured."
-        ),
+        "triage_enabled": is_ready,
+        "message": "AI triage is enabled." if is_ready else "No AI model configured.",
     }
 
 
@@ -208,7 +190,7 @@ async def list_models(
     result = await db.execute(
         select(AIModelConfig)
         .where(AIModelConfig.tenant_id == user.tenant_id)
-        .order_by(AIModelConfig.is_primary.desc(), AIModelConfig.created_at)
+        .order_by(AIModelConfig.created_at)
     )
     return [_to_response(m) for m in result.scalars().all()]
 
@@ -219,12 +201,14 @@ async def create_model(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # If marking as primary, unset other primaries
-    if body.is_primary:
-        await db.execute(
-            update(AIModelConfig)
-            .where(AIModelConfig.tenant_id == user.tenant_id, AIModelConfig.is_primary == True)
-            .values(is_primary=False)
+    # One AI model per tenant (also enforced by uq_ai_model_configs_tenant_id).
+    existing = await db.execute(
+        select(AIModelConfig.id).where(AIModelConfig.tenant_id == user.tenant_id).limit(1)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="An AI provider is already configured. Edit or remove it instead of adding another.",
         )
 
     model = AIModelConfig(
@@ -235,7 +219,6 @@ async def create_model(
         api_key_encrypted=body.api_key,  # In production, encrypt this
         endpoint_url=body.endpoint_url,
         tasks=body.tasks,
-        is_primary=body.is_primary,
         max_tokens=body.max_tokens,
         temperature=body.temperature,
         context_window=body.context_window,
@@ -249,14 +232,6 @@ async def create_model(
     )
     db.add(model)
     await db.flush()
-
-    # Auto-primary: if this is the only model, make it primary automatically
-    count_result = await db.execute(
-        select(func.count(AIModelConfig.id)).where(AIModelConfig.tenant_id == user.tenant_id)
-    )
-    total_models = count_result.scalar() or 0
-    if total_models == 1:
-        model.is_primary = True
 
     await db.refresh(model)
     return _to_response(model)
@@ -281,11 +256,12 @@ class AIEngineSettingsSchema(BaseModel):
         dispatcher. Triage now dispatches in completion order, so there
         are no batches; ``max_concurrent`` and ``rate_limit_rpm`` are the
         only real levers.
+      * ``analysis_mode``          — grouping only collapsed identical
+        findings, which share a verdict; triage now always groups.
 
     Pydantic ignores unknown keys, so an older client still sending the
     removed fields keeps working — they are simply no longer persisted.
     """
-    analysis_mode: str = "batch_similar"
     skip_ai_for_info: bool = True
     ai_confidence_threshold: float = 0.6
     # Defaults MUST equal the option the UI marks "recommended", or a
@@ -369,14 +345,6 @@ async def update_model(
 
     update_data = body.model_dump(exclude_unset=True)
 
-    # Handle primary flag
-    if update_data.get("is_primary"):
-        await db.execute(
-            update(AIModelConfig)
-            .where(AIModelConfig.tenant_id == user.tenant_id, AIModelConfig.is_primary == True)
-            .values(is_primary=False)
-        )
-
     # Handle api_key separately
     if "api_key" in update_data:
         api_key = update_data.pop("api_key")
@@ -405,21 +373,8 @@ async def delete_model(
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-    was_primary = model.is_primary
     await db.delete(model)
     await db.flush()
-
-    # Auto-promote: if deleted model was primary, promote remaining model
-    if was_primary:
-        remaining = await db.execute(
-            select(AIModelConfig).where(
-                AIModelConfig.tenant_id == user.tenant_id, AIModelConfig.is_active == True
-            ).limit(1)
-        )
-        next_model = remaining.scalar_one_or_none()
-        if next_model:
-            next_model.is_primary = True
-            await db.flush()
 
 
 @router.post("/test", response_model=TestConnectionResponse)
@@ -894,15 +849,15 @@ async def get_task_routing(
     )
     models = result.scalars().all()
 
-    # Only the two task keywords the worker actually dispatches on.
+    # Only the task keyword the worker actually dispatches on.
     # `code_analysis` / `summarization` were placeholder strings that no
     # code path calls — returning them here encouraged admins to configure
     # routing that didn't take effect.
-    tasks = ["triage", "remediation"]
+    tasks = ["triage"]
     routing = {}
     for task in tasks:
         assigned = [
-            {"id": str(m.id), "name": m.name, "provider": m.provider, "model_id": m.model_id, "is_primary": m.is_primary}
+            {"id": str(m.id), "name": m.name, "provider": m.provider, "model_id": m.model_id}
             for m in models if task in (m.tasks or [])
         ]
         routing[task] = assigned

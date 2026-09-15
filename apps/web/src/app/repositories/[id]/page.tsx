@@ -207,12 +207,6 @@ function ScanJobCard({ scan, repoId, onCancel, onDelete, onOpenDetail, onTriage 
                 {scan.stats.false_positives} false positives removed
               </span>
             )}
-            {scan.stats.auto_remediated > 0 && (
-              <span className="flex items-center gap-1 text-red-400">
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
-                {scan.stats.auto_remediated} auto-remediated
-              </span>
-            )}
             {/*
               AI status messaging precision.  Old single-branch
               message ("AI triage pending — configure AI model in
@@ -1269,7 +1263,6 @@ function RepositoryDetailPageInner() {
                         <ul className="space-y-0.5 text-slate-500">
                           <li>• All scan history and scan artifacts</li>
                           <li>• All findings, AI analysis, and classifications</li>
-                          <li>• All remediation plans and patches</li>
                           <li>• All triage decisions and comments</li>
                         </ul>
                       </div>
@@ -1342,7 +1335,7 @@ function RepositoryDetailPageInner() {
                 <div className="text-xs text-slate-400 leading-relaxed">
                   <p className="text-red-400 font-medium mb-1">This action is permanent and will delete:</p>
                   <ul className="space-y-0.5 text-slate-500">
-                    <li>• Findings first seen in this scan, with their AI triage and remediation plans</li>
+                    <li>• Findings first seen in this scan, with their AI triage</li>
                     <li>• This scan&apos;s artifacts and metrics</li>
                   </ul>
                   <p className="text-slate-500 mt-2">Findings that were already present before this scan are kept and re-linked to the previous scan. If this is the repository&apos;s only scan, all of its findings are removed.</p>
@@ -1377,7 +1370,7 @@ function RepositoryDetailPageInner() {
               </div>
               <div>
                 <h3 className="text-base font-semibold text-white">AI Model Not Configured</h3>
-                <p className="text-sm text-slate-400 mt-1">{aiStatusMsg || "No AI model configured. False positive analysis and auto-remediation will be skipped."}</p>
+                <p className="text-sm text-slate-400 mt-1">{aiStatusMsg || "No AI model configured. False positive analysis will be skipped."}</p>
               </div>
             </div>
             <div className="flex gap-3 justify-end">

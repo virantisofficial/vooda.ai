@@ -277,14 +277,6 @@ async def executive_summary(
     )
     daily_trend = [{"date": str(d), "count": c} for d, c in daily_q.all()]
 
-    # ── Remediation pipeline ──────────────────────────
-    rem_q = await db.execute(
-        select(NormalizedFinding.remediation_status, func.count(NormalizedFinding.id))
-        .where(NormalizedFinding.tenant_id == tenant)
-        .group_by(NormalizedFinding.remediation_status)
-    )
-    remediation_pipeline = {(s.value.lower().replace("_", " ") if hasattr(s, "value") else str(s).split(".")[-1].lower().replace("_", " ")): c for s, c in rem_q.all()}
-
     # ── AI performance ────────────────────────────────
     ai_triaged = await db.execute(
         select(func.count(NormalizedFinding.id)).where(
@@ -378,7 +370,6 @@ async def executive_summary(
         "top_repos": top_repos,
         "top_categories": top_categories,
         "daily_trend": daily_trend,
-        "remediation_pipeline": remediation_pipeline,
         "sla_compliance": sla_compliance,
 
         # AI
@@ -1283,15 +1274,13 @@ async def _get_export_context(db, user, report_type: str, days: int, repository_
         report_data = await fix_priority_report(repository_id=repository_id, db=db, user=user)
     elif report_type == "developer_report":
         report_data = await developer_remediation_report(repository_id=repository_id, db=db, user=user)
-    elif report_type in ("trends", "remediation", "scanner", "ai"):
+    elif report_type in ("trends", "scanner", "ai"):
         # These come from metrics endpoints — import and call them
         from apps.api.app.routers.metrics import (
-            finding_trends, remediation_metrics, scanner_comparison, ai_accuracy_metrics,
+            finding_trends, scanner_comparison, ai_accuracy_metrics,
         )
         if report_type == "trends":
             report_data = await finding_trends(days=days, db=db, user=user)
-        elif report_type == "remediation":
-            report_data = await remediation_metrics(repository_id=repository_id, db=db, user=user)
         elif report_type == "scanner":
             report_data = await scanner_comparison(db=db, user=user)
         elif report_type == "ai":
@@ -1343,15 +1332,6 @@ def _write_csv_report_section(writer, report_type: str, data: dict, days: int = 
             writer.writerow(["Classification", "Count"])
             for cls_name, count in data["by_classification"].items():
                 writer.writerow([cls_name.replace("_", " ").title(), count])
-            writer.writerow([])
-
-        # Remediation pipeline
-        pipeline = data.get("remediation_pipeline", {})
-        if pipeline:
-            writer.writerow(["REMEDIATION PIPELINE"])
-            writer.writerow(["Stage", "Count"])
-            for stage, count in pipeline.items():
-                writer.writerow([stage.replace("_", " ").title(), count])
             writer.writerow([])
 
         # AI performance
@@ -1571,46 +1551,6 @@ def _write_csv_report_section(writer, report_type: str, data: dict, days: int = 
                     writer.writerow([item.get("title", ""), item.get("severity", "").title(), item.get("ai_confidence", 0), item.get("classification", item.get("ai_said", "")), item.get("repo_name", ""), item.get("file", "")])
                 writer.writerow([])
 
-    elif report_type == "remediation":
-        writer.writerow(["REMEDIATION SUMMARY"])
-        writer.writerow(["Total Findings", data.get("total_findings", 0)])
-        writer.writerow(["Patched", data.get("patched", 0)])
-        writer.writerow(["Fix Rate", f"{data.get('patch_rate', 0)}%"])
-        writer.writerow(["Pending Review", data.get("pending_review", 0)])
-        writer.writerow(["Stalled (>7 days)", data.get("stalled_count", 0)])
-        writer.writerow(["Unassigned", data.get("unassigned_count", 0)])
-        writer.writerow([])
-        if data.get("by_remediation_status"):
-            writer.writerow(["PIPELINE BY STATUS"])
-            writer.writerow(["Status", "Count"])
-            for status, count in data["by_remediation_status"].items():
-                writer.writerow([status.replace("_", " ").title(), count])
-            writer.writerow([])
-        if data.get("by_severity"):
-            writer.writerow(["PIPELINE BY SEVERITY"])
-            header = ["Severity"]
-            statuses = set()
-            for sev, rem_map in data["by_severity"].items():
-                statuses.update(rem_map.keys())
-            statuses = sorted(statuses)
-            header.extend([s.replace("_", " ").title() for s in statuses])
-            writer.writerow(header)
-            for sev in ["critical", "high", "medium", "low", "info"]:
-                if sev in data["by_severity"]:
-                    row = [sev.title()]
-                    for s in statuses:
-                        row.append(data["by_severity"][sev].get(s, 0))
-                    writer.writerow(row)
-            writer.writerow([])
-        for section_key, section_label in [("awaiting_approval", "AWAITING APPROVAL"), ("stalled", "STALLED > 7 DAYS"), ("unassigned", "UNASSIGNED")]:
-            items = data.get(section_key, [])
-            if items:
-                writer.writerow([section_label])
-                writer.writerow(["Finding", "Severity", "Status", "Age (days)", "Project", "Owner", "Location"])
-                for item in items:
-                    writer.writerow([item.get("title", ""), item.get("severity", "").title(), item.get("status", ""), item.get("age_days", 0), item.get("repo_name", ""), item.get("assignee", ""), item.get("file", "")])
-                writer.writerow([])
-
     elif report_type == "developer":
         writer.writerow(["DEVELOPER ACTIVITY"])
         writer.writerow([f"Period: Last {data.get('period_days', 30)} days"])
@@ -1736,7 +1676,6 @@ async def export_csv(
         "repo_risk": "Repository Risk Report",
         "scanner": "Scanner Comparison Report",
         "ai": "AI Performance Report",
-        "remediation": "Remediation Report",
         "developer": "Developer Activity Report",
         "sla": "SLA & Aging Report",
         "release_readiness": "Release Readiness Assessment",
@@ -1799,7 +1738,6 @@ async def export_json(
         "repo_risk": "Repository Risk Report",
         "scanner": "Scanner Comparison Report",
         "ai": "AI Performance Report",
-        "remediation": "Remediation Report",
         "developer": "Developer Activity Report",
         "sla": "SLA & Aging Report",
         "release_readiness": "Release Readiness Assessment",
@@ -1875,7 +1813,6 @@ async def export_pdf(
         "repo_risk": "Repository Risk Report",
         "scanner": "Scanner Comparison Report",
         "ai": "AI Performance Report",
-        "remediation": "Remediation Report",
         "developer": "Developer Activity Report",
         "sla": "SLA & Aging Report",
         "release_readiness": "Release Readiness Assessment",
@@ -2267,32 +2204,6 @@ async def export_pdf(
                 _bar_chart(pdf, cat_items, max_w=90, bar_h=5, label_w=70)
                 pdf.ln(3)
 
-            # Remediation Pipeline — progress style
-            pdf.section_title("Remediation Pipeline")
-            pipeline = d.get("remediation_pipeline", {})
-            total_p = max(sum(pipeline.values()), 1)
-            stage_colors = [(34, 197, 94), (59, 130, 246), (139, 92, 246), (234, 179, 8), (249, 115, 22)]
-            stages = [
-                ("Open", sum(v for k, v in pipeline.items() if "none" in k.lower())),
-                ("Pending", sum(v for k, v in pipeline.items() if "pending" in k.lower() and "none" not in k.lower())),
-                ("Patch Gen", sum(v for k, v in pipeline.items() if "patch" in k.lower())),
-                ("Approved", sum(v for k, v in pipeline.items() if "approved" in k.lower())),
-                ("Applied", sum(v for k, v in pipeline.items() if "applied" in k.lower())),
-            ]
-            for i, (label, count) in enumerate(stages):
-                pdf.set_font("Helvetica", "", 8)
-                pdf.set_text_color(*GRAY_600)
-                pdf.cell(25, 7, label)
-                pct = count / total_p * 100
-                bx = pdf.get_x()
-                by = pdf.get_y() + 1.5
-                pdf.progress_bar(bx, by, 120, 4, pct, stage_colors[i % len(stage_colors)])
-                pdf.set_xy(bx + 122, by - 1.5)
-                pdf.set_font("Helvetica", "B", 8)
-                pdf.set_text_color(*BRAND_DARK)
-                pdf.cell(20, 7, str(count), new_x="LMARGIN", new_y="NEXT")
-            pdf.ln(3)
-
             # SLA badges
             sla = d.get("sla_compliance", {})
             pdf.section_title("SLA Compliance")
@@ -2668,90 +2579,6 @@ async def export_pdf(
                         (item.get("title", "")[:30], 45), (item.get("severity", "").title(), 16),
                         (item.get("ai_said", "")[:18], 30), (str(item.get("ai_confidence", 0)), 18),
                         (item.get("repo_name", "")[:14], 25), (item.get("file", "")[:35], 56),
-                    ], sev_hint=item.get("severity"))
-                pdf.ln(3)
-
-        elif report_type == "remediation":
-            # KPI cards — 6 compact cards
-            _ensure_space(pdf, 30)
-            y0 = pdf.get_y()
-            card_w = 30
-            card_h = 22
-            patch_rate = d.get("patch_rate", 0)
-            cards = [
-                (str(d.get("total_findings", 0)), "Total", "", BRAND_CYAN),
-                (str(d.get("patched", 0)), "Patched", "", (34, 197, 94)),
-                (f"{patch_rate}%", "Fix Rate", "", (34, 197, 94) if patch_rate > 50 else (234, 179, 8)),
-                (str(d.get("pending_review", 0)), "Pending", "", (249, 115, 22)),
-                (str(d.get("stalled_count", 0)), "Stalled", f">7 days", (239, 68, 68) if d.get("stalled_count", 0) > 0 else (34, 197, 94)),
-                (str(d.get("unassigned_count", 0)), "Unassigned", "", (239, 68, 68) if d.get("unassigned_count", 0) > 0 else (34, 197, 94)),
-            ]
-            for i, (val, label, sub, color) in enumerate(cards):
-                pdf.kpi_card(10 + i * (card_w + 3), y0, card_w, card_h, label, val, sub, color)
-            pdf.set_y(y0 + card_h + 5)
-
-            # Status bar chart
-            if d.get("by_remediation_status"):
-                pdf.section_title("Pipeline by Status")
-                rem_items = [(s.replace("_", " ").title(), c, BRAND_CYAN) for s, c in d["by_remediation_status"].items()]
-                _bar_chart(pdf, rem_items)
-                pdf.ln(3)
-
-            if d.get("by_severity"):
-                pdf.section_title("Pipeline by Severity")
-                statuses = set()
-                for sev, rem_map in d["by_severity"].items():
-                    statuses.update(rem_map.keys())
-                statuses = sorted(statuses)
-                col_w = min(int(150 / max(len(statuses), 1)), 30)
-                cols = [("Severity", 40, "L")] + [(s.replace("_", " ")[:12], col_w) for s in statuses]
-                _table_header(pdf, cols)
-                for sev in ["critical", "high", "medium", "low", "info"]:
-                    if sev in d["by_severity"]:
-                        cells = [(sev.title(), 40)] + [(d["by_severity"][sev].get(s, 0), col_w) for s in statuses]
-                        _table_row(pdf, cells)
-                pdf.ln(3)
-
-            # Awaiting Approval table
-            awaiting = d.get("awaiting_approval", [])
-            if awaiting:
-                pdf.section_title(f"Awaiting Approval ({d.get('awaiting_approval_count', len(awaiting))})")
-                _table_header(pdf, [("Finding", 40, "L"), ("Severity", 16), ("Age", 12), ("Project", 30, "L"), ("Owner", 28, "L"), ("Location", 64, "L")])
-                for item in awaiting:
-                    sev_label = item.get("severity", "").title()
-                    _table_row(pdf, [
-                        (item.get("title", "")[:30], 40), (sev_label, 16),
-                        (f"{item.get('age_days', 0)}d", 12), (item.get("repo_name", "")[:18], 30),
-                        (item.get("assignee", "Unassigned")[:16], 28), (item.get("file", "")[:40], 64),
-                    ], sev_hint=item.get("severity"))
-                pdf.ln(3)
-
-            # Stalled table
-            stalled_items = d.get("stalled", [])
-            if stalled_items:
-                pdf.section_title(f"Stalled > 7 Days ({d.get('stalled_count', len(stalled_items))})")
-                _table_header(pdf, [("Finding", 40, "L"), ("Severity", 16), ("Status", 18, "L"), ("Age", 12), ("Project", 30, "L"), ("Owner", 28, "L"), ("Location", 46, "L")])
-                for item in stalled_items:
-                    sev_label = item.get("severity", "").title()
-                    _table_row(pdf, [
-                        (item.get("title", "")[:30], 40), (sev_label, 16),
-                        (item.get("status", "")[:12], 18), (f"{item.get('age_days', 0)}d", 12),
-                        (item.get("repo_name", "")[:18], 30), (item.get("assignee", "Unassigned")[:16], 28),
-                        (item.get("file", "")[:28], 46),
-                    ], sev_hint=item.get("severity"))
-                pdf.ln(3)
-
-            # Unassigned table
-            unassigned_items = d.get("unassigned", [])
-            if unassigned_items:
-                pdf.section_title(f"Unassigned ({d.get('unassigned_count', len(unassigned_items))})")
-                _table_header(pdf, [("Finding", 50, "L"), ("Severity", 18), ("Status", 22, "L"), ("Age", 14), ("Project", 36, "L"), ("Location", 50, "L")])
-                for item in unassigned_items:
-                    sev_label = item.get("severity", "").title()
-                    _table_row(pdf, [
-                        (item.get("title", "")[:35], 50), (sev_label, 18),
-                        (item.get("status", "")[:14], 22), (f"{item.get('age_days', 0)}d", 14),
-                        (item.get("repo_name", "")[:20], 36), (item.get("file", "")[:32], 50),
                     ], sev_hint=item.get("severity"))
                 pdf.ln(3)
 

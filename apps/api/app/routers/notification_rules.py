@@ -140,9 +140,7 @@ DEFAULT_RULES = [
     {"event_type": "scan_failed",        "severity_threshold": "all",            "is_enabled": True},
     {"event_type": "critical_finding",   "severity_threshold": "critical",       "is_enabled": True},
     {"event_type": "policy_violation",   "severity_threshold": "all",            "is_enabled": True},
-    {"event_type": "remediation_ready",  "severity_threshold": "all",            "is_enabled": True},
     {"event_type": "finding_assigned",   "severity_threshold": "all",            "is_enabled": False},
-    {"event_type": "patch_approved",     "severity_threshold": "all",            "is_enabled": True},
     {"event_type": "sla_breach",         "severity_threshold": "high_and_above", "is_enabled": True},
     {"event_type": "import_completed",   "severity_threshold": "all",            "is_enabled": False},
 ]
@@ -152,9 +150,7 @@ EVENT_LABELS = {
     "scan_failed":        "Scan Failed",
     "critical_finding":   "Critical Finding Detected",
     "policy_violation":   "Policy Violation",
-    "remediation_ready":  "Remediation Ready",
     "finding_assigned":   "Finding Assigned",
-    "patch_approved":     "Patch Approved / Rejected",
     "sla_breach":         "SLA Breach Warning",
     "import_completed":   "Import Completed",
 }

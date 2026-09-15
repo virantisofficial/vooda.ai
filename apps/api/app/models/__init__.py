@@ -11,7 +11,6 @@ from apps.api.app.models.finding import (
     FindingDecision,
     SecretIncident,
 )
-from apps.api.app.models.remediation import RemediationPlan, RemediationPatch, ReviewFeedback
 # Policy model removed 2026-05-16 alongside the governance product surfaces.
 # SLA windows are hardcoded defaults (critical=7d, high=30d, medium=90d,
 # low=180d) — see apps/api/app/routers/reports.py.
@@ -66,7 +65,6 @@ __all__ = [
     "Repository", "RepositorySnapshot",
     "ScanJob", "ScanArtifact", "Scanner",
     "ImportedFinding", "NormalizedFinding", "FindingEvidence", "FindingDecision", "SecretIncident",
-    "RemediationPlan", "RemediationPatch", "ReviewFeedback",
     "AuditEvent", "IntegrationConfig", "Notification", "MetricSnapshot",
     "AIModelConfig", "RoleDefinition", "SuppressionRule", "RuleOverride", "APIKey", "NotificationRule",
     "BusinessUnit", "UserAccessGrant",

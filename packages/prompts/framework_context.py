@@ -10,7 +10,7 @@ Each framework entry contains:
 - Unsafe patterns (anti-patterns specific to this framework)
 - Common false positive causes (why scanners flag safe code)
 
-Used by triage v2 and remediation prompts to give AI framework awareness.
+Used by triage prompts to give AI framework awareness.
 """
 
 from typing import Optional

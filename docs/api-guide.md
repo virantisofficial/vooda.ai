@@ -173,16 +173,13 @@ Prefix: `/api/v1/findings`
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/v1/findings` | List Findings |
-| POST | `/api/v1/findings/batch-remediate` | Batch Remediate Findings |
 | POST | `/api/v1/findings/bulk-triage` | Bulk Triage Findings |
 | GET | `/api/v1/findings/tags` | List Tags |
 | GET | `/api/v1/findings/{finding_id}` | Get Finding |
-| POST | `/api/v1/findings/{finding_id}/approve` | Approve Patch |
 | POST | `/api/v1/findings/{finding_id}/assign` | Assign Finding |
 | GET | `/api/v1/findings/{finding_id}/blast-radius` | Get Blast Radius |
 | POST | `/api/v1/findings/{finding_id}/comment` | Add Comment |
 | POST | `/api/v1/findings/{finding_id}/mark-false-positive` | Mark False Positive |
-| POST | `/api/v1/findings/{finding_id}/remediate` | Request Remediation |
 | POST | `/api/v1/findings/{finding_id}/tags` | Update Tags |
 | POST | `/api/v1/findings/{finding_id}/triage` | Triage Finding |
 | POST | `/api/v1/findings/{finding_id}/verify` | Verify Finding Credential |
@@ -232,7 +229,6 @@ Prefix: `/api/v1/metrics`
 | GET | `/api/v1/metrics/findings-by-category` | Findings By Category |
 | GET | `/api/v1/metrics/mttr` | Mttr Metrics |
 | GET | `/api/v1/metrics/overview` | Metrics Overview |
-| GET | `/api/v1/metrics/remediation` | Remediation Metrics |
 | GET | `/api/v1/metrics/scanner-comparison` | Scanner Comparison |
 | GET | `/api/v1/metrics/top-leaking-repos` | Top Leaking Repos |
 | GET | `/api/v1/metrics/trends` | Finding Trends |

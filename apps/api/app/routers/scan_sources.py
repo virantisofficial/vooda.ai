@@ -540,12 +540,10 @@ async def delete_scan_source(
     #                                metric_snapshots, policy_evaluation_results,
     #                                scan_artifacts [CASCADE])
     #   scan_sources  ← finding_decision_cache [CASCADE]
-    #   normalized_findings ← (finding_evidence, finding_decisions,
-    #                          remediation_plans) [all CASCADE]
+    #   normalized_findings ← (finding_evidence, finding_decisions) [CASCADE]
     #                       ← credential_rotation_events [SET NULL —
     #                          preserved as historical rotation audit]
-    #                       ← quantum_assessments, review_feedback
-    #                          [NO ACTION — explicit cleanup]
+    #                       ← quantum_assessments [NO ACTION — explicit cleanup]
     # Order: scan_job-children → normalized_findings → scan_jobs →
     # scan_sources (cascades finding_decision_cache).
 
@@ -573,18 +571,19 @@ async def delete_scan_source(
                 {"sid": sid_text},
             )
 
-    # Children of normalized_findings that DON'T cascade.  Both tables
-    # are typically empty for source-scan paths today, but the cleanup
+    # Children of normalized_findings that DON'T cascade.  The table is
+    # typically empty for source-scan paths today, but the cleanup
     # makes future migrations safe and matches the repo path's discipline.
     if findings_count:
-        finding_subq = "SELECT id FROM normalized_findings WHERE scan_source_id = :sid"
-        for tbl in ("quantum_assessments", "review_feedback"):
-            await db.execute(
-                text(f"DELETE FROM {tbl} WHERE finding_id IN ({finding_subq})"),
-                {"sid": sid_text},
-            )
+        await db.execute(
+            text(
+                "DELETE FROM quantum_assessments WHERE finding_id IN "
+                "(SELECT id FROM normalized_findings WHERE scan_source_id = :sid)"
+            ),
+            {"sid": sid_text},
+        )
 
-    # Findings (cascades finding_evidence/decisions/remediation; SET NULLs
+    # Findings (cascades finding_evidence/decisions; SET NULLs
     # credential_rotation_events.finding_id to preserve historical audit).
     await db.execute(
         sa_delete(NormalizedFinding).where(NormalizedFinding.scan_source_id == source_id)

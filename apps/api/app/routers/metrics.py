@@ -179,40 +179,6 @@ async def metrics_overview(
         select(func.count(NormalizedFinding.id)).where(*all_conditions)
     )
 
-    # Remediation coverage over the SAME open+window scope as the
-    # headline, so the Auto-Fix tile's percentage divides like by like.
-    # The standalone /remediation endpoint counts patches across all
-    # findings all-time; dividing that by an open, windowed denominator
-    # inflates the percentage and can push it past 100%.
-    from apps.api.app.models.finding import RemediationStatus
-    from apps.api.app.models.remediation import RemediationPlan, RemediationPatch
-
-    # "Covered" is a claim that a fix was DRAFTED, so it is counted from
-    # the patch artifacts themselves, not from `remediation_status` — a
-    # status flag can exist without the artifact behind it, and a patch
-    # with an empty diff is not a draft either.
-    _has_real_patch = (
-        select(RemediationPlan.finding_id)
-        .join(RemediationPatch, RemediationPatch.plan_id == RemediationPlan.id)
-        .where(func.length(func.coalesce(RemediationPatch.patch_diff, "")) > 20)
-        .scalar_subquery()
-    )
-    _covered_q = await db.execute(
-        select(func.count(NormalizedFinding.id)).where(
-            *conditions,
-            NormalizedFinding.id.in_(_has_real_patch),
-        )
-    )
-    _applied_q = await db.execute(
-        select(func.count(NormalizedFinding.id)).where(
-            *conditions,
-            NormalizedFinding.id.in_(_has_real_patch),
-            NormalizedFinding.remediation_status.in_([
-                RemediationStatus.APPROVED,
-                RemediationStatus.APPLIED,
-            ]),
-        )
-    )
     # Review-queue size under the same scope, so the quick-action chip
     # agrees with the queue it links to (the unfiltered classification
     # breakdown includes suppressed rows; the queue does not).
@@ -264,8 +230,6 @@ async def metrics_overview(
         # that settled findings are outstanding work.
         "detected_total": _detected,
         "filtered_as_noise": max(_detected - _open, 0),
-        "remediation_covered": _covered_q.scalar() or 0,
-        "remediation_applied": _applied_q.scalar() or 0,
         "needs_review_open": _needs_review_q.scalar() or 0,
         "total_scans": total_scans.scalar() or 0,
         "by_severity": {str(s): c for s, c in by_severity.all()},
@@ -584,144 +548,6 @@ async def findings_metrics(
         "by_category": {c: n for c, n in by_category.all()},
         "by_scanner": {s: n for s, n in by_scanner.all()},
         "false_positive_rate": round(fp / t, 4),
-    }
-
-
-@router.get("/remediation")
-async def remediation_metrics(
-    repository_id: Optional[UUID] = Query(None),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    from datetime import datetime, timezone
-    from apps.api.app.models.repository import Repository
-    from apps.api.app.models.user import User as UserModel
-    from apps.api.app.core.access_control import get_accessible_repo_ids, can_access_repository
-
-    # Normalize repository_id (may be Query(None) when called internally)
-    if repository_id is not None and not isinstance(repository_id, UUID):
-        try:
-            repository_id = UUID(str(repository_id)) if str(repository_id) not in ('None', '') else None
-        except (ValueError, AttributeError):
-            repository_id = None
-
-    if repository_id:
-        if not await can_access_repository(db, user, repository_id):
-            from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="Access denied")
-
-    conditions = [NormalizedFinding.tenant_id == user.tenant_id, NormalizedFinding.is_suppressed == False]
-    if repository_id:
-        conditions.append(NormalizedFinding.repository_id == repository_id)
-    else:
-        accessible = await get_accessible_repo_ids(db, user)
-        if accessible is not None:
-            conditions.append(NormalizedFinding.repository_id.in_(accessible))
-
-    # By status
-    by_status = await db.execute(
-        select(NormalizedFinding.remediation_status, func.count(NormalizedFinding.id))
-        .where(*conditions)
-        .group_by(NormalizedFinding.remediation_status)
-    )
-    status_counts = {}
-    for s, c in by_status.all():
-        label = s.value.lower() if hasattr(s, "value") else str(s).split(".")[-1].lower()
-        status_counts[label] = c
-
-    # By severity × remediation status
-    by_sev = await db.execute(
-        select(NormalizedFinding.severity, NormalizedFinding.remediation_status, func.count(NormalizedFinding.id))
-        .where(*conditions)
-        .group_by(NormalizedFinding.severity, NormalizedFinding.remediation_status)
-    )
-    severity_breakdown: dict[str, dict] = {}
-    for sev, rem, c in by_sev.all():
-        sev_name = sev.value.lower() if hasattr(sev, "value") else str(sev).split(".")[-1].lower()
-        rem_name = rem.value.lower() if hasattr(rem, "value") else str(rem).split(".")[-1].lower()
-        if sev_name not in severity_breakdown:
-            severity_breakdown[sev_name] = {}
-        severity_breakdown[sev_name][rem_name] = c
-
-    # Total with patches
-    patched = status_counts.get("patch_generated", 0) + status_counts.get("approved", 0) + status_counts.get("applied", 0)
-    total = sum(status_counts.values())
-
-    # ── Actionable findings: awaiting approval, stalled, unassigned ──
-    now = datetime.now(timezone.utc)
-    actionable_statuses = ["pending", "in_progress", "patch_generated"]
-    actionable_q = select(NormalizedFinding).where(
-        *conditions,
-        NormalizedFinding.remediation_status.in_(actionable_statuses),
-        NormalizedFinding.classification.notin_(["confirmed_false_positive", "likely_false_positive"]),
-    ).order_by(NormalizedFinding.severity, NormalizedFinding.created_at).limit(200)
-
-    result = await db.execute(actionable_q)
-    actionable_findings = result.scalars().all()
-
-    # Pre-fetch repo names
-    repo_ids = {f.repository_id for f in actionable_findings if f.repository_id}
-    repo_name_map = {}
-    if repo_ids:
-        repos_r = await db.execute(select(Repository.id, Repository.name).where(Repository.id.in_(repo_ids)))
-        repo_name_map = {str(r[0]): r[1] for r in repos_r.all()}
-
-    # Pre-fetch assignee names
-    assigned_ids = {f.assigned_to for f in actionable_findings if f.assigned_to}
-    user_name_map = {}
-    if assigned_ids:
-        users_r = await db.execute(select(UserModel.id, UserModel.full_name).where(UserModel.id.in_(assigned_ids)))
-        user_name_map = {str(r[0]): r[1] for r in users_r.all()}
-
-    # Categorize into actionable buckets
-    awaiting_approval = []  # patch_generated — needs someone to approve
-    stalled = []            # pending/in_progress for > 7 days
-    unassigned = []         # actionable but no owner
-
-    for f in actionable_findings:
-        sev = f.severity.value.lower() if hasattr(f.severity, "value") else str(f.severity).split(".")[-1].lower()
-        rem = f.remediation_status.value.lower() if hasattr(f.remediation_status, "value") else str(f.remediation_status).split(".")[-1].lower()
-        age = (now - (f.created_at.replace(tzinfo=timezone.utc) if f.created_at.tzinfo is None else f.created_at)).days if f.created_at else 0
-        assignee = user_name_map.get(str(f.assigned_to), None) if f.assigned_to else None
-        repo_name = repo_name_map.get(str(f.repository_id), "")
-        line = f.line_start if hasattr(f, "line_start") and f.line_start else None
-        file_loc = f.file_path or ""
-        if line:
-            file_loc = f"{file_loc}:{line}"
-
-        entry = {
-            "id": str(f.id), "title": f.title[:60], "severity": sev,
-            "status": rem.replace("_", " "), "age_days": age,
-            "file": file_loc[:60], "repo_name": repo_name,
-            "assignee": assignee or "Unassigned",
-        }
-
-        if rem == "patch_generated":
-            awaiting_approval.append(entry)
-        if rem in ("pending", "in_progress") and age > 7:
-            stalled.append(entry)
-        if not f.assigned_to:
-            unassigned.append(entry)
-
-    # Sort: worst severity first, then oldest
-    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    for lst in [awaiting_approval, stalled, unassigned]:
-        lst.sort(key=lambda x: (sev_order.get(x["severity"], 5), -x["age_days"]))
-
-    return {
-        "by_remediation_status": status_counts,
-        "by_severity": severity_breakdown,
-        "total_findings": total,
-        "patched": patched,
-        "patch_rate": round(patched / max(total, 1) * 100, 1),
-        "pending_review": status_counts.get("pending", 0),
-        "in_progress": status_counts.get("in_progress", 0),
-        "awaiting_approval": awaiting_approval[:20],
-        "awaiting_approval_count": len(awaiting_approval),
-        "stalled": stalled[:20],
-        "stalled_count": len(stalled),
-        "unassigned": unassigned[:20],
-        "unassigned_count": len(unassigned),
     }
 
 
@@ -1067,15 +893,14 @@ async def mttr_metrics(
     """Server-side MTTR — avoids loading all findings client-side."""
     from datetime import datetime, timezone
     # Deliberately NOT open_only: MTTR measures findings that completed
-    # remediation. A finding that finished its lifecycle (patched, then
-    # rotated/resolved) is exactly the population this averages over —
-    # the open-only scope would remove it and hollow the metric out.
+    # remediation. A finding that finished its lifecycle (rotated/resolved)
+    # is exactly the population this averages over — the open-only scope
+    # would remove it and hollow the metric out.
     conditions = await _build_finding_filters(db, user)
 
-    # MTTR averages over findings that were actually RESOLVED: the fix
-    # landed (applied) or the finding reached a resolved classification
-    # (rotated, file/item/repo/source removed). Draft and approved
-    # patches are excluded — a drafted fix has remediated nothing.
+    # MTTR averages over findings that were actually RESOLVED: marked
+    # resolved (applied) or reached a resolved classification (rotated,
+    # file/item/repo/source removed).
     #
     # updated_at - created_at is an approximation (updated_at can be
     # touched by later events), but for a terminal-state finding the

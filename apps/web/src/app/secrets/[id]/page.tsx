@@ -15,6 +15,7 @@ interface SecretDetail {
   severity: string;
   file_path: string;
   line_start: number;
+  line_end: number | null;
   confidence: number;
   scanner_rule_id: string;
   classification: string;
@@ -147,7 +148,7 @@ export default function SecretDetailPage() {
         {finding.code_snippet && (
           <div className="card">
             <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Code Context (Masked)</h3>
-            <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} />
+            <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} lineEnd={finding.line_end} />
           </div>
         )}
 

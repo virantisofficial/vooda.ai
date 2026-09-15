@@ -90,7 +90,6 @@ def _git_finding_dict() -> dict:
         "cache_source": None,
         "evidence": [],
         "decisions": [],
-        "remediation_plans": [],
         "created_at": now,
         "updated_at": now,
     }

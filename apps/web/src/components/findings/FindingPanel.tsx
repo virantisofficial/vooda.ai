@@ -4,13 +4,14 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding, requestRemediation } from "@/lib/api";
+import { triageFinding, addFindingComment, assignFinding, updateFindingTags, getUsers, verifyFinding } from "@/lib/api";
 import SuggestionChips from "@/components/suggestions/SuggestionChips";
 import { CodeSnippet } from "@/components/findings/CodeSnippet";
 import { brandScannerName, getScannerColor, isVoodaEngine } from "@/lib/branding";
 import { findingName } from "@/lib/titleUtils";
 import { useToast } from "@/components/ui/Toast";
 import type { FindingDetail } from "@/types";
+import { providerConsole } from "@/lib/providerConsoles";
 
 interface Props {
   finding: FindingDetail;
@@ -35,29 +36,10 @@ function _humanLabel(action: string): string {
 
 export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   const [actionLoading, setActionLoading] = useState("");
-  const [activeSection, setActiveSection] = useState<"overview" | "code" | "ai" | "remediation" | "evidence" | "history">("overview");
+  const [activeSection, setActiveSection] = useState<"overview" | "code" | "ai" | "next_steps" | "evidence" | "history">("overview");
   const [comment, setComment] = useState("");
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const [reverifying, setReverifying] = useState(false);
-  // Draft-fix generation for THIS finding — one call, in context, on
-  // demand. Deliberately per-finding (not a bulk sweep): the cost is a
-  // single model call the user can see they asked for.
-  const [generatingFix, setGeneratingFix] = useState(false);
-  const [fixQueued, setFixQueued] = useState(false);
-  const handleGenerateFix = async () => {
-    setGeneratingFix(true);
-    try {
-      await requestRemediation(finding.id);
-      setFixQueued(true);
-      toast("success", "Drafting a fix — it appears here shortly");
-    } catch (e: any) {
-      // Surface the server's reason — e.g. "AI remediation is not
-      // enabled" when the tenant is identification-only.
-      toast("error", e?.response?.data?.detail || "Could not start fix generation");
-    } finally {
-      setGeneratingFix(false);
-    }
-  };
   // ── Pending-then-confirm status flow (2026-05-04) ──
   // The dropdown used to fire `triageFinding` immediately on click,
   // and the "Save" button only saved comments. Two issues:
@@ -252,19 +234,11 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
     onClose();
   };
 
-  // handleRemediate + handleApproval removed 2026-05-14 — they were
-  // defined here but never wired to any button.  The auto-remediation
-  // feature was half-shipped (only surfaced on the standalone detail
-  // page, which has now also been cleaned up).  Re-introduce both
-  // helpers + the requestRemediation / approvePatch imports if the
-  // feature gets shipped end-to-end across both surfaces.
-
-  const hasRemediation = finding.remediation_plans.length > 0;
   const sections = [
     { key: "overview", label: "Overview" },
     { key: "code", label: "Code" },
     { key: "ai", label: "AI Analysis", count: finding.evidence.length > 0 ? finding.evidence.length : undefined },
-    { key: "remediation", label: "Rotation", count: hasRemediation ? finding.remediation_plans.length : undefined },
+    { key: "next_steps", label: "Next Steps" },
     { key: "history", label: "History", count: finding.decisions.length },
   ] as const;
 
@@ -789,14 +763,6 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                 <p className="font-mono text-[10px] text-slate-400 mt-1">{sm.secret_hash || "—"}</p>
               </div>
 
-              {/* Fix Hint */}
-              {(finding as any).raw_data?.fix_hint && (
-                <div className="bg-red-500/5 border border-red-500/10 rounded-lg p-3">
-                  <span className="text-[10px] text-red-400 uppercase font-medium">Rotation Guidance</span>
-                  <p className="text-sm text-slate-300 mt-1">{(finding as any).raw_data.fix_hint}</p>
-                </div>
-              )}
-
               {/* ── Vooda Radar (inline in Overview) ── */}
               {(() => {
                 const brData = sm.blast_radius;
@@ -913,7 +879,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
           {activeSection === "code" && (
             <div>
               {finding.code_snippet ? (
-                <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} />
+                <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} lineEnd={finding.line_end} />
               ) : (
                 <p className="text-sm text-slate-500 py-8 text-center">No code snippet available</p>
               )}
@@ -978,650 +944,90 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
             </div>
           )}
 
-          {/* ── Rotation ── */}
-          {activeSection === "remediation" && (
-            <div className="space-y-4">
-              {/* Rotation instructions — provider + secret-type specific */}
-              {(() => {
-                const sm = (finding as any).source_metadata || {};
-                const rd = (finding as any).raw_data || {};
-                const provider = (sm.provider || "unknown").toLowerCase();
-                const secretType = (sm.secret_type || rd.secret_type || "").toLowerCase();
-                const fixHint = rd.fix_hint || "";
+          {/* ── Next Steps ──
+              Vooda finds, triages and verifies; the credential's owner
+              rotates it at the provider. This tab says what to do given the
+              finding's current state and links to the provider's console. */}
+          {activeSection === "next_steps" && (() => {
+            const sm = (finding as any).source_metadata || {};
+            const rd = (finding as any).raw_data || {};
+            const provider = (sm.provider || "").toLowerCase();
+            const secretType = (sm.secret_type || rd.secret_type || "").toLowerCase();
+            const fixHint: string = rd.fix_hint || "";
+            const validation = (sm.validation_status || "").toLowerCase();
+            const cls = (finding.classification || "").toLowerCase();
+            const consoleLink = providerConsole(provider, secretType);
+            const inRepo = !!finding.repository_id && !(finding as any).scan_source_id;
 
-                // ── Provider + secret-type specific rotation guides ──
-                type Guide = { title: string; urgency: string; steps: string[]; cli?: string[]; bestPractice: string; url?: string; urlLabel?: string };
+            type Tone = "red" | "amber" | "green" | "slate";
+            // Closing a finding because the file/item was deleted doesn't
+            // disable the credential, so those keep the steps.
+            const removedNote = cls === "resolved_file_deleted" || cls === "resolved_item_deleted"
+              ? `The ${cls === "resolved_file_deleted" ? "file" : "item"} containing this secret was removed, but that doesn't disable the credential. `
+              : "";
+            const status: { tone: Tone; text: string; showSteps: boolean } =
+              ["rotated", "revoked", "resolved"].includes(cls)
+                ? { tone: "green", text: "Resolved — this credential was marked rotated / revoked.", showSteps: false }
+              : ["likely_false_positive", "confirmed_false_positive", "test_credential"].includes(cls)
+                ? { tone: "slate", text: `No action needed — classified as ${cls.replace(/_/g, " ")}.`, showSteps: false }
+              : cls === "accepted_risk"
+                ? { tone: "slate", text: "Risk accepted — no rotation is planned for this credential.", showSteps: false }
+              : validation === "active"
+                ? { tone: "red", text: `${removedNote}Verified live — anyone who can see this ${inRepo ? "code" : "content"} can use it. Revoke it at the provider now.`, showSteps: true }
+              : validation === "inactive" || validation === "revoked"
+                ? { tone: "green", text: "The provider no longer accepts this credential. Confirm it was revoked on purpose, then mark it Rotated / Revoked.", showSteps: false }
+              : { tone: "amber", text: `${removedNote}Not verified live. Treat it as exposed and rotate it as a precaution.`, showSteps: true };
+            const toneCls: Record<Tone, string> = {
+              red: "bg-red-500/5 border-red-500/15 text-red-300",
+              amber: "bg-amber-500/5 border-amber-500/15 text-amber-300",
+              green: "bg-green-500/5 border-green-500/15 text-green-300",
+              slate: "bg-white/[0.02] border-white/[0.06] text-slate-400",
+            };
+            return (
+              <div className="space-y-3">
+                <div className={`rounded-lg border p-3 text-xs leading-relaxed ${toneCls[status.tone]}`}>{status.text}</div>
 
-                const guides: Record<string, Record<string, Guide>> = {
-                  aws: {
-                    aws_access_key: {
-                      title: "AWS Access Key Rotation",
-                      urgency: "Immediately deactivate this key — leaked AWS access keys are actively exploited within minutes of exposure.",
-                      steps: [
-                        "Open AWS IAM Console → Users → select the affected user → Security credentials tab",
-                        "Locate the compromised Access Key ID and click 'Make inactive' immediately",
-                        "Audit CloudTrail logs for any unauthorized API calls made with this key since the exposure date",
-                        "Create a new access key pair under the same user (or better: create a new IAM role)",
-                        "Update all applications, CI/CD pipelines, and scripts that reference the old key",
-                        "After confirming everything works with the new key, delete the old access key permanently",
-                      ],
-                      cli: [
-                        "aws iam update-access-key --access-key-id AKIA... --status Inactive --user-name USERNAME",
-                        "aws iam create-access-key --user-name USERNAME",
-                        "aws iam delete-access-key --access-key-id AKIA... --user-name USERNAME",
-                      ],
-                      bestPractice: "Migrate to IAM Roles with STS temporary credentials. Use aws-vault or instance profiles instead of long-lived access keys.",
-                      url: "https://console.aws.amazon.com/iam/home#/security_credentials",
-                      urlLabel: "AWS IAM Console",
-                    },
-                    aws_secret_key: {
-                      title: "AWS Secret Access Key Rotation",
-                      urgency: "This is the private half of an AWS key pair. If exposed alongside an Access Key ID, your AWS account may be fully compromised.",
-                      steps: [
-                        "Immediately deactivate the associated Access Key ID in AWS IAM Console",
-                        "Check CloudTrail for unauthorized activity: EC2 instances launched, S3 data accessed, IAM changes",
-                        "Rotate both the Access Key ID and Secret Access Key together — they are a pair",
-                        "Scan for any additional hardcoded AWS credentials in your codebase",
-                        "Update all services and deploy with the new credentials",
-                        "Delete the compromised key pair from IAM",
-                      ],
-                      bestPractice: "Store credentials in AWS Secrets Manager or use IAM Roles attached to EC2/ECS/Lambda instead of static keys.",
-                      url: "https://console.aws.amazon.com/iam/home#/security_credentials",
-                      urlLabel: "AWS IAM Console",
-                    },
-                    _default: {
-                      title: "AWS Credential Rotation",
-                      urgency: "Rotate this AWS credential immediately and audit CloudTrail for unauthorized access.",
-                      steps: [
-                        "Identify the credential type (access key, session token, or service credential) in the AWS Console",
-                        "Deactivate or invalidate the exposed credential immediately",
-                        "Review CloudTrail logs for any unauthorized API activity during the exposure window",
-                        "Generate a replacement credential with least-privilege permissions",
-                        "Update all dependent applications, then delete the old credential",
-                      ],
-                      bestPractice: "Use AWS Secrets Manager for automatic rotation and IAM Roles for compute workloads.",
-                      url: "https://console.aws.amazon.com/iam/",
-                      urlLabel: "AWS IAM Console",
-                    },
-                  },
-                  gcp: {
-                    gcp_service_account_key: {
-                      title: "GCP Service Account Key Rotation",
-                      urgency: "Service account keys grant persistent access to GCP resources. Disable this key immediately.",
-                      steps: [
-                        "Open Google Cloud Console → IAM & Admin → Service Accounts",
-                        "Find the affected service account and go to the Keys tab",
-                        "Disable the compromised key immediately (do not delete yet — you need the ID for audit)",
-                        "Check Cloud Audit Logs for unauthorized API calls using this key",
-                        "Create a new key or preferably switch to Workload Identity Federation",
-                        "Update your application/deployment to use the new credential",
-                        "After validation, delete the old key from the service account",
-                      ],
-                      cli: [
-                        "gcloud iam service-accounts keys disable KEY_ID --iam-account=SA_EMAIL",
-                        "gcloud iam service-accounts keys create new-key.json --iam-account=SA_EMAIL",
-                        "gcloud iam service-accounts keys delete KEY_ID --iam-account=SA_EMAIL",
-                      ],
-                      bestPractice: "Eliminate service account keys entirely. Use Workload Identity Federation for external workloads or attached service accounts for GCP compute.",
-                      url: "https://console.cloud.google.com/iam-admin/serviceaccounts",
-                      urlLabel: "GCP Service Accounts",
-                    },
-                    gcp_api_key: {
-                      title: "GCP API Key Rotation",
-                      urgency: "API keys can be used to consume billable APIs. Regenerate immediately to prevent unauthorized usage charges.",
-                      steps: [
-                        "Open Google Cloud Console → APIs & Services → Credentials",
-                        "Find the compromised API key and click 'Regenerate key'",
-                        "GCP will issue a new key value — the old one stops working immediately",
-                        "Update all applications referencing this key",
-                        "Add API key restrictions: HTTP referrer, IP address, or API-level restrictions",
-                      ],
-                      bestPractice: "Restrict API keys to specific APIs and referrers. For server-to-server calls, use service accounts with OAuth2 instead of API keys.",
-                      url: "https://console.cloud.google.com/apis/credentials",
-                      urlLabel: "GCP API Credentials",
-                    },
-                    _default: {
-                      title: "GCP Credential Rotation",
-                      urgency: "Rotate this GCP credential and review Cloud Audit Logs for unauthorized access.",
-                      steps: [
-                        "Identify the credential type in the Google Cloud Console",
-                        "Disable or regenerate the credential immediately",
-                        "Audit Cloud Audit Logs (Admin Activity + Data Access) for suspicious operations",
-                        "Issue a replacement credential with minimum required permissions",
-                        "Update dependent services, then delete the old credential",
-                      ],
-                      bestPractice: "Use Workload Identity Federation and attached service accounts. Avoid exporting JSON key files.",
-                      url: "https://console.cloud.google.com/iam-admin",
-                      urlLabel: "GCP IAM Console",
-                    },
-                  },
-                  azure: {
-                    azure_client_secret: {
-                      title: "Azure App Registration Client Secret Rotation",
-                      urgency: "Client secrets grant application-level access to Azure AD. Revoke immediately.",
-                      steps: [
-                        "Open Azure Portal → Azure Active Directory → App registrations",
-                        "Find the affected application and go to Certificates & secrets",
-                        "Delete the compromised client secret immediately",
-                        "Review Azure AD Sign-in logs and Audit logs for unauthorized token issuance",
-                        "Create a new client secret with an appropriate expiration (recommend 6 months max)",
-                        "Update all applications using this client ID + secret combination",
-                      ],
-                      bestPractice: "Use Managed Identities for Azure-hosted workloads. For external apps, use certificate credentials instead of client secrets.",
-                      url: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
-                      urlLabel: "Azure App Registrations",
-                    },
-                    azure_storage_key: {
-                      title: "Azure Storage Account Key Rotation",
-                      urgency: "Storage keys provide full read/write access to all containers and blobs. Rotate immediately.",
-                      steps: [
-                        "Open Azure Portal → Storage Accounts → select the affected account → Access keys",
-                        "Click 'Rotate key' on the compromised key (key1 or key2)",
-                        "Azure generates a new key instantly — the old one is invalidated",
-                        "Update all connection strings in your applications, Azure Functions, and Logic Apps",
-                        "Check Storage Analytics logs for unauthorized data access",
-                      ],
-                      cli: [
-                        "az storage account keys renew --account-name ACCOUNT --key key1",
-                      ],
-                      bestPractice: "Use Azure AD authentication (RBAC) for storage access instead of shared keys. Disable shared key access if all clients support Azure AD.",
-                      url: "https://portal.azure.com/#view/HubsExtension/BrowseResource/resourceType/Microsoft.Storage%2FStorageAccounts",
-                      urlLabel: "Azure Storage Accounts",
-                    },
-                    _default: {
-                      title: "Azure Credential Rotation",
-                      urgency: "Rotate this credential in the Azure Portal and audit sign-in logs.",
-                      steps: [
-                        "Identify the credential type in Azure Portal (App secret, storage key, connection string, or SAS token)",
-                        "Revoke or regenerate the credential immediately",
-                        "Review Azure AD Audit Logs and Sign-in Logs for unauthorized activity",
-                        "Issue a replacement with an expiration date and least-privilege scope",
-                        "Update all dependent services and Key Vault references",
-                      ],
-                      bestPractice: "Use Managed Identities for Azure resources. Store secrets in Azure Key Vault with automatic rotation enabled.",
-                      url: "https://portal.azure.com/",
-                      urlLabel: "Azure Portal",
-                    },
-                  },
-                  github: {
-                    github_pat: {
-                      title: "GitHub Personal Access Token Rotation",
-                      urgency: "PATs inherit all permissions of the owning user. An exposed classic PAT may have full repo, org, and admin access.",
-                      steps: [
-                        "Go to GitHub → Settings → Developer settings → Personal access tokens",
-                        "Find and delete the compromised token immediately",
-                        "Review the GitHub Security Log (Settings → Security log) for unauthorized actions",
-                        "Check if any repositories were cloned, branches force-pushed, or org settings changed",
-                        "Create a new fine-grained PAT with only the specific repositories and permissions needed",
-                        "Update CI/CD pipelines and scripts with the new token",
-                      ],
-                      bestPractice: "Use fine-grained PATs scoped to specific repos instead of classic tokens. For CI/CD, use GitHub App installation tokens which auto-expire.",
-                      url: "https://github.com/settings/tokens",
-                      urlLabel: "GitHub Token Settings",
-                    },
-                    github_oauth: {
-                      title: "GitHub OAuth App Secret Rotation",
-                      urgency: "OAuth secrets can be used to impersonate your application and access user data.",
-                      steps: [
-                        "Go to GitHub → Settings → Developer settings → OAuth Apps",
-                        "Select the affected app and click 'Generate a new client secret'",
-                        "The old secret continues working for a short grace period — update your app immediately",
-                        "After deploying the new secret, revoke any suspicious OAuth tokens via the API",
-                      ],
-                      bestPractice: "Migrate to GitHub Apps which provide tighter scoping, installation-level tokens, and webhook verification.",
-                      url: "https://github.com/settings/developers",
-                      urlLabel: "GitHub Developer Settings",
-                    },
-                    _default: {
-                      title: "GitHub Token Rotation",
-                      urgency: "Revoke this token immediately — GitHub automatically revokes tokens detected in public repos, but private exposure requires manual action.",
-                      steps: [
-                        "Identify the token type (PAT, OAuth, App, Deploy key) in GitHub Settings",
-                        "Revoke or delete the compromised token",
-                        "Audit the Security Log for unauthorized actions during exposure window",
-                        "Generate a replacement with minimum required scopes",
-                        "Update all automation and CI/CD pipelines",
-                      ],
-                      bestPractice: "Use GitHub Apps with installation tokens for automation. Use GITHUB_TOKEN in Actions workflows instead of PATs.",
-                      url: "https://github.com/settings/tokens",
-                      urlLabel: "GitHub Settings",
-                    },
-                  },
-                  gitlab: {
-                    _default: {
-                      title: "GitLab Token Rotation",
-                      urgency: "GitLab tokens can access repositories, registries, and CI/CD pipelines. Revoke immediately.",
-                      steps: [
-                        "Go to GitLab → User Settings → Access Tokens (for personal) or Project → Settings → Access Tokens (for project tokens)",
-                        "Revoke the compromised token — this takes effect immediately",
-                        "Review the Audit Events log for unauthorized git operations, pipeline runs, or settings changes",
-                        "Create a new token with the minimum required scopes (read_repository vs api) and an expiration date",
-                        "Update all pipelines, scripts, and integrations referencing the old token",
-                      ],
-                      cli: ["curl --request DELETE --header 'PRIVATE-TOKEN: admin_token' 'https://gitlab.com/api/v4/personal_access_tokens/TOKEN_ID'"],
-                      bestPractice: "Use project or group access tokens scoped to specific projects. Set expiration dates. For CI/CD, rely on the built-in CI_JOB_TOKEN.",
-                      url: "https://gitlab.com/-/user_settings/personal_access_tokens",
-                      urlLabel: "GitLab Access Tokens",
-                    },
-                  },
-                  stripe: {
-                    stripe_secret_key: {
-                      title: "Stripe Secret Key Rotation",
-                      urgency: "A live Stripe secret key (sk_live_) can process charges, issue refunds, and access customer payment data. This is a PCI-DSS incident.",
-                      steps: [
-                        "Go to Stripe Dashboard → Developers → API Keys immediately",
-                        "Click 'Roll key' on the compromised secret key — Stripe generates a new key and the old one expires in 24 hours",
-                        "For immediate invalidation, contact Stripe support to force-expire the old key",
-                        "Update your payment processing backend with the new key",
-                        "Review the Stripe Dashboard → Events log for unauthorized charges, refunds, or customer data access",
-                        "If customer data may have been accessed, initiate PCI-DSS breach notification procedures",
-                      ],
-                      bestPractice: "Use restricted keys with only the specific permissions needed (e.g., charges:write only). Never use the full secret key in client-side code.",
-                      url: "https://dashboard.stripe.com/apikeys",
-                      urlLabel: "Stripe API Keys",
-                    },
-                    _default: {
-                      title: "Stripe Credential Rotation",
-                      urgency: "Rotate immediately — Stripe keys can access payment data and process transactions.",
-                      steps: [
-                        "Open Stripe Dashboard → Developers → API Keys",
-                        "Roll the compromised key (Stripe provides a grace period for migration)",
-                        "Review Events log for unauthorized activity",
-                        "Update all integrations with the new key",
-                      ],
-                      bestPractice: "Use restricted API keys scoped to specific resources and operations.",
-                      url: "https://dashboard.stripe.com/apikeys",
-                      urlLabel: "Stripe Dashboard",
-                    },
-                  },
-                  slack: {
-                    slack_bot_token: {
-                      title: "Slack Bot Token Rotation",
-                      urgency: "Bot tokens (xoxb-) can read messages, post as your bot, and access workspace data depending on scopes.",
-                      steps: [
-                        "Go to api.slack.com → Your Apps → select the affected app",
-                        "Under OAuth & Permissions, click 'Regenerate' on the Bot User OAuth Token",
-                        "The old token is immediately invalidated — your bot will go offline",
-                        "Update your bot application with the new token and redeploy",
-                        "Review the app's scopes and remove any that aren't strictly necessary",
-                      ],
-                      bestPractice: "Use granular OAuth scopes (e.g., chat:write instead of admin). Implement token rotation in your deployment pipeline.",
-                      url: "https://api.slack.com/apps",
-                      urlLabel: "Slack App Management",
-                    },
-                    slack_webhook: {
-                      title: "Slack Webhook URL Rotation",
-                      urgency: "Anyone with this URL can post messages to your Slack channel. Revoke to stop unauthorized messages.",
-                      steps: [
-                        "Go to api.slack.com → Your Apps → Incoming Webhooks",
-                        "Delete the compromised webhook URL",
-                        "Create a new webhook URL for the same channel",
-                        "Update all services that post to this webhook",
-                      ],
-                      bestPractice: "Use Slack App-based webhooks instead of legacy incoming webhooks. Restrict webhook creation to workspace admins.",
-                      url: "https://api.slack.com/apps",
-                      urlLabel: "Slack Apps",
-                    },
-                    _default: {
-                      title: "Slack Token Rotation",
-                      urgency: "Revoke this token to prevent unauthorized access to your Slack workspace.",
-                      steps: [
-                        "Go to api.slack.com → Your Apps → OAuth & Permissions",
-                        "Regenerate the compromised token",
-                        "Update your integrations with the new token",
-                        "Audit the workspace access logs for unusual activity",
-                      ],
-                      bestPractice: "Use bot tokens with minimal scopes. Avoid user tokens (xoxp-) in automation.",
-                      url: "https://api.slack.com/apps",
-                      urlLabel: "Slack API",
-                    },
-                  },
-                  twilio: {
-                    _default: {
-                      title: "Twilio Credential Rotation",
-                      urgency: "Twilio Auth Tokens can send SMS, make calls, and incur charges on your account.",
-                      steps: [
-                        "Log in to Twilio Console → Account → API Keys & Tokens",
-                        "Click 'Rotate Auth Token' — Twilio supports secondary tokens for zero-downtime rotation",
-                        "First, promote the secondary token, update your apps, then demote the old primary",
-                        "Review Twilio usage logs for unauthorized calls, SMS, or number purchases",
-                        "If using API Keys (not Auth Token), delete the compromised key and create a new one",
-                      ],
-                      bestPractice: "Use API Keys instead of the Account Auth Token. API Keys can be scoped and independently revoked without affecting other integrations.",
-                      url: "https://console.twilio.com/",
-                      urlLabel: "Twilio Console",
-                    },
-                  },
-                  sendgrid: {
-                    _default: {
-                      title: "SendGrid API Key Rotation",
-                      urgency: "SendGrid keys can send emails from your domain — an attacker could send phishing emails as your organization.",
-                      steps: [
-                        "Log in to SendGrid → Settings → API Keys",
-                        "Delete the compromised API key immediately",
-                        "Create a new API key with the minimum required permissions (Mail Send only if that's all you need)",
-                        "Update your email-sending applications with the new key",
-                        "Review Activity Feed for unauthorized email sends that could damage your domain reputation",
-                        "Check your domain's email reputation on mail-tester.com or Google Postmaster Tools",
-                      ],
-                      bestPractice: "Create separate API keys per application with 'Mail Send' permission only. Never use Full Access keys in production code.",
-                      url: "https://app.sendgrid.com/settings/api_keys",
-                      urlLabel: "SendGrid API Keys",
-                    },
-                  },
-                  database: {
-                    database_connection_string: {
-                      title: "Database Connection String Rotation",
-                      urgency: "This connection string contains credentials to your database. An attacker could read, modify, or delete all data.",
-                      steps: [
-                        "Assess the exposure: determine if the database is publicly accessible or behind a VPN/firewall",
-                        "Change the database user password immediately via your DB admin tool or CLI",
-                        "If the connection string includes the host — check firewall rules and restrict access to known IPs",
-                        "Update the connection string in all applications, ensuring it's loaded from environment variables or a secret manager",
-                        "Review database audit logs (pg_audit, MySQL general log, MongoDB profiler) for unauthorized queries",
-                        "If data exfiltration is possible, initiate your incident response procedure",
-                      ],
-                      cli: [
-                        "# PostgreSQL\nALTER USER username WITH PASSWORD 'new_secure_password';",
-                        "# MySQL\nALTER USER 'username'@'host' IDENTIFIED BY 'new_secure_password';",
-                        "# MongoDB\ndb.changeUserPassword('username', 'new_secure_password')",
-                      ],
-                      bestPractice: "Never hardcode connection strings. Use AWS RDS IAM authentication, Azure AD auth, or GCP Cloud SQL IAM for passwordless database access.",
-                      url: undefined,
-                      urlLabel: undefined,
-                    },
-                    _default: {
-                      title: "Database Credential Rotation",
-                      urgency: "Change this database password immediately and audit query logs for unauthorized access.",
-                      steps: [
-                        "Change the password for the affected database user",
-                        "Update connection strings in all applications (use env vars or secret manager)",
-                        "Review database audit/query logs for suspicious activity",
-                        "Restrict network access to the database (VPC, firewall rules, IP allowlists)",
-                      ],
-                      bestPractice: "Use IAM-based database authentication where supported. Store credentials in a secret manager with automatic rotation.",
-                    },
-                  },
-                  npm: {
-                    _default: {
-                      title: "NPM Token Rotation",
-                      urgency: "NPM tokens can publish packages under your name — an attacker could push malicious code to your public packages.",
-                      steps: [
-                        "Go to npmjs.com → Account → Access Tokens",
-                        "Delete the compromised token immediately",
-                        "Check your package publish history: npm audit signatures on your packages",
-                        "Create a new token — use 'Automation' type for CI/CD (limited to publish only)",
-                        "Enable 2FA for publishing on all your packages: npm access 2fa-required",
-                        "Update CI/CD pipeline secrets with the new token",
-                      ],
-                      bestPractice: "Use granular access tokens (read-only for installs, automation for CI publish). Require 2FA for all publish operations.",
-                      url: "https://www.npmjs.com/settings/tokens",
-                      urlLabel: "NPM Token Settings",
-                    },
-                  },
-                  pypi: {
-                    _default: {
-                      title: "PyPI API Token Rotation",
-                      urgency: "PyPI tokens can upload packages — revoke immediately to prevent supply chain attacks.",
-                      steps: [
-                        "Go to pypi.org → Account Settings → API tokens",
-                        "Delete the compromised token",
-                        "Verify no unauthorized package versions were published",
-                        "Create a new token scoped to specific projects (not account-wide)",
-                        "Update your CI/CD pipeline (GitHub Actions, GitLab CI) with the new token",
-                      ],
-                      bestPractice: "Use project-scoped tokens instead of account-wide. Enable 2FA on your PyPI account. Use Trusted Publishers (OIDC) for GitHub Actions.",
-                      url: "https://pypi.org/manage/account/",
-                      urlLabel: "PyPI Account Settings",
-                    },
-                  },
-                  atlassian: {
-                    _default: {
-                      title: "Atlassian API Token Rotation",
-                      urgency: "Atlassian tokens access Jira, Confluence, and Bitbucket — revoke to prevent unauthorized access to project data.",
-                      steps: [
-                        "Go to id.atlassian.com → Security → API tokens",
-                        "Revoke the compromised token",
-                        "Review Audit Log in your Atlassian admin for unauthorized access",
-                        "Create a new API token and update all integrations",
-                      ],
-                      bestPractice: "Use OAuth 2.0 app integrations instead of API tokens for production. Tokens inherit full user permissions which is overly broad.",
-                      url: "https://id.atlassian.com/manage-profile/security/api-tokens",
-                      urlLabel: "Atlassian API Tokens",
-                    },
-                  },
-                  datadog: {
-                    _default: {
-                      title: "Datadog API/App Key Rotation",
-                      urgency: "Datadog keys can access monitoring data, create alerts, and modify dashboards.",
-                      steps: [
-                        "Go to Datadog → Organization Settings → API Keys or Application Keys",
-                        "Revoke the compromised key",
-                        "Create a new key and update your monitoring agents and integrations",
-                        "Review Datadog Audit Trail for unauthorized configuration changes",
-                      ],
-                      bestPractice: "Use separate API keys per service. Application Keys should be user-scoped with minimum required permissions.",
-                      url: "https://app.datadoghq.com/organization-settings/api-keys",
-                      urlLabel: "Datadog API Keys",
-                    },
-                  },
-                  generic: {
-                    private_key: {
-                      title: "Private Key Rotation",
-                      urgency: "Private keys enable decryption and impersonation. If this is a TLS/SSH key, all encrypted communications may be compromised.",
-                      steps: [
-                        "Determine the key type: SSH, TLS/SSL certificate, PGP, or signing key",
-                        "For SSH: remove the public key from all authorized_keys files on servers, then generate a new key pair",
-                        "For TLS: revoke the certificate with your CA and issue a new certificate with a new private key",
-                        "For signing: revoke the key and publish the revocation, generate a new signing key",
-                        "Rotate any sessions or tokens that were established using this key",
-                      ],
-                      bestPractice: "Store private keys in HSMs or secret managers. Use short-lived certificates (e.g., via ACME/Let's Encrypt for TLS, SSH CA for SSH).",
-                    },
-                    _default: {
-                      title: "Secret Rotation",
-                      urgency: "Rotate this credential and update all references.",
-                      steps: [
-                        "Identify the service this credential belongs to by examining the surrounding code context",
-                        "Log in to the provider's console and revoke or regenerate the credential",
-                        "Update all applications and CI/CD pipelines that use this credential",
-                        "Store the new credential in environment variables or a secret manager — not in code",
-                        "Verify the old credential no longer works by testing authentication",
-                      ],
-                      bestPractice: "Use a secret manager (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) with automatic rotation enabled.",
-                    },
-                  },
-                };
-
-                // Resolve guide: provider+type → provider default → generic type → generic default
-                const providerGuides = guides[provider] || {};
-                const guide: Guide = providerGuides[secretType] || providerGuides._default
-                  || (guides.generic || {})[secretType] || (guides.generic || {})._default
-                  || { title: "Secret Rotation", urgency: "Rotate this credential immediately.", steps: ["Identify the provider and revoke the credential", "Generate a replacement", "Update all references"], bestPractice: "Store secrets in a secret manager, not in code." };
-
-                return (
-                  <div className="space-y-3">
-                    {/* Urgency banner */}
-                    <div className="bg-red-500/5 border border-red-500/10 rounded-lg p-3">
-                      <div className="flex items-start gap-2">
-                        <svg className="w-4 h-4 text-red-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                        <p className="text-xs text-red-300">{guide.urgency}</p>
-                      </div>
-                    </div>
-
-                    {/* Steps */}
-                    <div className="bg-orange-500/5 border border-orange-500/10 rounded-lg p-4">
-                      <div className="flex items-center gap-2 mb-3">
-                        <svg className="w-4 h-4 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                        <h5 className="text-sm font-semibold text-orange-400">{guide.title}</h5>
-                      </div>
-                      <ol className="space-y-2">
-                        {guide.steps.map((step, i) => (
-                          <li key={i} className="flex gap-2 text-xs text-slate-300 leading-relaxed">
-                            <span className="text-orange-400/60 font-mono shrink-0">{i + 1}.</span>
-                            <span>{step}</span>
-                          </li>
-                        ))}
-                      </ol>
-                      {guide.url && (
-                        <a href={guide.url} target="_blank" rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 mt-3 text-xs text-red-400 hover:text-red-300">
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
-                          {guide.urlLabel || "Open Provider Console"}
-                        </a>
-                      )}
-                    </div>
-
-                    {/* CLI commands if available */}
-                    {guide.cli && guide.cli.length > 0 && (
-                      <div className="bg-white/[0.02] border border-white/[0.06] rounded-lg p-3">
-                        <p className="text-[10px] text-slate-500 uppercase font-medium mb-2">CLI Commands</p>
-                        <div className="space-y-1.5">
-                          {guide.cli.map((cmd, i) => (
-                            <pre key={i} className="text-[10px] text-red-400 font-mono bg-black/20 rounded px-2.5 py-1.5 overflow-x-auto whitespace-pre-wrap">{cmd}</pre>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Rule-specific fix hint if available and different from generic */}
-                    {fixHint && (
-                      <div className="bg-red-500/5 border border-red-500/10 rounded-lg p-3">
-                        <p className="text-[10px] text-red-400 uppercase font-medium mb-1">Detection Rule Guidance</p>
-                        <p className="text-xs text-slate-300">{fixHint}</p>
-                      </div>
-                    )}
-
-                    {/* Best practice */}
-                    <div className="bg-green-500/5 border border-green-500/10 rounded-lg p-3">
-                      <div className="flex items-start gap-2">
-                        <svg className="w-3.5 h-3.5 text-green-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                        <div>
-                          <p className="text-[10px] text-green-400 uppercase font-medium mb-0.5">Best Practice</p>
-                          <p className="text-xs text-slate-300">{guide.bestPractice}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Git history warning */}
-                    <div className="bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
-                      <p className="text-[10px] text-slate-500 uppercase font-medium mb-1">Git History</p>
-                      <p className="text-xs text-slate-400">Even after rotation, this secret remains in git history. Use <code className="text-red-400 text-[10px]">git filter-repo</code> or BFG Repo-Cleaner to remove it permanently.</p>
-                    </div>
+                {fixHint && (
+                  <div className="bg-white/[0.02] border border-white/[0.06] rounded-lg p-3">
+                    <p className="text-[10px] text-slate-500 uppercase font-medium mb-1">Detector guidance</p>
+                    <p className="text-xs text-slate-300">{fixHint}</p>
                   </div>
-                );
-              })()}
+                )}
 
-              {!hasRemediation ? (
-                <div className="text-center py-4">
-                  {/* Updated 2026-05-14 — the old copy "Click 'Rotate
-                      Secret' below to trigger automated rotation"
-                      referenced a button that never existed in this
-                      panel.  The auto-remediation feature was
-                      half-shipped; for now the Rotation tab is a
-                      knowledge-base view (provider-specific guides
-                      above), not an action surface. */}
-                  <p className="text-[11px] text-slate-600 mb-3">No AI fix drafted yet for this finding. You can draft one now, or follow the rotation steps above.</p>
-                  {fixQueued ? (
-                    <p className="text-[11px] text-purple-400">Fix generation started — refresh in a moment to see the draft.</p>
-                  ) : (
-                    <button
-                      onClick={handleGenerateFix}
-                      disabled={generatingFix}
-                      className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-purple-500/30 text-purple-300 hover:bg-purple-500/10 disabled:opacity-50"
-                      title="Draft an AI code fix for this finding (one model call)"
-                    >
-                      {generatingFix ? "Starting…" : "Generate fix"}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                finding.remediation_plans.map((plan: any, idx: number) => (
-                  <div key={plan.id || idx} className="space-y-3">
-                    {/* Summary */}
-                    <div className="bg-purple-500/[0.04] border border-purple-500/10 rounded-lg p-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" /></svg>
-                        <h5 className="text-sm font-semibold text-purple-400">AI Remediation</h5>
-                        {plan.confidence != null && (
-                          <span className="ml-auto text-[10px] text-slate-500">Confidence: <span className="text-purple-400 font-medium">{(plan.confidence * 100).toFixed(0)}%</span></span>
-                        )}
-                      </div>
-                      <p className="text-sm text-slate-300 leading-relaxed">{plan.summary}</p>
-                    </div>
-
-                    {/* Root cause & fix rationale */}
-                    {plan.root_cause && (
-                      <div>
-                        <h5 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Root Cause</h5>
-                        <p className="text-xs text-slate-400 leading-relaxed">{plan.root_cause}</p>
-                      </div>
-                    )}
-                    {plan.fix_rationale && (
-                      <div>
-                        <h5 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Fix Rationale</h5>
-                        <p className="text-xs text-slate-400 leading-relaxed">{plan.fix_rationale}</p>
-                      </div>
-                    )}
-
-                    {/* Patch diff */}
-                    {plan.patch_diff && (
-                      <div>
-                        <h5 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Patch</h5>
-                        <pre className="bg-[#0a0e1a] text-[11px] p-3 rounded-lg overflow-x-auto font-mono border border-white/[0.04] max-h-64 overflow-y-auto leading-relaxed">
-                          <code>{plan.patch_diff.split("\n").map((line: string, i: number) => (
-                            <div key={i} className={
-                              line.startsWith("+") && !line.startsWith("+++") ? "text-green-400 bg-green-400/5" :
-                              line.startsWith("-") && !line.startsWith("---") ? "text-red-400 bg-red-400/5" :
-                              line.startsWith("@@") ? "text-red-400" :
-                              "text-slate-400"
-                            }>{line}</div>
-                          ))}</code>
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* Developer notes */}
-                    {plan.developer_notes && plan.developer_notes.length > 0 && (
-                      <div>
-                        <h5 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Developer Notes</h5>
-                        <ul className="space-y-1">
-                          {plan.developer_notes.map((note: string, i: number) => (
-                            <li key={i} className="text-xs text-slate-400 flex gap-2"><span className="text-red-400 shrink-0">▸</span>{note}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {/* Validation steps */}
-                    {plan.validation_steps && plan.validation_steps.length > 0 && (
-                      <div>
-                        <h5 className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest mb-1">Validation Steps</h5>
-                        <ol className="space-y-1">
-                          {plan.validation_steps.map((step: string, i: number) => (
-                            <li key={i} className="text-xs text-slate-400 flex gap-2"><span className="text-purple-400 font-mono shrink-0">{i + 1}.</span>{step}</li>
-                          ))}
-                        </ol>
-                      </div>
-                    )}
-
-                    {/* Risk assessment */}
-                    {plan.risk_of_breakage && (
-                      <div className="flex items-center gap-2 pt-2 border-t border-white/[0.06]">
-                        <span className="text-[10px] text-slate-500">Risk of breakage:</span>
-                        <span className={`text-[10px] font-medium px-2 py-0.5 rounded ${
-                          plan.risk_of_breakage === "low" ? "bg-green-500/10 text-green-400" :
-                          plan.risk_of_breakage === "medium" ? "bg-yellow-500/10 text-yellow-400" :
-                          plan.risk_of_breakage === "high" ? "bg-red-500/10 text-red-400" :
-                          "bg-slate-500/10 text-slate-400"
-                        }`}>{plan.risk_of_breakage}</span>
-                      </div>
+                {status.showSteps && (
+                  <div className="bg-white/[0.02] border border-white/[0.06] rounded-lg p-4">
+                    <ol className="space-y-2">
+                      {[
+                        `Issue a new credential ${consoleLink ? `in ${consoleLink.label}` : "at the provider"}.`,
+                        "Update everything that uses it — applications, CI/CD pipelines, and secret stores.",
+                        "Revoke the old credential.",
+                        "Back in Vooda, re-verify this finding — it should report Inactive — then mark it Rotated / Revoked.",
+                      ].map((step, i) => (
+                        <li key={i} className="flex gap-2 text-xs text-slate-300 leading-relaxed">
+                          <span className="text-slate-500 font-mono shrink-0">{i + 1}.</span>
+                          <span>{step}</span>
+                        </li>
+                      ))}
+                    </ol>
+                    {consoleLink && (
+                      <a href={consoleLink.url} target="_blank" rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 mt-3 text-xs text-red-400 hover:text-red-300">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                        Open {consoleLink.label}
+                      </a>
                     )}
                   </div>
-                ))
-              )}
-            </div>
-          )}
+                )}
+
+                {inRepo && status.tone !== "slate" && (
+                  <div className="bg-white/[0.02] border border-white/[0.04] rounded-lg p-3">
+                    <p className="text-[10px] text-slate-500 uppercase font-medium mb-1">Git history</p>
+                    <p className="text-xs text-slate-400">The old value stays in git history. Once it&apos;s revoked it can&apos;t be used, so purging history (<code className="text-slate-300 text-[10px]">git filter-repo</code> or BFG) is optional — it rewrites shared history and needs coordination with everyone who has cloned the repository.</p>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ── History ── */}
           {activeSection === "history" && (
@@ -1635,7 +1041,6 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     d.action === "mark_fp" ? "border-green-400 bg-green-400/20" :
                     d.action === "mark_tp" ? "border-red-400 bg-red-400/20" :
                     d.action === "accept_risk" ? "border-orange-400 bg-orange-400/20" :
-                    d.action?.startsWith("patch_") ? "border-red-400 bg-red-400/20" :
                     "border-slate-500 bg-slate-500/20"
                   }`} />
                   <div className="bg-white/[0.02] border border-white/[0.04] rounded-lg p-2.5">

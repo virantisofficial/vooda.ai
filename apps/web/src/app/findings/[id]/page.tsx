@@ -39,13 +39,6 @@ export default function FindingDetailPage() {
     } finally { setActionLoading(""); }
   };
 
-  // handleRemediate + handleApproval removed 2026-05-14 alongside the
-  // Generate Remediation / Approve / Reject Patch buttons — they were
-  // half-shipped (no equivalent in the sliding panel) and removing the
-  // buttons made these dead code.  Re-introduce both helpers and the
-  // imports (requestRemediation, approvePatch) if the auto-remediation
-  // feature gets shipped end-to-end on both surfaces.
-
   if (loading) return <AppShell><div className="flex items-center justify-center py-20"><div className="w-5 h-5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin" /></div></AppShell>;
   if (!finding) return <AppShell><div className="text-red-400">Finding not found</div></AppShell>;
 
@@ -91,7 +84,7 @@ export default function FindingDetailPage() {
             <div className="px-5 py-3 border-b border-white/[0.06]">
               <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Code</h3>
             </div>
-            <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} className="rounded-none border-0" />
+            <CodeSnippet snippet={finding.code_snippet} lineStart={finding.line_start} lineEnd={finding.line_end} className="rounded-none border-0" />
           </div>
         )}
 
@@ -170,21 +163,6 @@ export default function FindingDetailPage() {
             <p className="text-sm text-slate-500">AI analysis pending or not available</p>
           )}
         </div>
-
-        {/* Remediation */}
-        {finding.remediation_plans.length > 0 && (
-          <div className="card">
-            <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4">Remediation Plans</h3>
-            {finding.remediation_plans.map((plan) => (
-              <div key={plan.id} className="bg-white/[0.02] border border-white/[0.04] rounded-lg p-4 mb-3">
-                <p className="text-sm text-slate-300">{plan.summary}</p>
-                <p className="text-xs text-slate-500 mt-2">
-                  Confidence: <span className="text-red-400">{plan.confidence != null ? `${(plan.confidence * 100).toFixed(0)}%` : "N/A"}</span>
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
 
         {/* Actions */}
         <div className="card">
@@ -301,17 +279,6 @@ export default function FindingDetailPage() {
                 );
               });
             })()}
-
-            {/* Generate Remediation + Approve/Reject Patch buttons
-                removed 2026-05-14.  The feature was half-shipped — the
-                sliding panel (the canonical "main secret page" reached
-                from /findings) had `handleRemediate` defined but never
-                wired to any button, and the Rotation tab's empty
-                state referenced a "Rotate Secret" button that didn't
-                exist.  Removing here keeps the two surfaces consistent;
-                the Rotation tab in the sliding panel still provides
-                provider-specific rotation guides which is the more
-                useful surface for this concern anyway. */}
           </div>
         </div>
 
@@ -331,8 +298,6 @@ export default function FindingDetailPage() {
                   mark_tp: "border-red-500/30 bg-red-500/5",
                   accept_risk: "border-orange-500/30 bg-orange-500/5",
                   reopen: "border-yellow-500/30 bg-yellow-500/5",
-                  patch_approve: "border-red-500/30 bg-red-500/5",
-                  patch_reject: "border-red-500/30 bg-red-500/5",
                 };
                 const actionLabels: Record<string, string> = {
                   mark_fp: "Marked as False Positive",
@@ -340,8 +305,6 @@ export default function FindingDetailPage() {
                   accept_risk: "Accepted Risk",
                   reopen: "Reopened for Review",
                   request_review: "Requested Review",
-                  patch_approve: "Approved Patch",
-                  patch_reject: "Rejected Patch",
                 };
                 const borderClass = actionColors[d.action] || "border-slate-700/30 bg-white/[0.01]";
 
@@ -357,7 +320,6 @@ export default function FindingDetailPage() {
                       d.action === "mark_tp" ? "border-red-400 bg-red-400/20" :
                       d.action === "accept_risk" ? "border-orange-400 bg-orange-400/20" :
                       d.action === "reopen" ? "border-yellow-400 bg-yellow-400/20" :
-                      d.action?.startsWith("patch_") ? "border-red-400 bg-red-400/20" :
                       "border-slate-500 bg-slate-500/20"
                     }`} />
 
