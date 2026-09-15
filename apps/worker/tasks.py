@@ -6120,7 +6120,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
     from services.code_context.extractor import extract_rich_context
 
     # Load AI Engine Settings from DB
-    ai_settings = {"context_mode": "smart", "analysis_mode": "batch_similar", "skip_ai_for_info": True,
+    ai_settings = {"context_mode": "smart", "skip_ai_for_info": True,
                     "ai_confidence_threshold": 0.6, "max_tokens_per_finding": 4096}
     try:
         from apps.api.app.models.ai_engine_settings import AIEngineSettings
@@ -6129,7 +6129,6 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if db_settings:
             ai_settings = {
                 "context_mode": db_settings.context_mode,
-                "analysis_mode": db_settings.analysis_mode,
                 "skip_ai_for_info": db_settings.skip_ai_for_info,
                 "ai_confidence_threshold": db_settings.ai_confidence_threshold,
                 "max_tokens_per_finding": db_settings.max_tokens_per_finding,
@@ -6137,7 +6136,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 "max_concurrent": db_settings.max_concurrent,
                 "rate_limit_rpm": db_settings.rate_limit_rpm,
             }
-        logger.info("ai_engine_settings_loaded", **{k: v for k, v in ai_settings.items() if k in ("context_mode", "analysis_mode", "skip_ai_for_info")})
+        logger.info("ai_engine_settings_loaded", **{k: v for k, v in ai_settings.items() if k in ("context_mode", "skip_ai_for_info")})
     except Exception as se:
         logger.warning("ai_engine_settings_fallback", error=str(se)[:100])
 
@@ -6429,42 +6428,17 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
         if (_hb_i + 1) % 50 == 0:
             await _stamp_heartbeat_main(job, db, commit=True)
 
-    # ── Pre-AI Deduplication (honours the "Finding Analysis" setting) ──
-    # `batch_similar` groups same CWE + file + rule findings — triage ONE,
-    # apply the verdict to all members. `individual` gives every finding
-    # its own AI call, which is what the UI promises for that option.
-    #
-    # This gate is the fix for a dead control: `analysis_mode` was read
-    # from the database and logged, but nothing ever branched on it, so
-    # grouping ran unconditionally and choosing "Individual" changed
-    # nothing. A setting that silently does nothing is worse than no
-    # setting — the operator believes they made a decision.
+    # ── Pre-AI Deduplication ──
+    # Findings sharing CWE + file + rule + snippet fingerprint are
+    # byte-identical and always receive the same verdict, so they are
+    # triaged once and the result is applied to every member.
     from services.ai_triage.dedup import (
-        group_findings_for_triage, apply_group_results, FindingGroup,
+        group_findings_for_triage, apply_group_results,
     )
 
-    _analysis_mode = (ai_settings.get("analysis_mode") or "batch_similar").lower()
-    if _analysis_mode == "individual":
-        # One AI call per finding: every finding is its own single-member
-        # group. Must be real FindingGroup objects — apply_group_results
-        # reads `group.member_ids`, so a plain list would raise here.
-        deduped_list = list(finding_data_list)
-        groups_map = {}
-        for _f in finding_data_list:
-            _fid = str(_f.get("id"))
-            groups_map[_fid] = FindingGroup(
-                representative_id=_fid,
-                member_ids=[_fid],
-                group_key=f"individual:{_fid}",
-                cwe=_f.get("cwe", "") or "",
-                file_path=_f.get("file_path", "") or "",
-                rule_id=_f.get("scanner_rule_id", "") or "",
-            )
-        dedup_saved = 0
-    else:
-        deduped_list, groups_map = group_findings_for_triage(finding_data_list)
-        dedup_saved = len(finding_data_list) - len(deduped_list)
-    logger.info("pre_ai_dedup_applied", analysis_mode=_analysis_mode,
+    deduped_list, groups_map = group_findings_for_triage(finding_data_list)
+    dedup_saved = len(finding_data_list) - len(deduped_list)
+    logger.info("pre_ai_dedup_applied",
                 original=len(finding_data_list), deduped=len(deduped_list), saved=dedup_saved)
 
     # Collect security evidence from the repo
@@ -6899,7 +6873,7 @@ async def _generate_remediation(finding_id: str):
     from apps.api.app.models.finding import NormalizedFinding
     from apps.api.app.models.remediation import RemediationPlan, RemediationPatch, PatchStatus
     from apps.api.app.models.repository import RepositorySnapshot
-    from services.ai_triage.provider import create_provider, get_provider_for_task
+    from services.ai_triage.provider import get_provider_for_task
     from services.ai_remediation.engine import RemediationEngine
     from services.code_context.extractor import extract_rich_context
 
@@ -6911,12 +6885,24 @@ async def _generate_remediation(finding_id: str):
         if not finding:
             return
 
+        # Single enforcement point for the opt-in remediation gate: if no
+        # model is assigned, refuse before creating an attempt record. No
+        # env fallback — that would run remediation a tenant never enabled.
+        provider = await get_provider_for_task("remediation", str(finding.tenant_id), db=db)
+        if provider is None:
+            logger.info("remediation_not_enabled_skip", finding_id=finding_id)
+            if str(finding.remediation_status).lower() in ("pending", "remediationstatus.pending"):
+                finding.remediation_status = "none"
+                await db.commit()
+            return
+
         # The plan row is the attempt record, created before anything
         # that can fail; every exit below settles its status, so a
         # failed attempt is queryable rather than invisible.
         plan = RemediationPlan(
             finding_id=finding.id,
-            generated_by=f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
+            # The model that actually generated this fix, not the env default.
+            generated_by=getattr(provider, "model", None) or f"{settings.AI_PROVIDER}/{settings.AI_MODEL}",
             vulnerability_summary="",
             root_cause="",
             fix_rationale="",
@@ -6931,19 +6917,6 @@ async def _generate_remediation(finding_id: str):
             plan.error = (error or "")[:2000] or None
             finding.remediation_status = finding_status
             await db.commit()
-
-        # Get AI provider — DB model first, env vars fallback
-        provider = await get_provider_for_task("remediation", str(finding.tenant_id), db=db)
-        if not provider:
-            if not (settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY):
-                logger.warning("no_ai_key_for_remediation", finding_id=finding_id)
-                await _settle("failed", "no AI provider configured for remediation")
-                return
-            provider = create_provider(
-                settings.AI_PROVIDER,
-                settings.ANTHROPIC_API_KEY or settings.OPENAI_API_KEY,
-                settings.AI_MODEL,
-            )
 
         snap_result = await db.execute(
             select(RepositorySnapshot)

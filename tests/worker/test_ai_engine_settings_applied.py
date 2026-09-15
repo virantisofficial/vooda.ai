@@ -23,25 +23,16 @@ TRIAGE_SRC = inspect.getsource(tasks._run_ai_triage)
 SCAN_SRC = inspect.getsource(tasks._run_scan_job)
 
 
-# ── analysis_mode: "Finding Analysis" ────────────────────────────────
+# ── "Finding Analysis" removed: grouping is unconditional ────────────
 
-def test_analysis_mode_gates_deduplication():
-    """`individual` must skip grouping; `batch_similar` must group."""
-    assert '_analysis_mode == "individual"' in TRIAGE_SRC
+def test_deduplication_is_unconditional():
+    """Identical findings are always grouped; there is no per-run toggle."""
     assert "group_findings_for_triage" in TRIAGE_SRC
+    assert "_analysis_mode" not in TRIAGE_SRC
 
 
-def test_individual_mode_builds_real_finding_groups():
-    """apply_group_results reads `group.member_ids`, so the individual
-    path must build FindingGroup objects — a plain list raises."""
-    assert "FindingGroup(" in TRIAGE_SRC
-    assert "representative_id=" in TRIAGE_SRC
-    assert "member_ids=" in TRIAGE_SRC
-
-
-def test_individual_mode_reports_no_dedup_savings():
-    m = re.search(r'if _analysis_mode == "individual":(.*?)else:', TRIAGE_SRC, re.S)
-    assert m and "dedup_saved = 0" in m.group(1)
+def test_analysis_mode_is_gone_from_the_contract():
+    assert "analysis_mode" not in AIEngineSettingsSchema.model_fields
 
 
 # ── ai_confidence_threshold: "AI Confidence Level" ───────────────────
@@ -136,7 +127,6 @@ def test_fresh_install_is_safe_by_default():
     d = AIEngineSettingsSchema()
     assert d.deprioritize_test_files == "normal", "must not drop test-file findings by default"
     assert d.auto_verify_credentials is True, "credential verification on by default"
-    assert d.analysis_mode == "batch_similar"
     assert 0.0 < d.ai_confidence_threshold < 1.0
 
 

@@ -14,6 +14,7 @@ import api, {
   getAIEngineSettings, updateAIEngineSettings, discoverModels, getAutoConfig,
   getNotificationRules, updateNotificationRules,
   getProviderSchema, testIntegrationConnection, createIntegration, getBusinessUnits, getRepositories,
+  getEdition,
 } from "@/lib/api";
 import SearchableSelect from "@/components/ui/SearchableSelect";
 import { useToast } from "@/components/ui/Toast";
@@ -407,6 +408,14 @@ function AIModelsFullSection() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // Enterprise-gated: when gated the task is an upsell (disabled, badged)
+  // and never sent. Defaults to gated if /edition is unreachable.
+  const [remediationGated, setRemediationGated] = useState(true);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setRemediationGated((r.data?.gated || []).includes("auto_remediation")))
+      .catch(() => setRemediationGated(true));
+  }, []);
   // `tasks` is set implicitly to ["triage", "remediation"] — the only two
   // task strings the worker actually dispatches on. No UI surface; Vooda's
   // product model is one primary does everything, with task-level routing
@@ -760,7 +769,11 @@ function AIModelsFullSection() {
                       {model.is_primary && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/20">Primary</span>}
                       {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500">Disabled</span>}
                       {(model.tasks || []).includes("triage") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">Triage</span>}
-                      {(model.tasks || []).includes("remediation") && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">Auto Remediation</span>}
+                      {(model.tasks || []).includes("remediation") && (
+                        remediationGated
+                          ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/25" title="Auto Remediation is a Vooda Enterprise capability">Auto Remediation · Enterprise</span>
+                          : <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/20">Auto Remediation</span>
+                      )}
                       {model.last_error && String(model.last_error).startsWith("triage_parse_failure:") && (
                         <span
                           title={String(model.last_error).replace(/^triage_parse_failure:\s*/, "")}
@@ -1064,16 +1077,24 @@ function AIModelsFullSection() {
               <div className="mt-4">
                 <label className="text-xs text-slate-500 mb-1.5 block">Used for</label>
                 <div className="space-y-2">
-                  {AI_TASKS.map((t) => (
-                    <label key={t.key} className="flex items-start gap-2 cursor-pointer">
-                      <input type="checkbox" checked={form.tasks.includes(t.key)}
-                        onChange={(e) => setForm((f) => ({ ...f, tasks: e.target.checked ? Array.from(new Set([...f.tasks, t.key])) : f.tasks.filter((x) => x !== t.key) }))}
-                        className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-dark-950 text-red-500" />
-                      <span className="text-sm text-slate-300">{t.label}
-                        <span className="block text-[11px] text-slate-500">{t.description}</span>
+                  {AI_TASKS.map((t) => {
+                    const gated = t.key === "remediation" && remediationGated;
+                    return (
+                    <label key={t.key} className={`flex items-start gap-2 ${gated ? "cursor-not-allowed" : "cursor-pointer"}`}>
+                      <input type="checkbox" disabled={gated}
+                        checked={!gated && form.tasks.includes(t.key)}
+                        onChange={(e) => { if (gated) return; setForm((f) => ({ ...f, tasks: e.target.checked ? Array.from(new Set([...f.tasks, t.key])) : f.tasks.filter((x) => x !== t.key) })); }}
+                        className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-dark-950 text-red-500 disabled:opacity-40" />
+                      <span className={`text-sm ${gated ? "text-slate-500" : "text-slate-300"}`}>
+                        {t.label}
+                        {gated && (
+                          <span className="ml-2 align-middle text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">Enterprise</span>
+                        )}
+                        <span className="block text-[11px] text-slate-500">{gated ? "Secure code-fix generation — available in Vooda Enterprise." : t.description}</span>
                       </span>
                     </label>
-                  ))}
+                    );
+                  })}
                 </div>
                 {form.tasks.length === 0 && (
                   <p className="text-[11px] text-amber-400 mt-1.5">Select at least one — a model with no task assigned does nothing.</p>
@@ -4014,7 +4035,6 @@ function RichSelect({ label, description, value, options, onChange }: {
 // the TS errors we hit in 2026-04 (undeclared keys on inferred
 // type).
 type AIEngineSettings = {
-  analysis_mode: string;
   skip_ai_for_info: boolean;
   ai_confidence_threshold: number;
   max_concurrent: number;
@@ -4026,7 +4046,7 @@ type AIEngineSettings = {
 
 function AIEngineSettingsSection() {
   const [settings, setSettings] = useState<AIEngineSettings>({
-    analysis_mode: "batch_similar", skip_ai_for_info: true,
+    skip_ai_for_info: true,
     ai_confidence_threshold: 0.6,
     // Balanced preset — must match the API defaults and the option
     // flagged "recommended", so a first-run install is self-consistent.
@@ -4053,23 +4073,10 @@ function AIEngineSettingsSection() {
         )}
       </div>
 
-      {/* Row 1: Finding Analysis + AI Confidence
-          "Context Extraction" removed. Smart/Full/Minimal were offered
-          but `extract_rich_context()` takes no mode argument, so all
-          three did exactly the same thing. A dropdown whose options are
-          indistinguishable is worse than no dropdown: it invites the
-          operator to tune something that cannot be tuned. Vooda always
-          sends the enclosing function plus imports — documented rather
-          than presented as a choice. */}
+      {/* "Context Extraction" and "Finding Analysis" removed: neither was a
+          real choice (identical behaviour). Triage always groups identical
+          findings and sends the enclosing function plus imports. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
-        <RichSelect label="Finding Analysis"
-          description="Determines how multiple secrets of the same type in the same file are processed by the AI. Batching groups similar findings into a single AI call, reducing API usage without sacrificing accuracy — since the AI sees all related findings together."
-          value={settings.analysis_mode} onChange={(v) => update("analysis_mode", v)}
-          options={[
-            { value: "batch_similar", label: "Batch Similar", desc: "Findings sharing a rule, file and code snippet are triaged once and the verdict applied to the whole group. Savings depend on the repository: large where one rule repeats within a file, near zero where findings are spread across many files.", recommended: true },
-            { value: "individual", label: "Individual", desc: "Every finding gets its own dedicated AI call. Most thorough, but uses the most tokens and takes the longest — on a large repository this means one call per finding.", },
-          ]}
-        />
         <RichSelect label="AI Confidence Level"
           description="Sets the minimum confidence threshold for AI decisions. When the AI's confidence falls below this level, the finding is automatically marked as 'Needs Review' and routed to a human analyst for manual verification. Higher thresholds mean more human review but fewer incorrect classifications."
           value={[0.8, 0.6, 0.4].includes(settings.ai_confidence_threshold) ? String(settings.ai_confidence_threshold) : "custom"}
@@ -4080,20 +4087,18 @@ function AIEngineSettingsSection() {
             { value: "0.4", label: "Aggressive (0.4)", desc: "Accepts most AI decisions (40%+). Minimizes human review workload but increases the risk of incorrect true/false positive classifications." },
           ]}
         />
-
+        <RichSelect label="Severity Filter"
+          description="Controls which severity levels are sent to the AI for false-positive analysis. Skipping informational findings saves tokens on items that rarely require AI judgment — they can still be reviewed manually."
+          value={settings.skip_ai_for_info ? "skip_info" : "all"}
+          onChange={(v) => update("skip_ai_for_info", v === "skip_info")}
+          options={[
+            { value: "skip_info", label: "Skip Info", desc: "Analyze Critical, High, Medium and Low severity findings. Info-level findings are left as 'Needs Review' for manual triage.", recommended: true },
+            { value: "all", label: "Analyze All", desc: "AI reviews every finding regardless of severity, including Info. Uses more tokens but provides complete automated classification across all severity levels." },
+          ]}
+        />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
-        <RichSelect label="Severity Filter"
-          description="Controls which severity levels are sent to the AI for false positive analysis. Skipping low-severity and informational findings saves tokens and processing time on items that rarely require AI judgment — they can still be reviewed manually."
-          value={settings.skip_ai_for_info ? "skip_low" : "all"}
-          onChange={(v) => update("skip_ai_for_info", v === "skip_low")}
-          options={[
-            { value: "skip_low", label: "Skip Low & Info", desc: "Only analyze Critical, High, and Medium severity findings. Low and Info severity findings remain as 'Needs Review' for manual triage.", recommended: true },
-            { value: "all", label: "Analyze All", desc: "AI reviews every finding regardless of severity. Uses more tokens but provides complete automated classification across all severity levels." },
-          ]}
-        />
-
         {/* "Max Tokens per Finding" was removed from this panel: it
             duplicated ai_model_configs.max_tokens and only the per-model
             value was ever honoured. Throughput takes its place — the
@@ -4119,9 +4124,6 @@ function AIEngineSettingsSection() {
             { value: "custom", label: "Custom", desc: "Values set outside this panel (via the API) are preserved and shown here as Custom." },
           ]}
         />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Credential Verification"
           description="When enabled, Vooda automatically tests detected secrets against their provider APIs during the scan (e.g., calling GitHub's /user endpoint with a found token). This determines whether credentials are still active or have been revoked — critical for prioritizing remediation of live exposures."
           value={settings.auto_verify_credentials !== false ? "enabled" : "disabled"}
@@ -4131,7 +4133,9 @@ function AIEngineSettingsSection() {
             { value: "disabled", label: "Disabled", desc: "Skip credential verification. Scans complete faster but you won't know which secrets are still live until manually verified." },
           ]}
         />
+      </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5 items-stretch">
         <RichSelect label="Test File Handling"
           description="Controls how secrets found in test and spec files (e.g., *Test.java, *.spec.ts, *_test.go) are treated. Test files often contain intentional hardcoded credentials for automated testing — these are real secrets in the codebase but lower priority than production configuration leaks."
           /* Modern values are the strings "normal" | "deprioritize" |
@@ -4156,12 +4160,7 @@ function AIEngineSettingsSection() {
             { value: "exclude", label: "Exclude from AI", desc: "Skip AI false positive analysis for test file findings entirely. Saves AI tokens — findings are still detected and stored but not AI-classified." },
           ]}
         />
-      </div>
 
-      {/* Trailing single control: kept in a 2-col grid so it
-          keeps the same column width as the rows above rather
-          than stretching across the panel. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 items-stretch">
         <RichSelect label="Scan Scope"
           description="Defines which file types the secret scanner includes during repository analysis. Standard covers all common code and configuration files. Extended adds documentation and extensionless files which occasionally contain leaked credentials in examples or READMEs."
           value={settings.scan_scope || "standard"}

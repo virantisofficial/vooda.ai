@@ -180,8 +180,11 @@ async def ai_status(
     # can run off any configured model (env fallback included); remediation
     # runs only when a model is explicitly assigned to it — so a tenant can
     # be identification-only or full-remediation by configuration alone.
+    # Auto remediation is Enterprise-gated; Community reports it unavailable.
+    from apps.api.app.core.edition import is_enterprise
+    remediation_gated = not is_enterprise()
     triage_enabled = is_ready
-    remediation_enabled = any(
+    remediation_enabled = (not remediation_gated) and any(
         "remediation" in (m.tasks or []) and m.api_key_encrypted for m in db_models
     )
 
@@ -192,8 +195,10 @@ async def ai_status(
         "active_models": len(db_models),
         "triage_enabled": triage_enabled,
         "remediation_enabled": remediation_enabled,
+        "remediation_gated": remediation_gated,
         "message": (
-            "AI remediation is enabled." if remediation_enabled
+            "Auto remediation is available in Vooda Enterprise." if remediation_gated
+            else "AI remediation is enabled." if remediation_enabled
             else "Identification only — assign a model to Auto Remediation to enable fixes." if is_ready
             else "No AI model configured."
         ),
@@ -281,11 +286,12 @@ class AIEngineSettingsSchema(BaseModel):
         dispatcher. Triage now dispatches in completion order, so there
         are no batches; ``max_concurrent`` and ``rate_limit_rpm`` are the
         only real levers.
+      * ``analysis_mode``          — grouping only collapsed identical
+        findings, which share a verdict; triage now always groups.
 
     Pydantic ignores unknown keys, so an older client still sending the
     removed fields keeps working — they are simply no longer persisted.
     """
-    analysis_mode: str = "batch_similar"
     skip_ai_for_info: bool = True
     ai_confidence_threshold: float = 0.6
     # Defaults MUST equal the option the UI marks "recommended", or a
