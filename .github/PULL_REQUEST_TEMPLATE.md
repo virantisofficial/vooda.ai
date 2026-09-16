@@ -24,7 +24,7 @@ Fixes #
 ## Checklist
 
 - [ ] I've read [CONTRIBUTING.md](../CONTRIBUTING.md)
-- [ ] I've signed the [CLA](../CLA.md) (the bot will prompt on your first PR)
+- [ ] I've signed the [CLA](../CLA.md) (the CLA bot comments on your first PR with how to sign)
 - [ ] Tests pass locally
 - [ ] New behaviour has tests
 - [ ] **No real credentials in the diff** — test fixtures use syntactically valid but non-functional values

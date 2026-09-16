@@ -1,0 +1,4 @@
+# Every pull request requests a review from the maintainer automatically.
+# Add more owners per path as the team grows, e.g.:
+#   /services/secret_scan/  @detection-owner
+*   @virantisofficial

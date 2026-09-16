@@ -906,6 +906,13 @@ async def mttr_metrics(
     # touched by later events), but for a terminal-state finding the
     # last touch is close to the resolution itself.
     from sqlalchemy import or_ as _or
+    # Every way a team actually closes an exposure counts: the credential
+    # was rotated, or the file / item carrying it was removed. Admin
+    # deletions (RESOLVED_REPO_REMOVED, RESOLVED_SOURCE_REMOVED) are
+    # deliberately NOT here — per their model comments they mean "Vooda
+    # lost visibility", not "the leak was cleaned", and the credential may
+    # still be live. Counting them would flatter the metric: deleting a
+    # repository would read as an instant fix.
     resolved_conds = list(conditions) + [
         _or(
             NormalizedFinding.remediation_status == "applied",
@@ -913,8 +920,6 @@ async def mttr_metrics(
                 Classification.ROTATED,
                 Classification.RESOLVED_FILE_DELETED,
                 Classification.RESOLVED_ITEM_DELETED,
-                Classification.RESOLVED_REPO_REMOVED,
-                Classification.RESOLVED_SOURCE_REMOVED,
             ]),
         ),
     ]

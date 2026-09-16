@@ -7,7 +7,7 @@ import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
   getMetricsOverview, getFindingsMetrics,
-  getRepositories, getMTTRMetrics, getTrendData,
+  getRepositories, getMTTRMetrics, getTrendData, getRotationSummary, getFindings,
   getFindingsByCategory, getTopLeakingRepos,
   getFindingsBreakdown, getAIAccuracy, getAuditEvents,
 } from "@/lib/api";
@@ -116,10 +116,13 @@ function DeltaBadge({ curr, prev, prevLabel, goodDirection = "down" }: {
   // (All-Time range, where the backend didn't fetch a prev period).
   const suffix = prevLabel || "Previous Period";
 
-  // No prev-period query was made (All Time) or prev window was empty.
-  // Show an em-dash for the missing percentage; the "vs Previous"
-  // suffix unambiguously frames it as "no value to compare against."
-  if (prev === undefined || prev === 0) {
+  // No prev-period query was made (All Time), the prev window was empty, or
+  // it is too small to divide by. A 3-finding baseline turns a first real
+  // scan into "999%+", which reads as an emergency rather than as "we had
+  // almost no history to compare against". Below this floor we show the
+  // same em-dash as the no-data case.
+  const MIN_BASELINE = 10;
+  if (prev === undefined || prev < MIN_BASELINE) {
     return (
       <span className="text-[10px] text-slate-600">
         — <span className="font-normal">vs {suffix}</span>
@@ -301,6 +304,12 @@ export default function DashboardPage() {
   const [findingsM, setFindingsM] = useState<any>(null);
   const [repoCount, setRepoCount] = useState(0);
   const [mttrData, setMttrData] = useState<any>(null);
+  // Closure time comes from the rotation-events ledger (a real
+  // first-seen-active -> rotated measurement), not updated_at math.
+  const [rotSummary, setRotSummary] = useState<any>(null);
+  // Fallback while nothing has closed yet: how long the oldest still-open
+  // secret has been exposed. Always has a value once anything is found.
+  const [oldestOpenHours, setOldestOpenHours] = useState<number | null>(null);
   const [trendData, setTrendData] = useState<any>(null);
   const [categoryData, setCategoryData] = useState<any>(null);
   const [topRepos, setTopRepos] = useState<any>(null);
@@ -335,6 +344,13 @@ export default function DashboardPage() {
         setRepoCount(d?.total ?? (Array.isArray(d) ? d.length : (d?.items?.length || 0)));
       }),
       getMTTRMetrics().then(r => setMttrData(r.data)),
+      getRotationSummary(daysParam ?? 30).then(r => setRotSummary(r.data)),
+      getFindings({ page_size: "100", sort_by: "created_at", sort_dir: "asc" } as Record<string, string>).then(r => {
+        const SETTLED = ["likely_false_positive", "confirmed_false_positive", "test_credential", "accepted_risk", "rotated", "revoked"];
+        const oldest = (r.data?.items || []).find((x: any) =>
+          !(SETTLED.includes((x.classification || "").toLowerCase()) || (x.classification || "").toLowerCase().startsWith("resolved")));
+        setOldestOpenHours(oldest?.created_at ? (Date.now() - new Date(oldest.created_at).getTime()) / 3.6e6 : null);
+      }),
       getTrendData(trendDays).then(r => setTrendData(r.data)),
       getFindingsByCategory(daysParam).then(r => setCategoryData(r.data)).catch(() => setCategoryData(null)),
       getTopLeakingRepos(daysParam, 7).then(r => setTopRepos(r.data)).catch(() => setTopRepos(null)),
@@ -376,8 +392,17 @@ export default function DashboardPage() {
     ?? ((metrics?.by_classification?.["Classification.NEEDS_REVIEW"] ?? 0) + (metrics?.by_classification?.["needs_review"] ?? 0));
 
   // MTTR — server-side endpoint.  Used by the MTTR tile + the posture banner.
-  const avgMttrHours = mttrData?.avg_hours ?? null;
-  const mttrResolved = mttrData?.resolved_count ?? 0;
+  // How fast the customer's team closes what Vooda finds — however they
+  // close it: rotate the credential, delete the file, or fix the code.
+  // Vooda doesn't do any of those; it timestamps detection and sees the
+  // finding reach a closed state. /metrics/mttr counts every closure path,
+  // so it leads; the rotation ledger only knows rotations and is the
+  // fallback. With nothing closed yet, the tile shows oldest open exposure.
+  const closedCount = mttrData?.resolved_count ?? rotSummary?.total_rotations ?? 0;
+  const closeHours = mttrData?.avg_hours ?? (rotSummary?.mttr_median_s ? rotSummary.mttr_median_s / 3600 : null);
+  const showingOldest = !(closedCount > 0 && closeHours !== null);
+  const avgMttrHours = showingOldest ? null : closeHours;
+  const mttrResolved = closedCount;
 
   // Active/Inactive secrets — verifier-confirmed live credentials.  Tile +
   // posture banner read this; the Active Credentials quick action also.
@@ -661,7 +686,7 @@ export default function DashboardPage() {
 
           {/* Tile 4: MTTR */}
           <div className="card p-4">
-            <p className="text-[10px] text-purple-400 uppercase tracking-wider font-medium">Mean Time To Remediate</p>
+            <p className="text-[10px] text-purple-400 uppercase tracking-wider font-medium">Mean Time-To-Fix</p>
             <div className="flex items-baseline gap-1.5 mt-1.5">
               <span className={`text-3xl font-bold ${avgMttrHours === null ? "text-slate-500" : avgMttrHours < 48 ? "text-green-400" : "text-orange-400"}`}>{mttrParts.value}</span>
               {mttrParts.unit && <span className={`text-[11px] ${avgMttrHours === null ? "text-slate-500" : avgMttrHours < 48 ? "text-green-400" : "text-orange-400"}`}>{mttrParts.unit}</span>}
@@ -670,9 +695,13 @@ export default function DashboardPage() {
               {/* MTTR's prev-period delta isn't currently tracked server-side
                   — show a neutral resolved-count line so the tile keeps the
                   same vertical rhythm as its peers. */}
-              <span className="text-[10px] text-slate-600">{mttrResolved > 0 ? `${mttrResolved} Resolved` : "No Resolved Findings Yet"}</span>
+              <span className="text-[10px] text-slate-600">{showingOldest
+                ? (oldestOpenHours !== null
+                    ? `Nothing Closed Yet · Oldest Open ${fmtMttr(oldestOpenHours).value} ${fmtMttr(oldestOpenHours).unit}`.trim()
+                    : "Nothing Closed Yet")
+                : `${mttrResolved} Closed`}</span>
             </div>
-            <p className="text-[11px] text-slate-500 mt-1">Average Time-To-Fix</p>
+            <p className="text-[11px] text-slate-500 mt-1">{showingOldest ? "No closures yet — clock starts at detection" : "Detection → closed by your team"}</p>
           </div>
         </div>
 

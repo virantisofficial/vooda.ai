@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Virantis
+# SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
+
+# Contributor Licence Agreement check.
+#
+# CLA.md tells contributors "a bot will comment with a link on your first
+# pull request" — this is that bot. It posts the agreement on a first-time
+# contributor's PR, records the acceptance in a signatures file on a branch
+# of this repo, and re-runs when they comment "I have read the CLA Document
+# and I hereby sign the CLA".
+#
+# `pull_request_target` is required: a fork PR's own token cannot write the
+# signatures file. Nothing from the fork is ever checked out or executed
+# here — the action only reads PR metadata — which is the safe use of this
+# trigger (see GitHub Security Lab, "Preventing pwn requests").
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write        # writes signatures/cla.json on the branch below
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA assistant
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: 'signatures/cla.json'
+          path-to-document: 'https://github.com/virantisofficial/vooda.ai/blob/main/CLA.md'
+          branch: 'cla-signatures'
+          allowlist: dependabot[bot],virantisofficial
+          custom-notsigned-prcomment: |
+            Thanks for the pull request! Before it can be merged, please read the
+            [Contributor Licence Agreement](https://github.com/virantisofficial/vooda.ai/blob/main/CLA.md)
+            and sign it by posting exactly this comment:
+          custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
+          custom-allsigned-prcomment: 'All contributors have signed the CLA. Thank you!'

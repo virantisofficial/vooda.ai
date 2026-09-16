@@ -34,7 +34,7 @@ By submitting a contribution to this repository, you agree to the following.
 
 ## How to sign
 
-You don't need to do anything in advance. When you open your first pull request, a bot will comment with a link. Click through, sign in with GitHub, accept — takes about thirty seconds. The PR's CLA status check goes green and stays green for all your future contributions.
+You don't need to do anything in advance. When you open your first pull request, our CLA bot comments on it with the agreement and a one-line reply to sign. Click through, sign in with GitHub, accept — takes about thirty seconds. The PR's CLA status check goes green and stays green for all your future contributions.
 
 **Contributing on behalf of a company?** If your employer owns the IP in your work, we need a Corporate CLA signed by someone authorised to bind the company. Email **report@vooda.ai** and we'll sort it out.
 
