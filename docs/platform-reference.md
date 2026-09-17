@@ -76,7 +76,7 @@ The platform organizes into six primary sections accessible from the sidebar:
 
 | # | Section | Path | Description |
 |---|---------|------|-------------|
-| 1 | **Dashboard** | `/dashboard` | Unified KPIs — security score, total secrets, open incidents, and mean time to remediate (MTTR) |
+| 1 | **Dashboard** | `/dashboard` | Unified KPIs — open secrets, severity mix, verified-live credentials, and mean time-to-fix (detection → closed by your team) |
 | 2 | **Repositories** | `/repositories` | Connect GitHub, GitLab, and Bitbucket repos; trigger scans; view scan history and artifacts |
 | 3 | **Sources** | `/sources` | Connect and scan non-git sources — chat, docs and wikis, tickets, cloud storage, CI/CD logs, and container images |
 | 4 | **Secrets** | `/findings` | Finding triage with AI classification, severity filtering, incidents, and rotation tracking |
