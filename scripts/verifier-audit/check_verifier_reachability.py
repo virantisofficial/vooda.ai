@@ -73,7 +73,7 @@ def normalise(url: str) -> str:
     return re.sub(r"\{[^}]+\}", "x", url)
 
 
-def check(item: dict) -> dict:
+def check_once(item: dict) -> dict:
     verifier = item["verifier"]
     raw_url = item["url"]
     url = normalise(raw_url)
@@ -141,6 +141,30 @@ def check(item: dict) -> dict:
         out["status"] = "OTHER_FAIL"
         out["detail"] = repr(e)[:200]
         return out
+
+
+# Transient states: a single slow TLS handshake under 30-way concurrency, or
+# one provider hiccup, is not a dead endpoint. Retry those before calling a
+# verifier broken — on 2026-09-16 papertrail (TIMEOUT) and wise (WARN_5XX)
+# failed the build while both answered 401 when probed by hand minutes later.
+# DNS_FAIL and TLS_FAIL are deterministic and are NOT retried: a provider
+# whose hostname stopped resolving should still turn the build red at once.
+RETRY_STATES = {"TIMEOUT", "WARN_5XX", "CONNECT_FAIL", "OTHER_FAIL"}
+RETRIES = 2
+RETRY_BACKOFF_SEC = 2.0
+
+
+def check(item: dict) -> dict:
+    out = check_once(item)
+    for attempt in range(RETRIES):
+        if out.get("status") not in RETRY_STATES:
+            return out
+        time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+        retried = check_once(item)
+        retried["retried"] = attempt + 1
+        retried["first_status"] = out.get("status")
+        out = retried
+    return out
 
 
 def main() -> int:
