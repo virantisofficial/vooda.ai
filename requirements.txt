@@ -33,7 +33,7 @@ pydantic-settings==2.15.0
 email-validator==2.3.0
 
 # AI providers
-anthropic==0.42.0
+anthropic==1.7.0
 openai==3.8.0
 tiktoken==0.14.0
 
