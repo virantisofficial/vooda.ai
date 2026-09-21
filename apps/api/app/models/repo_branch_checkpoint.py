@@ -40,6 +40,15 @@ class RepoBranchCheckpoint(Base, UUIDMixin, TenantMixin):
     # When the checkpoint was last advanced. Useful for "stale repo"
     # dashboards (last scanned > 30 days ago) and for TTL-based
     # cleanup if a tenant churns through hundreds of feature branches.
+    # Fingerprint of the detection rule pack this checkpoint was scanned
+    # with. An incremental scan only looks at files changed since the
+    # checkpoint, so when the pack moves (a rule added, edited, re-enabled)
+    # the unchanged files have never been measured against it. Comparing
+    # this against the current pack is what turns that into one full walk
+    # instead of a silent gap. NULL = unknown (pre-migration rows, and the
+    # first scan after deploy); treated as "do not force".
+    rule_pack_version = Column(String(64), nullable=True)
+
     last_scanned_at = Column(
         DateTime(timezone=True),
         nullable=False,

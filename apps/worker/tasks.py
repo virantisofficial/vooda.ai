@@ -2396,9 +2396,34 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             all_rules = await get_all_rules_with_custom(repo.tenant_id, db)
             scanner = SecretScanner(rules=all_rules)
 
-            # Run incremental scan — only changed files
-            if base_sha and head_sha:
+            # Run incremental scan — only changed files.
+            #
+            # The base commit must actually be IN this clone. Repository
+            # clones are shallow (`--depth 1`), so on the first push after a
+            # repository is connected the "before" commit is not present and
+            # `git diff base head` fails — the scan then reported zero
+            # findings and a push that introduced a secret passed clean.
+            # Measured: a push adding a live token scanned 0 files. Same
+            # hole after a force push that rewrote the base away. Falling
+            # through to the full scan below costs one walk and closes it.
+            _base_usable = bool(base_sha) and _is_commit_reachable(repo_path, base_sha)
+            if base_sha and head_sha and not _base_usable:
+                logger.info(
+                    "webhook_base_commit_unavailable_full_scan",
+                    repo=repo_name,
+                    base=base_sha[:8],
+                    head=head_sha[:8] if head_sha else None,
+                )
+            wh_incremental = False
+            wh_files_analyzed: Optional[int] = None
+            if base_sha and head_sha and _base_usable:
+                from services.secret_scan.git_history import get_diff_files as _wh_diff_files
+                try:
+                    wh_files_analyzed = len(_wh_diff_files(repo_path, base_sha, head_sha))
+                except Exception:
+                    wh_files_analyzed = None
                 raw_findings = scan_diff(repo_path, base_sha, head_sha, scanner=scanner)
+                wh_incremental = True
                 logger.info("incremental_scan_complete", findings=len(raw_findings),
                             base=base_sha[:8], head=head_sha[:8], repo=repo_name)
             else:
@@ -2432,7 +2457,10 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                     except Exception:
                         pass
 
+                _wh_files_seen = {"n": 0}
+
                 def _wh_on_progress(files_done: int, findings_so_far: int):
+                    _wh_files_seen["n"] = files_done
                     import time as _t_wh
                     _now = _t_wh.monotonic()
                     if _now - _wh_last["t"] < 5.0:
@@ -2448,6 +2476,7 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                     progress_callback=_wh_on_progress,
                     progress_every_n_files=200,
                 )
+                wh_files_analyzed = _wh_files_seen["n"] or None
                 logger.info("full_scan_fallback", findings=len(raw_findings), repo=repo_name)
 
             # Store findings (same dedup logic as regular scan)
@@ -2475,7 +2504,11 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                 record_blocks as _record_wh_blocks,
             )
             wh_muted_rule_ids: set[str] = await _load_wh_overrides(
-                db, repo.tenant_id, repo.id, scan_job=job,
+                # `scan_job`, not `job`: this function has no `job`, and the
+                # module has no global of that name either, so the original
+                # raised NameError here on every webhook scan that got this
+                # far — after detection, before findings were stored.
+                db, repo.tenant_id, repo.id, scan_job=scan_job,
             )
             wh_block_counts = _new_wh_block_counter()
 
@@ -2535,6 +2568,13 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                     existing.last_seen_at = now
                     existing.scan_count = (existing.scan_count or 1) + 1
                     existing.last_seen_scan_job_id = scan_job.id
+                    # Same rule as the manual path: the "not in current code"
+                    # marker describes the DEFAULT branch, so only a push to
+                    # that branch is evidence the file came back. A push to a
+                    # feature branch that still carries the file would
+                    # otherwise clear a marker that is still true of main.
+                    if (branch or repo.default_branch or "main") == (repo.default_branch or "main"):
+                        _clear_removed_from_code(existing, now)
                     # Late-link to incident if the previous record landed
                     # without one (existing rows from before the webhook
                     # incident-wiring fix).  Cheap: same hash lookup.
@@ -2618,9 +2658,14 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             scan_job.status = ScanStatus.COMPLETED
             scan_job.progress_pct = 100
             scan_job.stats = {
-                "files_analyzed": len(raw_findings),
+                # Files READ, not findings produced — this used to report
+                # len(raw_findings), so the UI's "Files scanned" showed the
+                # finding count (0 files on a clean push).
+                "files_analyzed": wh_files_analyzed,
                 "findings_total": created_count,
-                "incremental": True,
+                # Whether the diff path was actually taken. Hardcoded True
+                # before, which hid every fallback to a full scan.
+                "incremental": wh_incremental,
                 "base_sha": base_sha,
                 "head_sha": head_sha,
             }
@@ -2638,12 +2683,14 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                             """
                             INSERT INTO repo_branch_checkpoints (
                                 tenant_id, repository_id, branch,
-                                last_scanned_commit, last_scanned_at
+                                last_scanned_commit, last_scanned_at,
+                                rule_pack_version
                             ) VALUES (
-                                :tid, :rid, :br, :sha, now()
+                                :tid, :rid, :br, :sha, now(), :pack
                             )
                             ON CONFLICT (repository_id, branch)
                             DO UPDATE SET
+                                rule_pack_version   = EXCLUDED.rule_pack_version,
                                 last_scanned_commit = EXCLUDED.last_scanned_commit,
                                 last_scanned_at     = EXCLUDED.last_scanned_at,
                                 updated_at          = now()
@@ -2654,6 +2701,10 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                             "rid": repo.id,
                             "br": wh_branch,
                             "sha": head_sha,
+                            # Webhook scans read a diff, not the whole tree,
+                            # so they must not claim the pack covered every
+                            # file. NULL keeps the next manual scan honest.
+                            "pack": None,
                         },
                     )
                 except Exception as _wcw:
@@ -3371,6 +3422,24 @@ async def _run_scan_job(scan_job_id: str):
             snapshot = snap_result.scalar_one_or_none()
             repo_path = snapshot.storage_path if snapshot else None
 
+            # The snapshot records where the checkout WAS. If it is no longer
+            # on disk — storage volume recreated, a cleanup job, an operator
+            # freeing space — the path is stale metadata, not content. Before
+            # this check the scan kept the dead path, skipped the clone (which
+            # only runs when no path is set) and then failed with "No
+            # repository content available", leaving the repository
+            # permanently unscannable until someone deleted the snapshot row
+            # by hand. Clearing it here sends the scan down the normal clone
+            # path instead, which is what an operator would do manually.
+            if repo_path and not os.path.exists(repo_path):
+                logger.info(
+                    "snapshot_path_missing_will_reclone",
+                    scan_job_id=scan_job_id,
+                    repository_id=str(repo.id),
+                    stale_path=repo_path,
+                )
+                repo_path = None
+
             # If repo has a URL and no snapshot, clone it
             scan_type_val = job.scan_type.value if hasattr(job.scan_type, 'value') else str(job.scan_type) if hasattr(job, 'scan_type') else "standalone"
             need_full_history = (scan_type_val == "history")
@@ -3436,6 +3505,75 @@ async def _run_scan_job(scan_job_id: str):
                 await _stamp_heartbeat_main(job, db, commit=False)
                 await db.commit()
 
+            # ── Refresh an existing checkout ─────────────────────────
+            # The clone helper pulls when it finds a checkout already there,
+            # but it is only CALLED when no checkout path is on record. After
+            # the first scan there always is one, so every later standalone
+            # scan re-read the working tree exactly as the first clone left
+            # it: new commits were invisible, and "Scan Current Code" /
+            # "Force Full Re-Scan" reported on code that could be months old
+            # without saying so. Measured on a live instance — checkouts sat
+            # at August commits while the repositories had moved on.
+            #
+            # `fetch` + `reset --hard` rather than `pull --ff-only`: a pull
+            # fails outright on a force-pushed or rewritten branch, which is
+            # precisely when a checkout is most stale. The checkout is scratch
+            # space owned by the scanner, so discarding its state is safe and
+            # is the only way to track a rewritten remote.
+            #
+            # History scans have already fetched above (they unshallow), but
+            # they are refreshed here too: the walk resolves each finding
+            # against the CURRENT code to decide whether a secret is still
+            # live, and a stale working tree makes that verdict wrong.
+            checkout_refreshed = False
+            checkout_refresh_failed = False
+            if repo.url and repo_path:
+                # The branch the caller asked for, not the repository
+                # default: this is what makes the `branch` option mean
+                # something for a repository scan.
+                _refresh_branch = scan_branch or repo.default_branch or "main"
+                job.status_message = "[2/8] Refreshing repository..."
+                job.progress_pct = max(int(job.progress_pct or 0), 8)
+                await _emit_phase("running", job.progress_pct, job.status_message, step=2)
+                await db.commit()
+                checkout_refreshed, checkout_refresh_failed = await _refresh_checkout(
+                    repo_path, _refresh_branch,
+                )
+                # A branch that does not exist upstream (a typo, a deleted
+                # feature branch) must fall back to the repository DEFAULT —
+                # not to whatever branch the checkout happened to be left on
+                # by the previous scan, which would silently scan unrelated
+                # code and stamp that branch's watermark.
+                _default_branch = repo.default_branch or "main"
+                if checkout_refresh_failed and _refresh_branch != _default_branch:
+                    logger.info(
+                        "scan_branch_unavailable_falling_back",
+                        scan_job_id=scan_job_id,
+                        repository_id=str(repo.id),
+                        requested=_refresh_branch,
+                        falling_back_to=_default_branch,
+                    )
+                    checkout_refreshed, checkout_refresh_failed = await _refresh_checkout(
+                        repo_path, _default_branch,
+                    )
+                logger.info(
+                    "checkout_refresh",
+                    scan_job_id=scan_job_id,
+                    repository_id=str(repo.id),
+                    branch=_refresh_branch,
+                    refreshed=checkout_refreshed,
+                )
+                # A failed refresh does NOT fail the scan — a transient network
+                # blip should not cost a scan of code we already hold. It is
+                # recorded instead, so a result computed from older content is
+                # labelled as one rather than passing for current.
+                if checkout_refresh_failed:
+                    job.stats = {
+                        **(job.stats or {}),
+                        "checkout_refresh_failed": True,
+                    }
+                    await db.commit()
+
             if repo.url and not repo_path:
                 job.status_message = "[2/8] Cloning repository%s..." % (" (full history)" if need_full_history else "")
                 job.progress_pct = 5
@@ -3472,7 +3610,7 @@ async def _run_scan_job(scan_job_id: str):
 
                 # Extract auth from repo metadata (stored during creation)
                 repo_auth = (repo.metadata_ or {}).get("auth")
-                repo_path = await _clone_repository(repo.url, str(repo.id), repo.default_branch, auth=repo_auth, full_history=need_full_history, on_progress=_clone_cb)
+                repo_path = await _clone_repository(repo.url, str(repo.id), scan_branch or repo.default_branch, auth=repo_auth, full_history=need_full_history, on_progress=_clone_cb)
                 job.progress_pct = 20  # clone band complete
                 await _stamp_heartbeat_main(job, db, commit=False)
                 await db.commit()
@@ -3490,6 +3628,23 @@ async def _run_scan_job(scan_job_id: str):
                 job.error_detail = "No repository content available. Upload source code or provide a valid URL."
                 await db.commit()
                 return
+
+            # What was actually checked out. A requested branch that does not
+            # exist upstream falls back to the repository default (the clone
+            # helper retries that way), and an uploaded archive has no branch
+            # at all — in both cases the scan must report the code it read,
+            # not the code it was asked for.
+            _scanned_branch = _current_branch(repo_path)
+            if not _scanned_branch or _scanned_branch == "HEAD":
+                _scanned_branch = repo.default_branch or "main"
+            if scan_branch and _scanned_branch != scan_branch:
+                logger.info(
+                    "scan_branch_fallback",
+                    scan_job_id=scan_job_id,
+                    repository_id=str(repo.id),
+                    requested=scan_branch,
+                    scanned=_scanned_branch,
+                )
 
             # ── Step 2: Analyze repository ──────────────────────────
             job.status_message = "[3/8] Analyzing repository — detecting languages and frameworks..."
@@ -3629,12 +3784,16 @@ async def _run_scan_job(scan_job_id: str):
             # ``force_full`` skips the read entirely — user wants a
             # ground-truth re-walk regardless of any saved checkpoint.
             base_sha_checkpoint: Optional[str] = None
+            # Rule pack the stored checkpoint was scanned with. NULL/None
+            # means unknown, which is NOT treated as a change — a deploy
+            # should not stampede every repository into a full walk.
+            checkpoint_rule_pack: Optional[str] = None
             if not force_full:
                 try:
                     cp_row = await db.execute(
                         text(
                             """
-                            SELECT last_scanned_commit
+                            SELECT last_scanned_commit, rule_pack_version
                               FROM repo_branch_checkpoints
                              WHERE repository_id = :rid
                                AND branch        = :br
@@ -3642,9 +3801,11 @@ async def _run_scan_job(scan_job_id: str):
                         ),
                         {"rid": repo.id, "br": scan_branch},
                     )
-                    cp_val = cp_row.scalar_one_or_none()
-                    if cp_val:
-                        base_sha_checkpoint = cp_val
+                    cp_rec = cp_row.fetchone()
+                    if cp_rec:
+                        cp_val, checkpoint_rule_pack = cp_rec[0], cp_rec[1]
+                        if cp_val:
+                            base_sha_checkpoint = cp_val
                 except Exception as _cp_err:
                     logger.warning(
                         "branch_checkpoint_read_failed",
@@ -3658,8 +3819,34 @@ async def _run_scan_job(scan_job_id: str):
                 # scan immediately after the migration deploys.
                 if base_sha_checkpoint is None and scan_branch == (repo.default_branch or "main"):
                     base_sha_checkpoint = repo.last_scanned_commit or None
+            # ── Rule-pack change forces a full walk ──────────────────
+            # An incremental scan reads only the files changed since the
+            # checkpoint. If the rule pack has moved since then, every
+            # OTHER file has never been measured against the new rules, so
+            # a rule someone just added would quietly apply to recent
+            # commits only. Dropping the checkpoint here turns the next
+            # scan into one full walk, after which the stored pack matches
+            # again and incremental scanning resumes.
+            rule_pack_changed = bool(
+                base_sha_checkpoint
+                and checkpoint_rule_pack
+                and checkpoint_rule_pack != scanner.rule_pack_version
+            )
+            if rule_pack_changed:
+                logger.info(
+                    "rule_pack_changed_forcing_full_scan",
+                    scan_job_id=scan_job_id,
+                    repository_id=str(repo.id),
+                    was=checkpoint_rule_pack[:12],
+                    now=scanner.rule_pack_version[:12],
+                )
+                base_sha_checkpoint = None
+
             incremental_used = False
             incremental_files = 0
+            # Filled by the git-history walk: commits_scanned,
+            # total_commits, truncated. Stays empty for non-history scans.
+            history_stats: dict = {}
             # Files DELETED in this incremental's diff window. Captured
             # here so the tombstone pass after storage can resolve any
             # ``NormalizedFinding`` rows that point at them. Stays
@@ -3922,8 +4109,20 @@ async def _run_scan_job(scan_job_id: str):
                     max_commits=5000,
                     progress_callback=_on_history_progress,
                     progress_every_n_commits=250,
+                    stats=history_stats,
                 )
                 detection_engine = "secret_scan_history"
+                # A repository with more history than the walk covers is
+                # only partially scanned. Saying nothing would let a
+                # partial result read as "history is clean", so the
+                # shortfall is recorded on the job and shown in the UI.
+                if history_stats.get("truncated"):
+                    logger.info(
+                        "history_scan_truncated",
+                        scan_job_id=scan_job_id,
+                        commits_scanned=history_stats.get("commits_scanned"),
+                        total_commits=history_stats.get("total_commits"),
+                    )
             elif (
                 base_sha_checkpoint
                 and current_head_sha
@@ -4465,6 +4664,24 @@ async def _run_scan_job(scan_job_id: str):
                     # Update scan linkage and timestamps
                     existing.last_seen_scan_job_id = job.id
                     existing.last_seen_at = now
+                    # Clear the "not in current code" marker only when a scan
+                    # of the CURRENT code on the DEFAULT branch found the
+                    # secret again — the file came back via a revert, a
+                    # cherry-pick, a merge.
+                    #
+                    # Two scans must NOT clear it, and both were measured
+                    # stripping markers they had no business touching:
+                    #
+                    #   * a HISTORY scan, which reads past commits and so
+                    #     re-finds secrets in files that are long gone;
+                    #   * a scan of another BRANCH, where the file may well
+                    #     exist — the marker describes the default branch,
+                    #     which is the only branch the marking pass runs on.
+                    if (
+                        detection_engine != "secret_scan_history"
+                        and _scanned_branch == (repo.default_branch or "main")
+                    ):
+                        _clear_removed_from_code(existing, now)
                     existing.scan_count = (existing.scan_count or 1) + 1
                     existing.line_start = pf.line_start  # Line may shift
                     existing.line_end = pf.line_end
@@ -4623,6 +4840,17 @@ async def _run_scan_job(scan_job_id: str):
                             "commit_email": (pf.raw_data or {}).get("commit_email"),
                             "commit_date": (pf.raw_data or {}).get("commit_date"),
                             "commit_message": (pf.raw_data or {}).get("commit_message"),
+                            # History provenance. `history_only` means the
+                            # secret is no longer in the current code but is
+                            # still in the history; `in_commit_message` means
+                            # it never was in a file at all. Both must be
+                            # persisted, not merely inferred from the
+                            # detection engine, because they decide whether
+                            # deleting a file can legitimately close the
+                            # finding (it cannot, for either).
+                            "found_in_history": (pf.raw_data or {}).get("found_in_history"),
+                            "history_only": (pf.raw_data or {}).get("history_only"),
+                            "in_commit_message": (pf.raw_data or {}).get("in_commit_message"),
                             # _raw_value_for_verification is intentionally NOT included — never persisted
                         },
                         sink_metadata=pf.sink_info,
@@ -4832,23 +5060,44 @@ async def _run_scan_job(scan_job_id: str):
                 except Exception as ce:
                     logger.warning("correlation_failed", error=str(ce)[:200])
 
-            # ── Step 4c: Deleted-file tombstones ──────────────────
-            # When the incremental scan's diff window includes file
-            # deletions, every existing finding pointing at one of
-            # those paths is no longer actionable — the source file
-            # is gone. Mark them ``RESOLVED_FILE_DELETED`` so:
-            #   - dashboard "open findings" counts drop appropriately
-            #   - MTTR / SLA metrics see the closure event
-            #   - audit trail is preserved (the row stays, just with
-            #     a different classification)
+            # ── Step 4c: File-removal marking ────────────────────
+            # A deleted file means the secret is no longer in the
+            # CURRENT code. It does NOT mean the secret is safe: the
+            # value is still in every commit that carried it, and in
+            # every clone and fork already out there. Closing on
+            # deletion would assert the one thing this product exists
+            # to contradict — that deleting the file fixed it.
+            #
+            # Every established secrets scanner resolves on REVOCATION
+            # rather than on the code changing: GitHub's secret
+            # scanning never auto-closes when a token is removed,
+            # GitGuardian's auto-resolution is driven by its validity
+            # checker, and GitLab REMOVED auto-resolution from Secret
+            # Detection because it hid secrets still in history.
+            #
+            # So the finding stays OPEN, tagged ``removed_from_code``.
+            # It leaves the open list when the credential stops working
+            # (inline verification already suppresses a finding it
+            # proves dead) or when a human decides: rotated, accepted
+            # risk, false positive.
+            #
+            # Non-git sources keep their own deletion closure — a
+            # deleted Jira comment really is gone, with no history
+            # behind it. This rule is about repository files.
             #
             # ``last_seen_at`` is intentionally NOT updated — the
-            # finding wasn't seen in this scan; it was *resolved*.
-            # We DO record the resolving scan via a tag in
-            # ``source_metadata`` so the audit trail can answer
-            # "which scan / commit / author closed this finding?".
+            # finding wasn't seen in this scan.
             tombstoned_count = 0
-            if incremental_used and deleted_files_in_diff:
+            # Default branch only — the same rule the full sweep uses. A
+            # file deleted on a feature branch is not gone from the
+            # codebase, and marking it "not in current code" because one
+            # branch dropped it was measured doing exactly that while the
+            # file sat untouched on main.
+            if (
+                incremental_used
+                and deleted_files_in_diff
+                and _scanned_branch == (repo.default_branch or "main")
+            ):
                 try:
                     from apps.api.app.models.finding import Classification as _Cls
                     # Only tombstone findings that are still "open" —
@@ -4880,17 +5129,19 @@ async def _run_scan_job(scan_job_id: str):
                     import json as _json
                     from datetime import datetime as _dt, timezone as _tz
                     metadata_patch = {
-                        "resolved_by_scan_job_id": str(job.id),
-                        "resolved_by_commit": current_head_sha,
-                        "resolved_at": _dt.now(_tz.utc).isoformat(),
-                        "resolution_reason": "file_deleted",
+                        "removed_from_code": True,
+                        "removed_by_scan_job_id": str(job.id),
+                        "removed_at_commit": current_head_sha,
+                        "removed_at": _dt.now(_tz.utc).isoformat(),
+                        # Kept for the audit trail: WHY the file stopped
+                        # appearing. Not a resolution.
+                        "removal_reason": "file_deleted",
                     }
                     update_result = await db.execute(
                         text(
                             """
                             UPDATE normalized_findings
-                               SET classification   = 'RESOLVED_FILE_DELETED',
-                                   updated_at       = now(),
+                               SET updated_at       = now(),
                                    source_metadata  = COALESCE(source_metadata, '{}'::jsonb)
                                                       || CAST(:meta_patch AS jsonb)
                              WHERE repository_id = :rid
@@ -4903,6 +5154,19 @@ async def _run_scan_job(scan_job_id: str):
                                AND classification::text IN
                                    ('NEEDS_REVIEW','LIKELY_TRUE_POSITIVE','LIKELY_FALSE_POSITIVE',
                                     'needs_review','likely_true_positive','likely_false_positive')
+                               -- A finding from the git-history walk is NOT
+                               -- resolved by deleting the file: the secret is
+                               -- still in every clone's history. Deleting the
+                               -- file is precisely the non-fix this product
+                               -- exists to catch, so it must never close one.
+                               AND COALESCE(source_metadata->>'detection_engine', '')
+                                   <> 'secret_scan_history'
+                               AND COALESCE(source_metadata->>'history_only', 'false')
+                                   <> 'true'
+                               AND COALESCE(source_metadata->>'found_in_history', 'false')
+                                   <> 'true'
+                               AND COALESCE(source_metadata->>'removed_from_code', 'false')
+                                   <> 'true'
                             """
                         ),
                         {
@@ -4927,6 +5191,140 @@ async def _run_scan_job(scan_job_id: str):
                         "deleted_file_tombstone_failed",
                         scan_job_id=scan_job_id,
                         error=str(te)[:200],
+                    )
+
+            # ── Deleted-file sweep (full working-tree scans) ─────────
+            # The incremental path above closes findings for files it saw
+            # deleted inside its diff window. A FULL scan has no diff
+            # window, so before this sweep a file deleted outside one
+            # stayed open forever: the "re-check everything from scratch"
+            # option was the one that left stale findings behind, which is
+            # exactly backwards from what the user asked for.
+            #
+            # Method: for each still-open finding, ask whether its file is
+            # in the checkout we just walked. Cheaper and more honest than
+            # inferring from what the walk reported — the walk skips files
+            # by size, type and scope, and a skipped file is present, not
+            # deleted.
+            #
+            # The guards matter more than the sweep. Each one exists to
+            # stop a closure the user would be right to call wrong:
+            sweep_tombstoned_count = 0
+            sweep_eligible = (
+                not incremental_used                       # full walk only
+                and scan_type_val != "history"             # history != working tree
+                and bool(current_head_sha)                 # git-backed checkout
+                # Only the default branch. A full scan of a feature branch
+                # would otherwise close every finding for a file that only
+                # exists on main.
+                and _scanned_branch == (repo.default_branch or "main")
+                # An empty or failed checkout must never read as "every
+                # file was deleted".
+                and int(getattr(analysis, "total_files", 0) or 0) > 0
+            )
+            if sweep_eligible:
+                try:
+                    import json as _json_sw
+                    from datetime import datetime as _dt_sw, timezone as _tz_sw
+
+                    MAX_SWEEP_ROWS = 50000
+                    open_rows = await db.execute(
+                        text(
+                            """
+                            SELECT id, file_path
+                              FROM normalized_findings
+                             WHERE repository_id  = :rid
+                               AND tenant_id      = :tid
+                               AND scan_source_id IS NULL
+                               AND file_path IS NOT NULL
+                               AND classification::text IN
+                                   ('NEEDS_REVIEW','LIKELY_TRUE_POSITIVE','LIKELY_FALSE_POSITIVE',
+                                    'needs_review','likely_true_positive','likely_false_positive')
+                               -- Same rule as above: a history finding is not
+                               -- closed by the file going away.
+                               AND COALESCE(source_metadata->>'detection_engine', '')
+                                   <> 'secret_scan_history'
+                               AND COALESCE(source_metadata->>'history_only', 'false')
+                                   <> 'true'
+                               AND COALESCE(source_metadata->>'found_in_history', 'false')
+                                   <> 'true'
+                               -- Already marked: re-marking would churn
+                               -- updated_at every scan and inflate the count
+                               -- of what this scan actually discovered.
+                               AND COALESCE(source_metadata->>'removed_from_code', 'false')
+                                   <> 'true'
+                               -- Findings recorded against another branch are
+                               -- not evidence about this one.
+                               AND (branch IS NULL OR branch = :br)
+                             LIMIT :lim
+                            """
+                        ),
+                        {
+                            "rid": repo.id,
+                            "tid": job.tenant_id,
+                            "br": scan_branch,
+                            "lim": MAX_SWEEP_ROWS,
+                        },
+                    )
+                    missing_ids: list = []
+                    for _fid, _fp in open_rows.fetchall():
+                        if not _fp:
+                            continue
+                        # Reject anything that escapes the checkout rather
+                        # than resolving it — a stored path is data, and a
+                        # traversal must not be able to steer this check.
+                        _abs = os.path.normpath(os.path.join(repo_path, _fp))
+                        if not _abs.startswith(os.path.normpath(repo_path) + os.sep):
+                            continue
+                        if not os.path.exists(_abs):
+                            missing_ids.append(str(_fid))
+
+                    if missing_ids:
+                        meta_patch_sw = {
+                            "removed_from_code": True,
+                            "removed_by_scan_job_id": str(job.id),
+                            "removed_at_commit": current_head_sha,
+                            "removed_at": _dt_sw.now(_tz_sw.utc).isoformat(),
+                            "removal_reason": "file_deleted",
+                            "removed_by_full_sweep": True,
+                        }
+                        sweep_result = await db.execute(
+                            text(
+                                """
+                                UPDATE normalized_findings
+                                   SET updated_at      = now(),
+                                       source_metadata = COALESCE(source_metadata, '{}'::jsonb)
+                                                         || CAST(:meta_patch AS jsonb)
+                                 WHERE tenant_id = :tid
+                                   AND id IN (
+                                       SELECT CAST(jsonb_array_elements_text(
+                                           CAST(:ids AS jsonb)
+                                       ) AS uuid)
+                                   )
+                                """
+                            ),
+                            {
+                                "tid": job.tenant_id,
+                                "meta_patch": _json_sw.dumps(meta_patch_sw),
+                                "ids": _json_sw.dumps(missing_ids),
+                            },
+                        )
+                        sweep_tombstoned_count = sweep_result.rowcount or 0
+                        if sweep_tombstoned_count > 0:
+                            await db.commit()
+                            tombstoned_count += sweep_tombstoned_count
+                            logger.info(
+                                "full_sweep_tombstones_applied",
+                                scan_job_id=scan_job_id,
+                                repository_id=str(repo.id),
+                                branch=scan_branch,
+                                findings_resolved=sweep_tombstoned_count,
+                            )
+                except Exception as _sw_err:
+                    logger.warning(
+                        "full_sweep_tombstone_failed",
+                        scan_job_id=scan_job_id,
+                        error=str(_sw_err)[:200],
                     )
 
             # ── Step 4d: Apply decision cache (Stability ID) ────────
@@ -5442,7 +5840,29 @@ async def _run_scan_job(scan_job_id: str):
                 # is fundamentally different from a closure-via-rotation
                 # for compliance reporting.
                 "deleted_files_in_diff": len(deleted_files_in_diff),
-                "findings_tombstoned": tombstoned_count,
+                # Findings whose file is gone from the current code. They
+                # stay OPEN — the secret is still in history — so this is
+                # a state marker, not a closure count.
+                "findings_removed_from_code": tombstoned_count,
+                "findings_removed_from_code_full_sweep": sweep_tombstoned_count,
+                # Git-history telemetry. ``history_truncated`` is the
+                # honest signal that the walk hit its commit ceiling and
+                # the oldest history was NOT examined — the UI says so on
+                # the scan card rather than letting a partial result pass
+                # for a complete one.
+                # Checkout freshness — whether this scan read the remote's
+                # current code or fell back to what was already on disk.
+                # What the caller asked to scan vs what was actually read.
+                # They differ whenever a non-default branch is requested,
+                # because repository scans follow the default branch.
+                "rule_pack_changed": rule_pack_changed,
+                "requested_branch": scan_branch,
+                "scanned_branch": _scanned_branch,
+                "checkout_refreshed": checkout_refreshed,
+                "checkout_refresh_failed": checkout_refresh_failed,
+                "history_commits_scanned": history_stats.get("commits_scanned"),
+                "history_total_commits": history_stats.get("total_commits"),
+                "history_truncated": bool(history_stats.get("truncated", False)),
                 # File-level cache telemetry. ``rule_pack_version`` is
                 # the input fingerprint that cached entries are bound
                 # to — when the rule pack changes (built-in or
@@ -5465,6 +5885,14 @@ async def _run_scan_job(scan_job_id: str):
             # cover the entire commit graph and would otherwise turn
             # the next standalone scan into a no-op for any commits
             # older than the history scan's HEAD.
+            # The watermark belongs to the branch whose content was actually
+            # examined, which is usually the one requested but falls back to
+            # the repository default when that branch does not exist
+            # upstream. Stamping the REQUESTED name regardless would record
+            # "feature-x was scanned at <a commit feature-x never
+            # contained>", and the next scan of that branch would diff
+            # against it.
+            _ckpt_branch = _scanned_branch
             if current_head_sha and scan_type_val != "history":
                 # 1) New per-branch table — the source of truth from
                 #    here on. Upserts so the row evolves as the branch
@@ -5475,12 +5903,14 @@ async def _run_scan_job(scan_job_id: str):
                             """
                             INSERT INTO repo_branch_checkpoints (
                                 tenant_id, repository_id, branch,
-                                last_scanned_commit, last_scanned_at
+                                last_scanned_commit, last_scanned_at,
+                                rule_pack_version
                             ) VALUES (
-                                :tid, :rid, :br, :sha, now()
+                                :tid, :rid, :br, :sha, now(), :pack
                             )
                             ON CONFLICT (repository_id, branch)
                             DO UPDATE SET
+                                rule_pack_version   = EXCLUDED.rule_pack_version,
                                 last_scanned_commit = EXCLUDED.last_scanned_commit,
                                 last_scanned_at     = EXCLUDED.last_scanned_at,
                                 updated_at          = now()
@@ -5489,15 +5919,24 @@ async def _run_scan_job(scan_job_id: str):
                         {
                             "tid": job.tenant_id,
                             "rid": repo.id,
-                            "br": scan_branch,
+                            "br": _ckpt_branch,
                             "sha": current_head_sha,
+                            # Only a scan that walked the WHOLE tree can
+                            # claim this pack covered every file; an
+                            # incremental one saw a diff, so it leaves the
+                            # stored pack as it was.
+                            "pack": (
+                                scanner.rule_pack_version
+                                if not incremental_used
+                                else checkpoint_rule_pack
+                            ),
                         },
                     )
                 except Exception as _cw_err:
                     logger.warning(
                         "branch_checkpoint_write_failed",
                         scan_job_id=scan_job_id,
-                        branch=scan_branch,
+                        branch=_ckpt_branch,
                         error=str(_cw_err)[:200],
                     )
 
@@ -5509,7 +5948,7 @@ async def _run_scan_job(scan_job_id: str):
                 #    otherwise a feature-branch scan would corrupt
                 #    the legacy main-branch checkpoint, which is
                 #    exactly the bug this whole gap was fixing.
-                if scan_branch == (repo.default_branch or "main"):
+                if _ckpt_branch == (repo.default_branch or "main"):
                     repo.last_scanned_commit = current_head_sha
             # WS-1: emit the terminal phase event BEFORE the commit so the
             # completed/100% row lands in the SAME transaction as the final
@@ -5826,6 +6265,105 @@ async def _run_git(args: list[str], *, timeout: int | None = None, label: str = 
         raise
 
 
+def _current_branch(repo_path: str) -> Optional[str]:
+    """Branch the checkout is on, or None when it cannot be read.
+
+    The scan reports what it ACTUALLY read rather than what was asked
+    for: a branch that does not exist upstream falls back to the
+    repository's default, and a result labelled with the requested name
+    would be a quiet lie about which code was scanned.
+    """
+    try:
+        import subprocess as _sp
+        r = _sp.run(["git", "-C", repo_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, timeout=15)
+        if r.returncode == 0:
+            name = r.stdout.decode("utf-8", "replace").strip()
+            return name or None
+    except Exception:
+        pass
+    return None
+
+
+def _clear_removed_from_code(finding, now) -> bool:
+    """Drop the "not in current code" marker when a finding is seen again.
+
+    A file can come back — a revert, a cherry-pick, a branch merged in.
+    Without this the finding keeps a badge saying the secret is not in
+    the current code while the scan that just ran proves it is, which is
+    worse than saying nothing at all.
+
+    Returns True when a marker was actually cleared.
+    """
+    md = finding.source_metadata or {}
+    if not md.get("removed_from_code"):
+        return False
+    md = dict(md)
+    for key in (
+        "removed_from_code", "removed_by_scan_job_id", "removed_at_commit",
+        "removed_at", "removal_reason", "removed_by_full_sweep",
+    ):
+        md.pop(key, None)
+    # Keep the fact that it came back; a file that disappears and returns
+    # is worth seeing in the audit trail.
+    md["returned_to_code_at"] = now.isoformat() if hasattr(now, "isoformat") else str(now)
+    finding.source_metadata = md
+    return True
+
+
+async def _refresh_checkout(repo_path: str, branch: str) -> tuple[bool, bool]:
+    """Bring an existing scan checkout up to the remote tip of ``branch``.
+
+    Returns ``(refreshed, failed)``.
+
+    ``fetch`` + ``reset --hard`` rather than ``pull --ff-only``: a pull
+    refuses a branch whose history was rewritten, which is exactly when a
+    checkout is most out of date. The checkout is scratch space owned by
+    the scanner — nothing there is authored by anyone — so discarding its
+    state is safe, and it is the only way to follow a force push.
+
+    Never raises: a scan that cannot refresh still has real code to scan.
+    The caller records the failure so the result is labelled as computed
+    from older content rather than presented as current.
+    """
+    try:
+        rc_f, _out_f, err_f = await _run_git(
+            ["git", "-C", repo_path, "fetch", "--prune", "origin", branch],
+            label="fetch-refresh",
+            timeout=min(settings.GIT_FETCH_TIMEOUT_SECONDS, 600),
+        )
+        if rc_f != 0:
+            logger.warning(
+                "checkout_fetch_failed",
+                repo_path=repo_path,
+                branch=branch,
+                error=(err_f or b"")[:200].decode("utf-8", "replace"),
+            )
+            return False, True
+        # `checkout -B` rather than `reset --hard`: it moves the local
+        # branch AND switches to it, so a scan of a branch other than the
+        # one the checkout happens to be on reads that branch's files.
+        # Tracked files that do not exist on the target branch are removed
+        # by the checkout, which is what makes a deleted-file closure
+        # correct rather than a leftover.
+        rc_r, _out_r, err_r = await _run_git(
+            ["git", "-C", repo_path, "checkout", "-B", branch, "FETCH_HEAD"],
+            label="checkout-refresh",
+            timeout=120,
+        )
+        if rc_r != 0:
+            logger.warning(
+                "checkout_reset_failed",
+                repo_path=repo_path,
+                error=(err_r or b"")[:200].decode("utf-8", "replace"),
+            )
+            return False, True
+        return True, False
+    except Exception as exc:
+        logger.warning("checkout_refresh_error", repo_path=repo_path, error=str(exc)[:200])
+        return False, True
+
+
 async def _clone_repository(url: str, repo_id: str, branch: str | None = None, auth: dict | None = None, full_history: bool = False, on_progress=None) -> str:
     """Clone a git repository to local storage. Supports auth via token or username/password."""
     import asyncio
@@ -5876,12 +6414,26 @@ async def _clone_repository(url: str, repo_id: str, branch: str | None = None, a
                 fetch_args.insert(4, "--unshallow")
             logger.info("unshallowing_clone", repo_id=repo_id)
             await _run_git(fetch_args, label="fetch-unshallow")
-        else:
-            # Normal pull (incremental standalone scan).
-            await _run_git(
-                ["git", "-C", base_path, "pull", "--ff-only"],
-                label="pull", timeout=min(settings.GIT_FETCH_TIMEOUT_SECONDS, 600),
-            )
+
+        # Bring the WORKING TREE to the branch tip, not just the refs.
+        # Fetching alone leaves the checkout wherever it was — at the
+        # commit the first clone landed on, or detached at the SHA a
+        # webhook scan checked out — so the scan read old files while the
+        # refs said otherwise. Measured: a history scan here saw 2 commits
+        # when the remote had 3, missing the newest entirely.
+        #
+        # `_refresh_checkout` is the same fetch + `checkout -B` the main
+        # scan path uses, so both routes into a reused clone end up in the
+        # same state. A failure is logged and tolerated: the caller still
+        # has real content to scan and records the staleness.
+        _tree_branch = branch or "HEAD"
+        if _tree_branch != "HEAD":
+            _ok, _failed = await _refresh_checkout(base_path, _tree_branch)
+            if _failed:
+                logger.warning(
+                    "reused_clone_refresh_failed",
+                    repo_id=repo_id, branch=_tree_branch,
+                )
         return base_path
 
     async def _run_clone(clone_branch: str | None) -> tuple[int, str]:
@@ -6645,6 +7197,11 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                     sa_update(NormalizedFinding)
                     .where(
                         NormalizedFinding.incident_id == finding.incident_id,
+                        # Tenant scoping, like every other cross-incident
+                        # write. An incident id is a UUID so this is not
+                        # reachable in practice, but a write that fans out
+                        # across rows should never rely on that alone.
+                        NormalizedFinding.tenant_id == finding.tenant_id,
                         NormalizedFinding.id != finding.id,
                         NormalizedFinding.classification == Classification.NEEDS_REVIEW,
                     )
