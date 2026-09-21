@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "^15.1.0",
+    "next": "^15.5.24",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "@tanstack/react-query": "^5.102.8",
@@ -33,7 +33,7 @@
   },
   "overrides": {
     "prismjs": "^1.30.0",
-    "sharp": "^0.35.0",
+    "sharp": "^0.35.4",
     "postcss": "^8.5.23"
   }
 }
