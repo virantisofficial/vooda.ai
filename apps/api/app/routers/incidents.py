@@ -30,12 +30,17 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select, func as sa_func
+from sqlalchemy import select, update, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.app.core.database import get_db
 from apps.api.app.core.access_control import get_accessible_repo_ids
-from apps.api.app.models.finding import NormalizedFinding, SecretIncident
+from apps.api.app.core.classification_provenance import (
+    MECHANISM_BULK_TRIAGE,
+    MECHANISM_HUMAN_TRIAGE,
+)
+from apps.api.app.core.occurrences import UNDECIDED, propagate_to_occurrences
+from apps.api.app.models.finding import Classification, NormalizedFinding, SecretIncident
 from apps.api.app.models.user import User
 from apps.api.app.routers.auth import get_current_user
 
@@ -889,14 +894,36 @@ async def patch_incident(
     prev_rotation_status = incident.rotation_status
     prev_assigned_to = incident.assigned_to
 
+    # A verdict on the incident is a verdict on every place the credential
+    # was seen, so it carries down to the occurrences that nobody has
+    # ruled on individually. Without this the incident view and the
+    # findings list disagreed: an incident marked rotated or dismissed
+    # while its findings sat at "needs review" forever.
+    _occ_class: Optional[Classification] = None
+
     if patch.classification is not None:
         incident.classification = patch.classification
+        _occ_class = _as_finding_classification(patch.classification)
     if patch.review_status is not None:
         incident.review_status = patch.review_status
     if patch.rotation_status is not None:
         incident.rotation_status = patch.rotation_status
         if patch.rotation_status == "rotated":
             incident.rotated_at = datetime.utcnow()
+            # Rotation beats a classification patch in the same request:
+            # the credential is dead, which is the stronger statement.
+            _occ_class = Classification.ROTATED
+
+    if _occ_class is not None:
+        await propagate_to_occurrences(
+            db,
+            incident_id=incident.id,
+            tenant_id=user.tenant_id,
+            classification=_occ_class,
+            mechanism=MECHANISM_HUMAN_TRIAGE,
+            actor=user.id,
+            now=datetime.utcnow(),
+        )
     if patch.validation_status is not None:
         incident.validation_status = patch.validation_status
     if patch.assigned_to is not None:
@@ -915,43 +942,37 @@ async def patch_incident(
                 cleaned.append(tn)
         incident.tags = cleaned
 
-    # Cascade classification / review_status to occurrences so the
-    # legacy per-finding views remain in sync.  Future cleanup once
-    # the UI migrates fully to incident-level: drop this cascade and
-    # have the finding read its classification from the incident.
-    if patch.classification is not None or patch.review_status is not None:
-        from sqlalchemy import update as sa_update
-        updates = {}
-        if patch.classification is not None:
-            # Re-translate to the uppercase native_enum form used by
-            # NormalizedFinding.classification.
-            updates["classification"] = patch.classification.upper()
-        if patch.review_status is not None:
-            # SecretIncident.review_status is a free String(40) and the
-            # IncidentDetailDrawer writes domain values like
-            # "confirmed" / "unreviewed".  NormalizedFinding.review_status
-            # is a strict PostgreSQL enum (ReviewStatus) with only
-            # UNREVIEWED / IN_REVIEW / REVIEWED / DISPUTED.  Bug found
-            # E2E on 2026-05-17: the cascade did .upper() blindly and
-            # tried to push "CONFIRMED" into the enum, which 500's.
-            # Map the incident vocabulary onto the finding enum:
-            #   unreviewed → UNREVIEWED  (re-opened for triage)
-            #   confirmed  → REVIEWED    (a triage decision has been made)
-            #   anything else → pass through uppercase as a best-effort
-            #   (covers "in_review" → IN_REVIEW, "disputed" → DISPUTED).
-            rs_in = (patch.review_status or "").strip().lower()
-            rs_map = {
-                "unreviewed": "UNREVIEWED",
-                "confirmed": "REVIEWED",
-                "in_review": "IN_REVIEW",
-                "reviewed": "REVIEWED",
-                "disputed": "DISPUTED",
-            }
-            updates["review_status"] = rs_map.get(rs_in, rs_in.upper())
+    # Review status follows the incident for occurrences nobody has
+    # ruled on individually. The CLASSIFICATION cascade is handled above
+    # by `propagate_to_occurrences`, which is the only place allowed to
+    # write a finding's verdict across an incident: it skips occurrences
+    # a person already decided and attaches provenance to a confirmation.
+    # This block used to do both by hand, unguarded — it overwrote human
+    # verdicts and wrote confirmations the provenance guard never saw.
+    if patch.review_status is not None:
+        from sqlalchemy import update as sa_update_rs
+        # SecretIncident.review_status is a free String(40) and the
+        # IncidentDetailDrawer writes domain values like "confirmed" /
+        # "unreviewed". NormalizedFinding.review_status is a strict
+        # PostgreSQL enum. Bug found E2E on 2026-05-17: the cascade did
+        # .upper() blindly and tried to push "CONFIRMED" into the enum,
+        # which 500's. Map the incident vocabulary onto the finding enum.
+        rs_in = (patch.review_status or "").strip().lower()
+        rs_map = {
+            "unreviewed": "UNREVIEWED",
+            "confirmed": "REVIEWED",
+            "in_review": "IN_REVIEW",
+            "reviewed": "REVIEWED",
+            "disputed": "DISPUTED",
+        }
         await db.execute(
-            sa_update(NormalizedFinding)
-            .where(NormalizedFinding.incident_id == incident.id)
-            .values(**updates)
+            sa_update_rs(NormalizedFinding)
+            .where(
+                NormalizedFinding.incident_id == incident.id,
+                NormalizedFinding.tenant_id == user.tenant_id,
+                NormalizedFinding.classification.in_(UNDECIDED),
+            )
+            .values(review_status=rs_map.get(rs_in, rs_in.upper()))
         )
 
     # Audit log entry — captures which field(s) changed + the optional
@@ -1073,6 +1094,28 @@ class BulkMarkRotatedResponse(BaseModel):
     already_rotated: int  # incidents that were already in rotated state
     not_found: int   # incident_ids that didn't resolve to a tenant row
     events_recorded: int  # CredentialRotationEvent rows created
+    # Occurrences closed as ROTATED by this call. Reported because the
+    # action reconciles an already-rotated incident too: without a number
+    # here, "already_rotated: 1" looks like nothing happened even when
+    # findings were just closed.
+    findings_closed: int = 0
+
+
+def _as_finding_classification(value) -> "Optional[Classification]":
+    """Map an incident's stored classification onto the finding enum.
+
+    Incidents keep classification as a lowercase VARCHAR; findings use
+    the enum. Anything unrecognised returns None, which means "do not
+    touch the occurrences" — the safe direction, since the alternative
+    is stamping a verdict nobody chose.
+    """
+    if value is None:
+        return None
+    raw = str(getattr(value, "value", value)).strip().lower()
+    for member in Classification:
+        if member.value == raw:
+            return member
+    return None
 
 
 @router.post("/bulk-mark-rotated", response_model=BulkMarkRotatedResponse)
@@ -1109,92 +1152,127 @@ async def bulk_mark_rotated(
             SecretIncident.tenant_id == user.tenant_id,
         )
     )
+    findings_closed = 0
     incidents = list(rows.scalars().all())
     found_ids = {inc.id for inc in incidents}
     not_found = len(body.incident_ids) - len(found_ids)
 
     for incident in incidents:
-        if (incident.rotation_status or "").lower() == "rotated":
-            already += 1
-            continue
-        prev_rotation_status = incident.rotation_status
-        incident.rotation_status = "rotated"
-        incident.rotated_at = now
-        rotated += 1
+        # Reconcile occurrences on EVERY pass, not only the transition.
+        # A finding can be reopened after a rotation — by a person, or by
+        # a later scan creating a new occurrence — and re-running "mark
+        # rotated" used to answer `already_rotated: 1` while leaving those
+        # findings open, with no way to reconcile from the UI. The
+        # credential is dead either way, so the occurrences follow it.
+        was_already_rotated = (incident.rotation_status or "").lower() == "rotated"
 
-        # Per-incident audit entry — so the IncidentDetailDrawer's
-        # History tab shows the rotation event.  The bulk summary
-        # audit entry written at the end of this handler has
-        # resource_id=None and is invisible to per-incident history
-        # queries — bug fix 2026-05-17.  We also want one entry per
-        # incident for forensic clarity ("when was THIS credential
-        # rotated, by whom?").
-        await log_audit(
-            db, user, "incident_rotated", "secret_incident",
-            resource_id=incident.id,
-            detail=f"rotation_status=rotated (bulk{', note=' + repr(body.note[:200]) if body.note else ''})",
-            metadata={
-                "incident_id": str(incident.id),
-                "changes": {"rotation_status": "rotated"},
-                "previous": {"rotation_status": prev_rotation_status},
-                "comment": body.note,
-                "via": "bulk_mark_rotated",
-            },
+        if not was_already_rotated:
+            prev_rotation_status = incident.rotation_status
+            incident.rotation_status = "rotated"
+            incident.rotated_at = now
+            rotated += 1
+        else:
+            already += 1
+
+        # Close the incident's OCCURRENCES too, not just the incident.
+        #
+        # Rotating is the real fix for a leaked credential, and since
+        # scans no longer close a finding because its file was deleted
+        # (the value survives in history), this is the primary way a
+        # finding leaves the open list. Before this, marking an incident
+        # rotated left every one of its findings at NEEDS_REVIEW forever:
+        # nothing in the codebase ever wrote `Classification.ROTATED`, so
+        # the dashboard's open count never moved and mean time-to-fix saw
+        # no closure. Measured that way on a live instance.
+        #
+        # Only findings still awaiting a decision are touched. A human
+        # verdict — accepted risk, false positive, test credential — is
+        # never overwritten, the same rule the scan-side passes follow.
+        findings_closed += await propagate_to_occurrences(
+            db,
+            incident_id=incident.id,
+            tenant_id=user.tenant_id,
+            classification=Classification.ROTATED,
+            mechanism=MECHANISM_BULK_TRIAGE,
+            actor=user.id,
+            now=now,
+            note=body.note,
         )
 
-        # Record a CredentialRotationEvent for MTTR analytics.
-        #
-        # The model requires non-NULL first_seen_active_at and
-        # time_to_rotation_s.  When the incident never went through
-        # live-validation (first_seen_at unset), we fall back to the
-        # rotation moment itself, which yields time_to_rotation_s=0.
-        # That's the honest answer: we didn't OBSERVE active-time for
-        # this credential, so MTTR can't be longer than now-now=0.
-        # The "manual_bulk" detected_via tag lets dashboards filter
-        # these out of organic MTTR if desired.
-        try:
-            seen = incident.first_seen_at
-            if seen is not None and seen.tzinfo is not None:
-                # Strip tz so the arithmetic with naive `now` (utcnow)
-                # works.  PG stores the value as timestamptz either way.
-                seen = seen.replace(tzinfo=None)
-            first_seen_active = seen if seen is not None else now
-            time_to_rotation_s = max(0, int((now - first_seen_active).total_seconds()))
-
-            event = CredentialRotationEvent(
-                tenant_id=user.tenant_id,
-                finding_id=None,
-                repository_id=None,
-                provider=(incident.secret_type or "unknown")[:64],
-                secret_hash=incident.secret_hash,
-                first_seen_active_at=first_seen_active,
-                rotated_at=now,
-                time_to_rotation_s=time_to_rotation_s,
-                detected_via="manual_bulk",
-                # NOTE: the SQLAlchemy attribute is `extra` even though
-                # the underlying column is named `extra_data` — see
-                # apps/api/app/models/rotation_event.py:63.  Passing
-                # the wrong kwarg name silently no-ops the field on
-                # construction (caught the hard way in QA).
-                extra={
+        if not was_already_rotated:
+            # Per-incident audit entry — so the IncidentDetailDrawer's
+            # History tab shows the rotation event.  The bulk summary
+            # audit entry written at the end of this handler has
+            # resource_id=None and is invisible to per-incident history
+            # queries — bug fix 2026-05-17.  We also want one entry per
+            # incident for forensic clarity ("when was THIS credential
+            # rotated, by whom?").
+            await log_audit(
+                db, user, "incident_rotated", "secret_incident",
+                resource_id=incident.id,
+                detail=f"rotation_status=rotated (bulk{', note=' + repr(body.note[:200]) if body.note else ''})",
+                metadata={
                     "incident_id": str(incident.id),
-                    "actor_user_id": str(user.id),
-                    "note": body.note,
+                    "changes": {"rotation_status": "rotated"},
+                    "previous": {"rotation_status": prev_rotation_status},
+                    "comment": body.note,
+                    "via": "bulk_mark_rotated",
                 },
             )
-            db.add(event)
-            events_recorded += 1
-        except Exception as exc:  # noqa: BLE001
-            # MTTR-event recording is best-effort; never fail the
-            # rotation update because the analytics row failed.  Log
-            # so we can see real schema drift in QA rather than have
-            # it silently disappear (the prior bug).
-            import structlog
-            structlog.get_logger("vooda.api.incidents").warning(
-                "rotation_event_record_failed",
-                incident_id=str(incident.id),
-                error=str(exc)[:200],
-            )
+
+            # Record a CredentialRotationEvent for MTTR analytics.
+            #
+            # The model requires non-NULL first_seen_active_at and
+            # time_to_rotation_s.  When the incident never went through
+            # live-validation (first_seen_at unset), we fall back to the
+            # rotation moment itself, which yields time_to_rotation_s=0.
+            # That's the honest answer: we didn't OBSERVE active-time for
+            # this credential, so MTTR can't be longer than now-now=0.
+            # The "manual_bulk" detected_via tag lets dashboards filter
+            # these out of organic MTTR if desired.
+            try:
+                seen = incident.first_seen_at
+                if seen is not None and seen.tzinfo is not None:
+                    # Strip tz so the arithmetic with naive `now` (utcnow)
+                    # works.  PG stores the value as timestamptz either way.
+                    seen = seen.replace(tzinfo=None)
+                first_seen_active = seen if seen is not None else now
+                time_to_rotation_s = max(0, int((now - first_seen_active).total_seconds()))
+
+                event = CredentialRotationEvent(
+                    tenant_id=user.tenant_id,
+                    finding_id=None,
+                    repository_id=None,
+                    provider=(incident.secret_type or "unknown")[:64],
+                    secret_hash=incident.secret_hash,
+                    first_seen_active_at=first_seen_active,
+                    rotated_at=now,
+                    time_to_rotation_s=time_to_rotation_s,
+                    detected_via="manual_bulk",
+                    # NOTE: the SQLAlchemy attribute is `extra` even though
+                    # the underlying column is named `extra_data` — see
+                    # apps/api/app/models/rotation_event.py:63.  Passing
+                    # the wrong kwarg name silently no-ops the field on
+                    # construction (caught the hard way in QA).
+                    extra={
+                        "incident_id": str(incident.id),
+                        "actor_user_id": str(user.id),
+                        "note": body.note,
+                    },
+                )
+                db.add(event)
+                events_recorded += 1
+            except Exception as exc:  # noqa: BLE001
+                # MTTR-event recording is best-effort; never fail the
+                # rotation update because the analytics row failed.  Log
+                # so we can see real schema drift in QA rather than have
+                # it silently disappear (the prior bug).
+                import structlog
+                structlog.get_logger("vooda.api.incidents").warning(
+                    "rotation_event_record_failed",
+                    incident_id=str(incident.id),
+                    error=str(exc)[:200],
+                )
 
     await log_audit(
         db, user, "incidents_bulk_mark_rotated", "secret_incident",
@@ -1250,6 +1328,7 @@ async def bulk_mark_rotated(
         already_rotated=already,
         not_found=not_found,
         events_recorded=events_recorded,
+        findings_closed=findings_closed,
     )
 
 
@@ -1415,17 +1494,30 @@ async def bulk_triage_incidents(
                 incident.rotated_at = now
         updated += 1
 
-        # Cascade to occurrences.  One UPDATE per incident keeps the
-        # SQL simple and the row-count exact for the audit summary.
-        result = await db.execute(
-            sa_update(NormalizedFinding)
-            .where(NormalizedFinding.incident_id == incident.id)
-            .values(
-                classification=new_classification.upper(),
-                review_status=rs_for_findings,
-            )
+        # Same rule as the single-incident patch: the verdict reaches the
+        # occurrences nobody has ruled on individually.
+        _bulk_class = (
+            Classification.ROTATED
+            if new_rotation_status == "rotated"
+            else _as_finding_classification(new_classification)
         )
-        cascaded += result.rowcount or 0
+        _bulk_cascaded = 0
+        if _bulk_class is not None:
+            _bulk_cascaded = await propagate_to_occurrences(
+                db,
+                incident_id=incident.id,
+                tenant_id=user.tenant_id,
+                classification=_bulk_class,
+                mechanism=MECHANISM_BULK_TRIAGE,
+                actor=user.id,
+                now=now,
+            )
+
+        # Occurrence cascade runs through the shared helper above, which
+        # skips anything a person decided and writes provenance for a
+        # confirmation. This used to be a second, unguarded UPDATE that
+        # undid those protections immediately after they were applied.
+        cascaded += _bulk_cascaded
 
         changes_dump: dict = {
             "classification": new_classification,

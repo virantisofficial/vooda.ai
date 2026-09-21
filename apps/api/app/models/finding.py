@@ -42,16 +42,16 @@ class Classification(str, enum.Enum):
     # all" — important when triaging a peer's repo where you can't
     # tell if a key is genuinely test-only or a developer mistake.
     TEST_CREDENTIAL = "test_credential"
-    # `RESOLVED_FILE_DELETED` — automatic closure: the finding's
-    # source file was removed in a subsequent commit. The secret is
-    # no longer in the working tree, so the finding is no longer
-    # actionable. Distinct from CONFIRMED_FALSE_POSITIVE (the secret
-    # was real but the file/secret no longer exists) and ROTATED
-    # (the credential was actively rotated at the provider). Set by
-    # the worker's deleted-file tombstone pass after each
-    # incremental scan. Useful for audit / MTTR metrics: knowing a
-    # finding closed by file-deletion vs rotation tells different
-    # stories about how teams react to secret leaks.
+    # `RESOLVED_FILE_DELETED` — LEGACY for repositories. Scans no
+    # longer apply it: deleting a file does not revoke a credential,
+    # and the value survives in every commit that carried it and in
+    # every clone already made, so closing on deletion would assert a
+    # fix that never happened. A repository finding whose file is gone
+    # is tagged `removed_from_code` in `source_metadata` and stays
+    # OPEN until the credential is verified dead or a human decides.
+    # (GitHub, GitGuardian and GitLab all resolve on revocation for
+    # the same reason.) Rows written before that change keep this
+    # classification, which is why the value remains.
     RESOLVED_FILE_DELETED = "resolved_file_deleted"
     # `RESOLVED_ITEM_DELETED` — source-side equivalent of
     # RESOLVED_FILE_DELETED. Applied by the weekly source full-sync

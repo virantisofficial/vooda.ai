@@ -17,6 +17,7 @@ from apps.api.app.core.classification_provenance import (
     MECHANISM_HUMAN_TRIAGE,
     set_classification,
 )
+from apps.api.app.core.occurrences import propagate_to_occurrences
 from apps.api.app.models.finding import (
     NormalizedFinding,
     FindingEvidence,
@@ -506,16 +507,24 @@ async def triage_finding(
             .values(classification=inc_class, review_status="reviewed")
         )
         # Cascade to sibling occurrences (other findings of the same
-        # incident).  Excludes the current finding because it was
-        # already set above.
-        await db.execute(
-            sa_update(NormalizedFinding)
-            .where(
-                NormalizedFinding.incident_id == finding.incident_id,
-                NormalizedFinding.tenant_id == user.tenant_id,
-                NormalizedFinding.id != finding.id,
-            )
-            .values(classification=new_class, review_status=ReviewStatus.REVIEWED)
+        # incident), excluding this one — it was set above.
+        #
+        # Through the shared helper, which enforces two things this did
+        # not: siblings a person already ruled on are left alone (one
+        # human's verdict must not silently replace another's), and a
+        # CONFIRMED_* verdict carries its provenance. A Core UPDATE is
+        # invisible to the ORM-level guard, so writing it here by hand
+        # produced exactly the unattributable confirmation the guard
+        # exists to refuse.
+        await propagate_to_occurrences(
+            db,
+            incident_id=finding.incident_id,
+            tenant_id=user.tenant_id,
+            classification=new_class,
+            mechanism=MECHANISM_HUMAN_TRIAGE,
+            actor=user.id,
+            exclude_finding_id=finding.id,
+            note=getattr(body, "reason", None),
         )
 
     await db.flush()
@@ -720,17 +729,17 @@ async def bulk_triage_findings(
 
         # Cascade to siblings (other findings in the same incident
         # that weren't part of this bulk request).
-        selected_ids = {f.id for f in sel_findings}
-        sib_result = await db.execute(
-            sa_update(NormalizedFinding)
-            .where(
-                NormalizedFinding.incident_id == incident_id,
-                NormalizedFinding.tenant_id == user.tenant_id,
-                ~NormalizedFinding.id.in_(selected_ids),
-            )
-            .values(classification=new_class, review_status=ReviewStatus.REVIEWED)
+        # The findings in this request are already set above; the helper
+        # skips anything a person ruled on, so passing them again is
+        # harmless — they are no longer undecided.
+        siblings_cascaded += await propagate_to_occurrences(
+            db,
+            incident_id=incident_id,
+            tenant_id=user.tenant_id,
+            classification=new_class,
+            mechanism=MECHANISM_BULK_TRIAGE,
+            actor=user.id,
         )
-        siblings_cascaded += sib_result.rowcount or 0
 
     # One audit summary entry — the per-finding FindingDecision rows
     # already provide the detailed trail; this gives the audit page a
