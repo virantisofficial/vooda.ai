@@ -77,7 +77,7 @@ The platform organizes into six primary sections accessible from the sidebar:
 | # | Section | Path | Description |
 |---|---------|------|-------------|
 | 1 | **Dashboard** | `/dashboard` | Unified KPIs — open secrets, severity mix, verified-live credentials, and mean time-to-fix (detection → closed by your team) |
-| 2 | **Repositories** | `/repositories` | Connect GitHub, GitLab, and Bitbucket repos; trigger scans; view scan history and artifacts |
+| 2 | **Repositories** | `/repositories` | Connect GitHub, GitLab, and Bitbucket repos; trigger scans (current code, full re-scan, or git history — see the [Scanning Guide](scanning.md)); view scan history and artifacts |
 | 3 | **Sources** | `/sources` | Connect and scan non-git sources — chat, docs and wikis, tickets, cloud storage, CI/CD logs, and container images |
 | 4 | **Secrets** | `/findings` | Finding triage with AI classification, severity filtering, incidents, and rotation tracking |
 | 5 | **Integrations** | `/integrations` | AI provider, webhook receivers, vault connections, ticketing, and notification channels (Slack, Teams, email) |
@@ -124,6 +124,21 @@ The API exposes its routers under `/api/v1/`:
 4. **Triage.** An AI model classifies each finding as true or false positive with a confidence score.
 5. **Act.** Real findings become incidents; route them to Jira / ServiceNow / Linear, alert via Slack / Teams / email, block them at commit time with push protection, and confirm which are already vault-managed.
 
+### Scan options
+
+A repository can be scanned three ways, each answering a different question:
+
+| Option | What it reads |
+|--------|---------------|
+| **Scan Current Code** | Only the files changed since the last scan of that branch. The day-to-day default; falls back to a full scan when there is no usable checkpoint. |
+| **Force Full Re-Scan** | Every file in the working tree, with nothing reused from a previous run. Use after changing detection rules or scope. |
+| **Scan Git History** | What each commit added, across the 5,000 most recent commits — finds credentials that were committed and later deleted, with the commit, author and date. |
+
+Issue and pull request discussion is **not** part of a repository scan —
+it lives outside the repository and is connected under **Sources**. The
+[Scanning Guide](scanning.md) covers scan triggers, how findings get
+closed, and what is not scanned today.
+
 ## Tech Stack
 
 | Component | Technology | Version |
@@ -168,6 +183,7 @@ vooda.ai/
 - [Architecture Overview](architecture.md) — system design, services, database schema, frontend structure
 - [Deployment Guide](deployment.md) — Docker Compose setup, environment variables, scaling
 - [API Guide](api-guide.md) — endpoint reference, authentication, CI/CD integration
+- [Scanning Guide](scanning.md) — scan options, automatic scans, discussion sources, and known coverage limits
 
 ### Integrations
 - [Slack Integration](slack-integration.md) — bot OAuth setup, scopes, channel scanning, sweep behavior

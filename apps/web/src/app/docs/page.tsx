@@ -1002,30 +1002,75 @@ curl -X POST https://vooda.acme.com/api/v1/repositories/repo_01H.../scan \\
 # Webhook trigger — see the Connect integrations guide for HMAC payload
 POST /api/v1/webhooks/github`}</Code>
 
-      <H2>Scan Types</H2>
-      <Tbl headers={["Mode", "When", "Cost"]} rows={[
-        ["Full", "First scan, force_full=true, force-push, or rule-pack version change", "All files × all rules"],
-        ["Incremental", "Subsequent scans on the same branch", "Only files in the diff (last_scanned_commit..HEAD) — 5-15× faster"],
-        ["Cache hit", "File content sha + rule_pack_version unchanged since previous scan", "Findings replayed from file_scan_cache, no detection cost"],
+      <H2>Scan Options</H2>
+      <P>
+        The <strong>Run Scan</strong> menu offers three options. They answer three different
+        questions, and the difference between them is what gets read — not just how long it takes.
+      </P>
+      <Tbl headers={["Option", "What it reads", "When to use it"]} rows={[
+        ["Scan Current Code", "Only the files that changed since the last scan of this branch", "Day to day — the default"],
+        ["Force Full Re-Scan", "Every file in the current code, with nothing reused from a previous run", "After changing detection rules or scan scope, or when you want a clean baseline"],
+        ["Scan Git History", "What every commit added, plus every commit message", "At onboarding, and after any incident where a secret may have been \u201cfixed\u201d by deleting it"],
       ]} />
       <P>
-        The file-level cache is keyed on <code>(content_sha, rule_pack_version, scan_scope)</code>. When a rule
-        pack version changes (rules added / edited / removed), all cached entries for the old version are
-        invalidated automatically — there is no risk of stale results.
+        All three read your <strong>default branch</strong> unless you name another in the
+        <strong> Branch</strong> field at the top of the menu. A branch that does not exist upstream falls
+        back to the default, and the scan record always names the branch actually read. Findings for deleted
+        files are closed only on the default branch — a file missing from a feature branch is not evidence
+        that it is gone.
+      </P>
+      <P>
+        <strong>Scan Current Code</strong> falls back to a full scan on its own when there is no usable
+        starting point — the first scan of a repository, an uploaded archive with no git data, or a branch
+        whose history was rewritten by a force push. Nothing is needed from you; that one scan just takes
+        longer.
+      </P>
+      <P>
+        <strong>Scan Git History</strong> is the only option that finds a credential which was committed and
+        later removed. It is still in the history, and therefore in every clone, no matter what the current
+        code looks like. History findings carry the commit, the author and the date, so you know who to ask
+        and how long the credential has been exposed. Commit messages are scanned too — a key pasted into a
+        message never lands in a file, so no other option can see it.
+      </P>
+      <P>
+        A history scan covers the 5,000 most recent commits. When a repository has more history than that,
+        the scan record says so rather than letting a partial result read as a clean one. A history scan
+        also leaves your incremental starting point untouched, so it never causes the next code scan to skip
+        anything.
       </P>
 
-      <H2>Branch Checkpoints</H2>
+      <H2>When A File Is Deleted</H2>
       <P>
-        Each (repository, branch) pair has its own watermark stored in <code>repo_branch_checkpoints</code>.
-        On every successful scan the watermark is updated to <code>HEAD</code>. The next incremental scan only
-        examines commits in <code>last_scanned_commit..HEAD</code>.
+        Findings whose file has disappeared are tagged <strong>&ldquo;Not in current code&rdquo;</strong> —
+        by an incremental scan when the deletion falls in the window it examines, and by a full re-scan for
+        anything deleted outside one. Only default-branch scans do this, so scanning a feature branch never
+        mislabels a file that simply lives on main.
       </P>
-      <Note>Force-pushed branches are detected automatically: when the prior <code>last_scanned_commit</code> is no longer reachable from <code>HEAD</code>, the scan falls back to a full scan on that branch.</Note>
+      <Note>
+        They are tagged, not closed. Deleting a file does not revoke a credential: the value is still in
+        every commit that carried it and in every clone already made. A finding closes when the credential
+        stops working — Vooda re-checks that on every scan — or when you classify it yourself. This matches
+        GitHub, GitGuardian and GitLab, all of which resolve secret alerts on revocation rather than on the
+        code changing.
+      </Note>
+
+      <H2>Repeat Scans</H2>
+      <P>
+        Each branch of each repository remembers the last commit that was scanned, and unchanged files are
+        not re-examined on the next run.
+      </P>
+      <Note>
+        Each branch also records which rule set it was last scanned with. When your detection rules change —
+        a rule added or edited, or an updated Vooda release — the next scan walks every file once so the new
+        rules reach code that has not changed, then goes back to incremental scanning. You do not need to
+        remember to run a full re-scan for that.
+      </Note>
+      <Note>Force-pushed branches are handled automatically: when the commit a branch was last scanned from no longer exists in its history, that scan falls back to a full one rather than reporting a partial result.</Note>
 
       <H2>Viewing Scan History</H2>
       <P>
         Open the repository and click the <strong>Scans</strong> tab. Each row shows <em>scan job ID, trigger,
-        status, duration, files scanned, new findings, resolved findings (tombstones)</em>.
+        status, duration, files scanned, new findings, and findings no longer present in the current code</em>.
       </P>
       <Endpoint method="GET" path="/api/v1/repositories/{id}/scans" desc="Paginated scan history" />
       <Endpoint method="GET" path="/api/v1/scan-jobs/{id}" desc="Detailed job record incl. logs" />
@@ -1060,6 +1105,11 @@ function SourcesContent() {
       <RoleBox role="security-lead or developer with sources:write" see="api" />
 
       <H2>Supported Source Types</H2>
+      <Note>
+        Credentials get pasted into tickets and pull request discussion at least as often as they get
+        committed. That content lives in the ticketing or code-hosting system, not in your repository, so no
+        repository scan can reach it — connect it here as its own source.
+      </Note>
       <P>
         Beyond Git repositories, Vooda scans non-Git source types. The community edition ships <strong>three
         families</strong>; the Sources catalog at <ExtLink href="http://localhost:3000/sources">/sources</ExtLink>
@@ -1276,7 +1326,7 @@ function FindingsContent() {
                   → suppressed
                   → false_positive
                   → accepted_risk
-        ↘ tombstone (item deleted upstream)`}</Code>
+        ↘ no longer in current code (still open — rotate the credential)`}</Code>
       <P>Two parallel state machines apply:</P>
       <Tbl headers={["Field", "Values"]} rows={[
         ["review_status", "UNREVIEWED → REVIEWED → ACCEPTED_RISK"],
@@ -1288,7 +1338,7 @@ function FindingsContent() {
       <Tbl headers={["Attribute", "Description"]} rows={[
         ["severity", "critical | high | medium | low | info"],
         ["rule_id", "Stable identifier of the detector (e.g. AWS-001, GH-003)"],
-        ["classification", "TP / FP / Test / tombstone family — see the Triage findings guide"],
+        ["classification", "True positive / false positive / test credential / resolved — see the Triage findings guide"],
         ["review_status", "UNREVIEWED | REVIEWED | ACCEPTED_RISK"],
         ["remediation_status", "NONE | APPLIED"],
         ["ai_confidence", "0.0–1.0, post-calibration"],
@@ -3194,7 +3244,7 @@ function TroubleshootingContent() {
       <H2>Scans</H2>
       <ul className="space-y-2 my-3">
         <Li><strong>Scan stuck in <em>queued</em></strong> — no worker is processing the queue. <code>docker compose logs worker --tail=100</code>; verify Redis connectivity.</Li>
-        <Li><strong>Repeated full scans on every run</strong> — branch checkpoint not being updated. Inspect <code>repo_branch_checkpoints</code> table; check if force-push is happening (the platform falls back to full scan when prior commit is unreachable).</Li>
+        <Li><strong>Repeated full scans on every run</strong> — the branch is not keeping a scanned-from point. The usual cause is a force push, which rewrites the commit the previous scan finished at; Vooda then falls back to a full scan rather than walking a range that no longer exists. Expected after a rebase, and self-correcting on the next run.</Li>
         <Li><strong>"Repository clone failed: authentication required"</strong> — token expired or insufficient scope. Reissue with the scopes listed in the Add a repository and scan guide.</Li>
         <Li><strong>OOM during scan</strong> — large repos (&gt;1 GB) exceed default worker memory. Set <code>mem_limit: 4g</code> on the worker service.</Li>
       </ul>

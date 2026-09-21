@@ -57,9 +57,15 @@ Credentials don't stay in source code. They get attached to a Jira ticket, dumpe
 | Category | Sources |
 |---|---|
 | **Code & history** | Git working tree and full commit history — GitHub, GitLab, Bitbucket |
-| **Tickets & issues** | Jira, ServiceNow, Azure DevOps |
+| **Tickets & issues** | Jira, ServiceNow, Azure DevOps — descriptions and comments |
 | **Cloud storage** | Amazon S3, Google Cloud Storage, Azure Blob |
 | **Pipelines & artifacts** | Container registries, CI/CD logs, container images |
+
+A repository scan reads your files, your commit history and your commit
+messages. Ticket and pull request discussion lives outside the repository, so
+it is connected separately as a source. The [Scanning Guide](docs/scanning.md)
+explains each scan option, what triggers a scan automatically, and what is not
+scanned today.
 
 Connect them under **Sources** in the UI — Git repos and the CLI need no setup at all. [Enterprise](#community-vs-enterprise) adds more source families — team chat, wikis, and additional ticketing and object-store connectors.
 
@@ -212,8 +218,10 @@ Why offer it this way? Because the way you learn Vooda belongs in your stack is 
 Tracked in the open. See [issues](../../issues) and [Discussions](../../discussions) — near-term themes:
 
 - More non-git source adapters — additional chat, wiki and ticketing systems
+- GitLab issue and merge request discussion scanning
+- Inline pull request code-review comments — the line-level threads, alongside the PR descriptions and general comments already covered
 - Ephemeral-credential migration guidance
-- Faster incremental history scanning on very large monorepos
+- History scanning beyond the 5,000-commit window, and faster incremental history scanning on very large monorepos
 - More provider verifiers
 
 Want something on here? Open a discussion. What users actually ask for beats what we guess.
