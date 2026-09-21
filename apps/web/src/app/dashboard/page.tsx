@@ -392,9 +392,12 @@ export default function DashboardPage() {
     ?? ((metrics?.by_classification?.["Classification.NEEDS_REVIEW"] ?? 0) + (metrics?.by_classification?.["needs_review"] ?? 0));
 
   // MTTR — server-side endpoint.  Used by the MTTR tile + the posture banner.
-  // How fast the customer's team closes what Vooda finds — however they
-  // close it: rotate the credential, delete the file, or fix the code.
-  // Vooda doesn't do any of those; it timestamps detection and sees the
+  // How fast the customer's team closes what Vooda finds — by rotating
+  // the credential (verification sees it go dead) or by deciding about it
+  // (false positive, test credential, accepted risk). Deleting the file
+  // is NOT one of those: the value survives in history, so a deleted file
+  // marks the finding "not in current code" and leaves it open.
+  // Vooda does none of the fixing; it timestamps detection and sees the
   // finding reach a closed state. /metrics/mttr counts every closure path,
   // so it leads; the rotation ledger only knows rotations and is the
   // fallback. With nothing closed yet, the tile shows oldest open exposure.

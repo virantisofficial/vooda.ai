@@ -721,8 +721,22 @@ function RepositoryDetailPageInner() {
   const [showAIPrompt, setShowAIPrompt] = useState(false);
   const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
   const [aiStatusMsg, setAiStatusMsg] = useState("");
+  // Scan options the user picked before the AI prompt interrupted them.
+  const [pendingScanOpts, setPendingScanOpts] = useState<StartScanOptions>({});
+  // Branch the next scan should read. Empty = the repository's default.
+  const [scanBranch, setScanBranch] = useState("");
 
-  const handleFreshScan = async () => {
+  // Every Run Scan menu item routes through here so the
+  // "AI model not configured" prompt appears for ALL of them.
+  // Previously only "Scan Current Code" checked, so a tenant with no
+  // model could start a full re-scan or a history scan and get
+  // untriaged findings with no warning — the same surprise the
+  // 2026-05-24 skipAI fix removed from the history option.
+  //
+  // `opts` is carried into `pendingScanOpts` so that if the user
+  // answers the prompt with "Scan Without AI" we start the scan they
+  // actually asked for, not a default standalone one.
+  const handleFreshScan = async (opts: StartScanOptions = {}) => {
     // Check AI status first
     try {
       const statusRes = await getAIStatus();
@@ -730,6 +744,7 @@ function RepositoryDetailPageInner() {
       if (!status.ai_configured) {
         setAiConfigured(false);
         setAiStatusMsg(status.message);
+        setPendingScanOpts(opts);
         setShowAIPrompt(true);
         return; // Don't start scan — show prompt first
       }
@@ -737,7 +752,7 @@ function RepositoryDetailPageInner() {
       // If status check fails, proceed anyway
     }
     // AI is configured — start scan directly
-    await startScan();
+    await startScan(opts);
   };
 
   // Options-object signature (refactored 2026-05-24 from positional
@@ -751,10 +766,13 @@ function RepositoryDetailPageInner() {
     skipAI?: boolean;
     scanType?: "standalone" | "history";
     forceFull?: boolean;
+    /** Branch to scan. Empty means the repository's default branch. */
+    branch?: string;
   };
 
   const startScan = async (opts: StartScanOptions = {}) => {
     const { skipAI = false, scanType = "standalone", forceFull = false } = opts;
+    const branch = (opts.branch ?? scanBranch).trim();
     setScanLoading(true);
     setShowAIPrompt(false);
     try {
@@ -767,6 +785,9 @@ function RepositoryDetailPageInner() {
       const cfg: Record<string, unknown> = {};
       if (skipAI) cfg.skip_ai = true;
       if (forceFull) cfg.force_full = true;
+      // Only sent when the user typed one: an empty value means "the
+      // repository's default branch", which the worker already resolves.
+      if (branch) cfg.branch = branch;
       await triggerScan(id, {
         scan_type: scanType,
         config: cfg,
@@ -834,7 +855,7 @@ function RepositoryDetailPageInner() {
   // the label is now plain "Scans".
   const runScanButton = (
     <div className="flex items-center gap-0">
-      <button onClick={handleFreshScan} disabled={scanLoading} className="btn-primary-sm rounded-r-none">
+      <button onClick={() => handleFreshScan()} disabled={scanLoading} className="btn-primary-sm rounded-r-none">
         {scanLoading ? (
           <><div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />Scanning…</>
         ) : (
@@ -854,19 +875,34 @@ function RepositoryDetailPageInner() {
           <>
             <div className="fixed inset-0 z-10" onClick={() => setShowScanMenu(false)} />
             <div className="absolute right-0 top-full mt-1 z-20 w-56 py-1 rounded-lg card border border-white/[0.1] shadow-xl">
+              {/* Branch field — applies to whichever option is picked below.
+                  Repository scans read the default branch unless one is
+                  named here. */}
+              <div className="px-4 pt-3 pb-2 border-b border-white/[0.06]">
+                <label className="block text-[10px] uppercase tracking-wider text-slate-500 mb-1">
+                  Branch
+                </label>
+                <input
+                  value={scanBranch}
+                  onChange={(e) => setScanBranch(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder={repo?.default_branch || "default branch"}
+                  className="w-full bg-white/[0.04] border border-white/[0.08] rounded px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-white/20"
+                />
+              </div>
               <button
                 onClick={() => { setShowScanMenu(false); handleFreshScan(); }}
                 className="w-full text-left px-4 py-2.5 hover:bg-white/[0.04] transition-colors"
               >
                 <p className="text-sm text-slate-200 font-medium">Scan Current Code</p>
-                <p className="text-[10px] text-slate-500">Re-scans only the files that have changed.</p>
+                <p className="text-[10px] text-slate-500">Checks files changed since the last scan.</p>
               </button>
               <button
-                onClick={() => { setShowScanMenu(false); startScan({ forceFull: true }); }}
+                onClick={() => { setShowScanMenu(false); handleFreshScan({ forceFull: true }); }}
                 className="w-full text-left px-4 py-2.5 hover:bg-white/[0.04] transition-colors"
               >
                 <p className="text-sm text-slate-200 font-medium">Force Full Re-Scan</p>
-                <p className="text-[10px] text-slate-500">Re-scans every file from scratch.</p>
+                <p className="text-[10px] text-slate-500">Re-checks every file, reusing nothing.</p>
               </button>
               <button
                 // BUG FIX 2026-05-24: previously called
@@ -883,11 +919,11 @@ function RepositoryDetailPageInner() {
                 // Now uses the options-object call shape — same fix
                 // intent, plus the named argument makes the bug class
                 // impossible going forward.
-                onClick={() => { setShowScanMenu(false); startScan({ scanType: "history" }); }}
+                onClick={() => { setShowScanMenu(false); handleFreshScan({ scanType: "history" }); }}
                 className="w-full text-left px-4 py-2.5 hover:bg-white/[0.04] transition-colors"
               >
                 <p className="text-sm text-slate-200 font-medium">Scan Git History</p>
-                <p className="text-[10px] text-slate-500">Scans every commit, including removed code.</p>
+                <p className="text-[10px] text-slate-500">Checks past commits and messages for removed secrets.</p>
               </button>
             </div>
           </>
@@ -1374,9 +1410,9 @@ function RepositoryDetailPageInner() {
               </div>
             </div>
             <div className="flex gap-3 justify-end">
-              <button onClick={() => setShowAIPrompt(false)} className="btn-secondary text-sm">Cancel</button>
+              <button onClick={() => { setShowAIPrompt(false); setPendingScanOpts({}); }} className="btn-secondary text-sm">Cancel</button>
               <button
-                onClick={() => startScan({ skipAI: true })}
+                onClick={() => startScan({ ...pendingScanOpts, skipAI: true })}
                 className="px-4 py-2 rounded-lg text-sm font-medium text-yellow-400 border border-yellow-400/30 hover:bg-yellow-400/10 transition-all"
               >
                 Scan Without AI

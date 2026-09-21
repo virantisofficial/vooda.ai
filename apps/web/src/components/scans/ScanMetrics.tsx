@@ -77,13 +77,72 @@ export function ScanMetrics({ stats }: Props) {
   if (fpRemoved != null) cells.push({ label: "FP removed", value: fpRemoved });
 
   const hasComposition = fNew != null || fExisting != null;
+
+  // Partial-history callout. A git-history scan walks a bounded number of
+  // commits; on a repository with more history than that, the oldest commits
+  // are NOT examined. Saying nothing here would let a partial result read as
+  // "your history is clean" — the one conclusion this scan cannot support.
+  // Findings whose file left the code in this scan. They stay OPEN — the
+  // credential still needs rotating — so this is reported as a state
+  // change, never as a count of things fixed.
+  const removedFromCode =
+    (num(s.findings_removed_from_code) ?? 0) +
+    (num(s.findings_removed_from_code_full_sweep) ?? 0);
+
+  // Checkout freshness. A scan whose refresh failed still produces real
+  // findings — from the code that was already on disk. Left unsaid, that
+  // reads as "your current code is clean", which it cannot show.
+  const staleCheckout = s.checkout_refresh_failed === true;
+
+  const historyTruncated = s.history_truncated === true;
+  const histScanned = num(s.history_commits_scanned);
+  const histTotal = num(s.history_total_commits);
+
   const nothing =
-    !anySev && cells.length === 0 && activeCreds == null && !hasComposition && effParts.length === 0;
+    !anySev && cells.length === 0 && activeCreds == null && !hasComposition &&
+    effParts.length === 0 && !historyTruncated && !staleCheckout && removedFromCode === 0;
   if (nothing) return null;
 
   return (
     <section>
       <h3 className="text-[11px] uppercase tracking-wider text-slate-500 mb-3">Security findings</h3>
+
+      {removedFromCode > 0 && (
+        <div className="mb-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+          <p className="text-xs text-slate-300">
+            {fmt(removedFromCode)} {removedFromCode === 1 ? "finding is" : "findings are"} no longer in the
+            current code
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">
+            Still open — the file was deleted, which does not revoke the credential. Rotate it to close.
+          </p>
+        </div>
+      )}
+
+      {staleCheckout && (
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2">
+          <p className="text-xs text-amber-300">
+            Repository could not be refreshed — scanned the code already on disk.
+          </p>
+          <p className="text-[11px] text-amber-300/70 mt-0.5">
+            Commits pushed since the last successful refresh are not reflected here.
+          </p>
+        </div>
+      )}
+
+      {historyTruncated && (
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2">
+          <p className="text-xs text-amber-300">
+            Partial history
+            {histScanned != null && histTotal != null
+              ? ` — scanned the ${fmt(histScanned)} most recent commits of ${fmt(histTotal)}.`
+              : " — the oldest commits were not examined."}
+          </p>
+          <p className="text-[11px] text-amber-300/70 mt-0.5">
+            Secrets introduced before that point were not covered by this scan.
+          </p>
+        </div>
+      )}
 
       {/* Verified-live callout — the GitGuardian/TruffleHog headline.
           Only rendered when the verify-credentials phase populated it. */}

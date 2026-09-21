@@ -450,16 +450,35 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     {sm.is_placeholder && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-500/10 text-slate-400 border border-slate-500/20 font-medium">Placeholder</span>
                     )}
+                    {sm.removed_from_code === true && (
+                      <span
+                        className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/20 font-medium"
+                        title="The file is gone from the current code, but the secret is still in the repository's history and in every existing clone. Rotating the credential is what closes this."
+                      >
+                        Not in current code
+                      </span>
+                    )}
                     {sm.file_context === "test_file" && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium" title="Finding is in a test/spec file — typically lower production priority">Test</span>
                     )}
                   </div>
                   <p className="text-xs text-slate-500">{finding.description}</p>
-                  {sm.detection_engine === "secret_scan_history" && sm.commit_sha && (
+                  {sm.removed_from_code === true && (
                     <p className="text-[10px] text-amber-400/70 mt-1">
-                      Deleted from current code but found in commit {sm.commit_sha?.slice(0, 8)} {sm.commit_author ? `by ${sm.commit_author}` : ""} — credential rotation required
+                      This file was deleted{sm.removed_at_commit ? ` in ${String(sm.removed_at_commit).slice(0, 8)}` : ""} — the secret is no longer in
+                      your current code, but it remains in the repository&apos;s history and in every clone already made.
+                      Rotate the credential; deleting the file does not revoke it.
                     </p>
                   )}
+                  {sm.in_commit_message === true && sm.commit_sha ? (
+                    <p className="text-[10px] text-amber-400/70 mt-1">
+                      Found in the message of commit {sm.commit_sha?.slice(0, 8)}{sm.commit_author ? ` by ${sm.commit_author}` : ""} — it was never written to a file, so there is nothing to edit: the credential has to be rotated.
+                    </p>
+                  ) : sm.detection_engine === "secret_scan_history" && sm.commit_sha ? (
+                    <p className="text-[10px] text-amber-400/70 mt-1">
+                      Deleted from current code but found in commit {sm.commit_sha?.slice(0, 8)}{sm.commit_author ? ` by ${sm.commit_author}` : ""} — credential rotation is still required.
+                    </p>
+                  ) : null}
                 </div>
               </div>
 
@@ -960,9 +979,14 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
             const inRepo = !!finding.repository_id && !(finding as any).scan_source_id;
 
             type Tone = "red" | "amber" | "green" | "slate";
-            // Closing a finding because the file/item was deleted doesn't
-            // disable the credential, so those keep the steps.
-            const removedNote = cls === "resolved_file_deleted" || cls === "resolved_item_deleted"
+            // A deleted file does not disable the credential, so these
+            // keep the full rotation steps. Two shapes exist: the current
+            // one — an open finding tagged `removed_from_code` — and the
+            // legacy `resolved_file_deleted` classification written before
+            // scans stopped closing findings on deletion.
+            const removedNote = sm.removed_from_code === true
+              ? "This file is no longer in your code, but the secret is still in the repository's history and in every clone — that doesn't disable the credential. "
+              : cls === "resolved_file_deleted" || cls === "resolved_item_deleted"
               ? `The ${cls === "resolved_file_deleted" ? "file" : "item"} containing this secret was removed, but that doesn't disable the credential. `
               : "";
             const status: { tone: Tone; text: string; showSteps: boolean } =

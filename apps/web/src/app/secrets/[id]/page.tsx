@@ -134,11 +134,16 @@ export default function SecretDetailPage() {
               <p className="text-sm text-white">Last Seen</p>
               <p className="text-xs text-slate-500">{finding.last_seen_at ? new Date(finding.last_seen_at).toLocaleString() : "—"}</p>
             </div>
-            {sm.is_in_history_only && (
+            {(sm.is_in_history_only || sm.removed_from_code === true) && (
+              /* Amber, not green: a secret that survives in history is not a
+                 resolved one. The file going away is a state change worth
+                 showing, but rotating the credential is what fixes it. */
               <div className="relative">
-                <div className="absolute left-[-18px] w-3 h-3 rounded-full bg-green-500 border-2 border-[#1a1f2e]" />
-                <p className="text-sm text-green-400">Deleted from current branch</p>
-                <p className="text-xs text-slate-500">Secret still exists in git history</p>
+                <div className="absolute left-[-18px] w-3 h-3 rounded-full bg-amber-500 border-2 border-[#1a1f2e]" />
+                <p className="text-sm text-amber-400">No longer in current code</p>
+                <p className="text-xs text-slate-500">
+                  Still in git history and in every existing clone — rotate the credential to close this.
+                </p>
               </div>
             )}
           </div>
