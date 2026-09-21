@@ -1472,11 +1472,21 @@ def scan_git_history(
     progress_callback: "Optional[Callable[[int, int, int], None]]" = None,
     progress_every_n_commits: int = 250,
     progress_min_interval_s: float = 5.0,
+    stats: "Optional[dict]" = None,
 ) -> list[ParsedFinding]:
     """
     Scan full git history for secrets introduced in past commits.
-    Returns findings tagged with commit SHA, author, and date.
-    Deduplicates by secret_hash + file_path across all commits.
+    Covers both the content each commit ADDED and the commit MESSAGE
+    itself. Returns findings tagged with commit SHA, author, and date.
+    Deduplicates by secret_hash + file_path across all commits; message
+    findings dedup on the secret alone.
+
+    ``stats`` (optional dict, filled in place): ``commits_scanned``,
+    ``total_commits`` and ``truncated``. The walk stops at
+    ``max_commits``, and a repository with more history than that is
+    only PARTIALLY covered — silence there reads as a clean bill of
+    health the scan never earned, so the caller is given what it needs
+    to say so.
 
     Optional ``progress_callback(commits_done, max_commits, findings_so_far)``
     is invoked every ``progress_every_n_commits`` commits (default 250)
@@ -1499,13 +1509,22 @@ def scan_git_history(
     this loop.  The callback hook sweeps the UI from 40 → 55 as the
     commit walk advances.
     """
-    from services.secret_scan.git_history import stream_git_history, count_commits
+    from services.secret_scan.git_history import (
+        stream_git_history, count_walkable_commits, stream_commit_messages,
+    )
 
     if scanner is None:
         scanner = SecretScanner()
 
     all_findings: list[ParsedFinding] = []
     seen_hashes: set[str] = set()  # Dedup: same secret in same file across commits
+    # Commit-MESSAGE findings are kept apart from the file findings because
+    # the HEAD re-location pass at the end of this function resolves a
+    # finding against a file in the working tree. A commit message has no
+    # file to resolve against, so those findings would be pointlessly
+    # git-show'd and then mislabelled. They are appended after that pass.
+    msg_findings: list[ParsedFinding] = []
+    seen_msg_hashes: set[str] = set()
     commit_count = 0
     import time as _t_hist
     _last_cb_ts = _t_hist.monotonic()  # drives the time-based progress trigger
@@ -1581,6 +1600,51 @@ def scan_git_history(
                     # at this scope and we don't want to add coupling just
                     # for an opportunistic progress signal.
                     pass
+
+    # ── Commit messages ─────────────────────────────────────────────────
+    # A credential pasted into a commit message never lands in a file, so
+    # no working-tree scan and no diff scan can see it — but it ships in
+    # every clone exactly like the code does.
+    #
+    # Its own pass rather than a step inside the loop above: that loop is
+    # fed by `git log --diff-filter=ACMR`, and git omits a commit with no
+    # matching files from that output entirely. Deletion-only commits were
+    # therefore invisible, and "removing the old key, it was ..." is
+    # precisely the message people write. This pass asks for no patch text,
+    # so it is a cheap metadata read.
+    for commit in stream_commit_messages(repo_path, max_commits=max_commits):
+        _msg = (commit.message or "").strip()
+        if not _msg:
+            continue
+        try:
+            # Scanned as `message` content so the rules apply their
+            # collaboration-text confidence (prose, not an assignment in
+            # source) rather than the code-scan defaults.
+            _mfs = scanner.scan_file(
+                f"commit-message/{commit.sha[:12]}", _msg, content_type="message",
+            ) or []
+        except Exception:
+            _mfs = []
+        for mf in _mfs:
+            _msh = (mf.raw_data or {}).get("secret_hash", "")
+            # Dedup on the secret alone: the same key quoted in ten commit
+            # messages is one leak, not ten findings.
+            if _msh and _msh in seen_msg_hashes:
+                continue
+            if _msh:
+                seen_msg_hashes.add(_msh)
+            mf.raw_data["commit_sha"] = commit.sha
+            mf.raw_data["commit_author"] = commit.author
+            mf.raw_data["commit_email"] = commit.email
+            mf.raw_data["commit_date"] = commit.date
+            mf.raw_data["commit_message"] = commit.message[:100]
+            mf.raw_data["found_in_history"] = True
+            # No file holds this value, so deleting a file can never
+            # resolve it — only rotating the credential can.
+            mf.raw_data["history_only"] = True
+            mf.raw_data["in_commit_message"] = True
+            mf.raw_data["file_context"] = "commit_message"
+            msg_findings.append(mf)
 
     # ── Re-locate findings to their CURRENT HEAD line (2026-06-13) ───────
     # `added_line_nums` (above) maps each finding to the line in the COMMIT
@@ -1701,6 +1765,25 @@ def scan_git_history(
                 continue
         # Secret was scrubbed from HEAD — a genuine history-only finding.
         f.raw_data["history_only"] = True
+
+    # Commit-message findings bypass the relocation pass above by design.
+    all_findings.extend(msg_findings)
+
+    if stats is not None:
+        try:
+            _total = count_walkable_commits(repo_path)
+        except Exception:
+            _total = 0
+        # Truncation is a property of the WALK, not of what the walk found.
+        # `commit_count` counts commits that carried scannable changes, which
+        # is always <= the commits examined (merges and delete-only commits
+        # carry none), so testing it against the cap silently under-reports
+        # truncation on exactly the large repositories where it matters.
+        stats["total_commits"] = _total
+        stats["commits_scanned"] = min(_total, max_commits) if _total else commit_count
+        stats["commits_with_changes"] = commit_count
+        # A failed count returns 0; never claim truncation on that basis.
+        stats["truncated"] = bool(_total and _total > max_commits)
 
     return all_findings
 

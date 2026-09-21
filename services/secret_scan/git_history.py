@@ -50,6 +50,14 @@ class CommitInfo:
 # leaving git running in the background.
 STREAM_TIMEOUT_SECONDS = 600
 
+# Terminator for the commit-message block in the ``git log`` format below.
+# The message is captured with ``%B`` (subject AND body) rather than ``%s``
+# (subject only) so a secret pasted into a commit body is scannable. ``%B``
+# is multi-line, so the line-oriented block parser needs an explicit end
+# marker. A control character is used because it cannot appear in a commit
+# message that git itself would round-trip.
+COMMIT_MSG_END = "\x01VOODA_MSG_END\x01"
+
 
 def _parse_commit_block(lines: list[str]) -> Optional[CommitInfo]:
     """Parse one buffered commit block (without delimiter) → CommitInfo.
@@ -65,18 +73,31 @@ def _parse_commit_block(lines: list[str]) -> Optional[CommitInfo]:
     author = lines[1].strip()
     email = lines[2].strip()
     date = lines[3].strip()
-    message = lines[4].strip()
+
+    # Message block: everything from line 4 up to the sentinel. Falls back to
+    # the legacy single-line form when the sentinel is absent, so blocks built
+    # against the old ``%s`` format (and the tests that do so) still parse.
+    if COMMIT_MSG_END in lines[4:]:
+        _end = lines.index(COMMIT_MSG_END, 4)
+        message = "\n".join(lines[4:_end]).strip()
+        _body_start = _end + 1
+    else:
+        message = lines[4].strip()
+        _body_start = 5
 
     if not sha or len(sha) < 7:
         return None
 
-    commit = CommitInfo(sha=sha, author=author, email=email, date=date, message=message[:200])
+    # Capped, not truncated to a subject: the whole message is scanned for
+    # secrets. 8 KB is far beyond any real commit message and bounds the
+    # memory a pathological one can cost across a 5,000-commit walk.
+    commit = CommitInfo(sha=sha, author=author, email=email, date=date, message=message[:8000])
 
     current_diff: Optional[CommitDiff] = None
     in_header = False
 
     cur_new_line = 0  # running new-file line number within the active hunk
-    for line in lines[5:]:
+    for line in lines[_body_start:]:
         if line.startswith("diff --git"):
             # Save previous diff
             if current_diff and current_diff.added_lines:
@@ -182,7 +203,7 @@ def stream_git_history(
         "--diff-filter=ACMR",
         "--no-merges",
         f"--max-count={max_commits}",
-        f"--format={delim}%n%H%n%an%n%ae%n%aI%n%s",
+        f"--format={delim}%n%H%n%an%n%ae%n%aI%n%B%n{COMMIT_MSG_END}",
     ]
 
     try:
@@ -368,6 +389,108 @@ def get_deleted_files(
         deleted=len(deleted),
     )
     return deleted
+
+
+def stream_commit_messages(
+    repo_path: str,
+    max_commits: int = MAX_COMMITS,
+    branch: Optional[str] = None,
+):
+    """Yield ``CommitInfo`` (no diffs) for every commit's MESSAGE.
+
+    Separate from the diff walk on purpose. That walk passes
+    ``--diff-filter=ACMR``, and git then omits a commit with no matching
+    files from its output ENTIRELY — not just the commit's diff. A
+    deletion-only commit is therefore invisible to it, which is the one
+    place people explain themselves: "removing the old key, it was ...".
+
+    This pass asks for no patch text at all, so it is a cheap metadata
+    read rather than a second full history scan.
+
+    ``branch`` limits the walk to one ref; the default covers every ref,
+    matching ``stream_git_history``.
+    """
+    delim = "===VOODA_MSG_COMMIT==="
+    cmd = [
+        "git", "-C", repo_path, "log",
+        # Same ref selection as the diff walk. Walking HEAD alone would
+        # scan the FILES a side branch added while ignoring what its
+        # commit messages said — an asymmetry with no defensible reading.
+        "--all" if not branch else branch,
+        "--root", "--no-merges",
+        f"--max-count={max_commits}",
+        f"--format={delim}%n%H%n%an%n%ae%n%aI%n%B%n{COMMIT_MSG_END}",
+    ]
+    try:
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", repo_path],
+                       capture_output=True, timeout=10)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=STREAM_TIMEOUT_SECONDS)
+    except Exception as e:
+        logger.warning("git_log_messages_failed", error=str(e)[:200])
+        return
+    if proc.returncode != 0:
+        return
+
+    block: list[str] = []
+    for line in proc.stdout.split("\n"):
+        if line == delim:
+            if block:
+                c = _parse_message_block(block)
+                if c:
+                    yield c
+            block = []
+        else:
+            block.append(line)
+    if block:
+        c = _parse_message_block(block)
+        if c:
+            yield c
+
+
+def _parse_message_block(lines: list[str]) -> Optional[CommitInfo]:
+    """sha / author / email / date / message-up-to-sentinel. No diffs."""
+    if len(lines) < 5:
+        return None
+    sha = lines[0].strip()
+    if not sha or len(sha) < 7:
+        return None
+    if COMMIT_MSG_END in lines[4:]:
+        end = lines.index(COMMIT_MSG_END, 4)
+        message = "\n".join(lines[4:end]).strip()
+    else:
+        message = "\n".join(lines[4:]).strip()
+    return CommitInfo(
+        sha=sha, author=lines[1].strip(), email=lines[2].strip(),
+        date=lines[3].strip(), message=message[:8000],
+    )
+
+
+def count_walkable_commits(repo_path: str) -> int:
+    """Commits the history walk would cover if nothing capped it.
+
+    Deliberately NOT ``count_commits``: that counts every commit on every
+    ref including merges, while the walk follows HEAD and skips merges.
+    Comparing the walk against the wrong total is how a partial scan comes
+    to report itself as complete — measured on a 7,774-commit repository
+    where the walk reached 4,828 and claimed full coverage.
+
+    Returns 0 when the count cannot be taken; callers must not read that
+    as "no commits".
+    """
+    try:
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", repo_path],
+            capture_output=True, timeout=10,
+        )
+        result = subprocess.run(
+            ["git", "-C", repo_path, "rev-list", "--count", "--no-merges", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return int(result.stdout.strip()) if result.returncode == 0 else 0
+    except Exception:
+        return 0
 
 
 def count_commits(repo_path: str) -> int:
