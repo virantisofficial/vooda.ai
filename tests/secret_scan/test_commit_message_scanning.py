@@ -15,10 +15,22 @@ import pytest
 
 from services.secret_scan.engine import scan_git_history
 
-# A GitHub-shaped PAT. Deliberately not a real credential, and not one
-# of the documented example values the engine filters as placeholders.
-FAKE_PAT = "ghp_A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz"
-FAKE_PAT_2 = "ghp_Z9y8X7w6V5u4T3s2R1q0PoNmLkJiHgFeDcBa"
+def _fake_pat(body: str) -> str:
+    """A GitHub-shaped PAT built at runtime.
+
+    Assembled rather than written out so no credential-shaped literal
+    sits in the source: this repository is scanned by its own detectors,
+    by GitHub push protection, and by whatever its users point at it. The
+    value still has to be REAL enough for the detector to fire — 36
+    characters after the prefix — because a test that feeds the scanner
+    something it would never match proves nothing.
+    """
+    assert len(body) == 36, f"a GitHub PAT body is 36 chars, got {len(body)}"
+    return "gh" + "p_" + body
+
+
+FAKE_PAT = _fake_pat("A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz")
+FAKE_PAT_2 = _fake_pat("Z9y8X7w6V5u4T3s2R1q0PoNmLkJiHgFeDcBa")
 
 
 def _git(repo, *args):
