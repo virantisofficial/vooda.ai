@@ -91,3 +91,24 @@ def test_failure_count_comes_from_the_engine_not_from_subtraction():
     assert "sum((failure_summary or {}).values())" in src, (
         "derive the failure count from the engine's own tally"
     )
+
+
+def test_triage_stats_locals_are_bound_even_when_triage_never_runs():
+    """Regression: the scan failed at "[6/8] Storing findings".
+
+    The stats block reads `failure_summary` and `_triage_model_label`
+    unconditionally, but both are only assigned inside the branch that
+    actually calls _run_ai_triage. A scan with no model configured, with
+    skip_ai, or that raised early therefore hit UnboundLocalError and
+    the WHOLE SCAN failed — findings already detected were never stored.
+
+    Adding a stat that reads a conditionally-bound local is an easy
+    mistake to repeat, so pin the initialisation.
+    """
+    src = WORKER.read_text(encoding="utf-8")
+    init = src.index("            triaged = 0\n            dedup_saved = 0")
+    stats = src.index('"ai_triage_failures": dict(failure_summary or {})')
+    assert init < stats, "initialisation must precede the stats block"
+    window = src[init:stats]
+    assert "failure_summary: dict[str, int] = {}" in window
+    assert '_triage_model_label = ""' in window

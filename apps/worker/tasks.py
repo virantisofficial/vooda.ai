@@ -5549,6 +5549,13 @@ async def _run_scan_job(scan_job_id: str):
             # ── Step 5: Run AI false positive analysis ────────────
             triaged = 0
             dedup_saved = 0
+            # Bound BEFORE the branch that assigns them. The stats block
+            # below reads both unconditionally, so a scan where triage
+            # never runs — no model configured, skip_ai, or an early
+            # exception — raised UnboundLocalError and the whole scan
+            # failed at "[6/8] Storing findings".
+            failure_summary: dict[str, int] = {}
+            _triage_model_label = ""
             skip_ai = (job.config or {}).get("skip_ai", False)
 
             # Check for AI availability: env vars OR DB-configured models
