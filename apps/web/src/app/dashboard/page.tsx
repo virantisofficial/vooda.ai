@@ -8,7 +8,7 @@ import Link from "next/link";
 import AppShell from "@/components/layout/AppShell";
 import {
   getMetricsOverview, getFindingsMetrics,
-  getRepositories, getMTTRMetrics, getTrendData, getRotationSummary, getFindings,
+  getRepositories, getScanSources, getMTTRMetrics, getTrendData, getRotationSummary, getFindings,
   getFindingsByCategory, getTopLeakingRepos,
   getFindingsBreakdown, getAIAccuracy, getAuditEvents,
 } from "@/lib/api";
@@ -303,6 +303,7 @@ export default function DashboardPage() {
 
   const [metrics, setMetrics] = useState<any>(null);
   const [findingsM, setFindingsM] = useState<any>(null);
+  const [sourceCount, setSourceCount] = useState<number>(0);
   const [repoCount, setRepoCount] = useState(0);
   const [mttrData, setMttrData] = useState<any>(null);
   // Closure time comes from the rotation-events ledger (a real
@@ -340,6 +341,14 @@ export default function DashboardPage() {
       // prev-window query in the same response.
       getMetricsOverview(daysParam, daysParam !== undefined).then(r => setMetrics(r.data)),
       getFindingsMetrics().then(r => setFindingsM(r.data)),
+      // Secrets can come from sources that are not repositories —
+      // container registries, S3, CI logs. Counting only repositories
+      // made "0 Repositories Scanned" sit next to a non-zero findings
+      // count and read like a contradiction.
+      getScanSources({ page_size: 1 }).then(r => {
+        const d = r.data;
+        setSourceCount(d?.total ?? (Array.isArray(d) ? d.length : (d?.items?.length || 0)));
+      }).catch(() => setSourceCount(0)),
       getRepositories({ page_size: 1 }).then(r => {
         const d = r.data;
         setRepoCount(d?.total ?? (Array.isArray(d) ? d.length : (d?.items?.length || 0)));
@@ -621,7 +630,10 @@ export default function DashboardPage() {
             </div>
             <span className="text-slate-700">·</span>
             <span className="text-xs text-slate-400">
-              <b className="text-white font-semibold">{scannedRepoCount}</b> {scannedRepoCount === 1 ? "Repository" : "Repositories"} Scanned
+              <b className="text-white font-semibold">{scannedRepoCount}</b> {scannedRepoCount === 1 ? "Repository" : "Repositories"}
+              {sourceCount > 0 && (
+                <> · <b className="text-white font-semibold">{sourceCount}</b> {sourceCount === 1 ? "Source" : "Sources"}</>
+              )} Scanned
             </span>
           </div>
           <div className="flex items-center gap-2 shrink-0">

@@ -539,11 +539,14 @@ async def delete_scan_source(
     #   scan_sources  ← scan_jobs ← (normalized_findings, imported_findings,
     #                                metric_snapshots, policy_evaluation_results,
     #                                scan_artifacts [CASCADE])
-    #   scan_sources  ← finding_decision_cache [CASCADE]
+    #   scan_sources  ← finding_decision_cache [NO ACTION —
+    #                    explicit cleanup below; the FK does NOT
+    #                    cascade despite what this comment said]
     #   normalized_findings ← (finding_evidence, finding_decisions) [CASCADE]
     #                       ← credential_rotation_events [SET NULL —
     #                          preserved as historical rotation audit]
-    #                       ← quantum_assessments [NO ACTION — explicit cleanup]
+    #                       ← quantum_assessments [REMOVED 2026-05-16;
+    #                          cleanup kept behind an existence filter]
     # Order: scan_job-children → normalized_findings → scan_jobs →
     # scan_sources (cascades finding_decision_cache).
 
@@ -575,13 +578,26 @@ async def delete_scan_source(
     # typically empty for source-scan paths today, but the cleanup
     # makes future migrations safe and matches the repo path's discipline.
     if findings_count:
-        await db.execute(
-            text(
-                "DELETE FROM quantum_assessments WHERE finding_id IN "
-                "(SELECT id FROM normalized_findings WHERE scan_source_id = :sid)"
-            ),
-            {"sid": sid_text},
-        )
+        # Same existence filter the scan_job children above already use.
+        # quantum_assessments went with the governance product removed
+        # on 2026-05-16 — model, migration and table all gone — but this
+        # DELETE stayed behind unguarded, so EVERY scan-source deletion
+        # 500'd for four months. Nothing caught it because the repo
+        # delete path had the guard and this one did not.
+        from apps.api.app.routers.repositories import _existing_tables
+
+        _f_cands = ("quantum_assessments",)
+        _f_present = await _existing_tables(db, _f_cands)
+        for tbl in _f_cands:
+            if tbl not in _f_present:
+                continue
+            await db.execute(
+                text(
+                    f"DELETE FROM {tbl} WHERE finding_id IN "
+                    "(SELECT id FROM normalized_findings WHERE scan_source_id = :sid)"
+                ),
+                {"sid": sid_text},
+            )
 
     # Findings (cascades finding_evidence/decisions; SET NULLs
     # credential_rotation_events.finding_id to preserve historical audit).
@@ -652,6 +668,16 @@ async def delete_scan_source(
         iid for iid in touched_incident_ids
         if iid in remaining_by_inc
     ]) if touched_incident_ids else 0
+
+    # finding_decision_cache does NOT cascade. The comment at the top of
+    # this function claimed it did; the constraint is NO ACTION, so the
+    # source delete failed the FK check. Nothing caught the discrepancy
+    # because the earlier quantum_assessments error aborted the request
+    # before it ever reached this line.
+    await db.execute(
+        text("DELETE FROM finding_decision_cache WHERE scan_source_id = :sid"),
+        {"sid": sid_text},
+    )
 
     # ── 5. Delete the source row itself ────────────────────────────
     await db.delete(source)
