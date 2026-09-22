@@ -187,3 +187,50 @@ def test_the_filter_still_offers_every_reason():
     web = WEB.read_text(encoding="utf-8")
     for reason in ResolutionReason:
         assert f'value="{reason.value}"' in web, reason.value
+
+
+def test_no_surface_derives_a_status_colour_from_the_legacy_field():
+    """The table was migrated and the detail views were not.
+
+    A finding read "Open — AI: Likely Real" in slate on the list, and
+    green "False Positive" when you opened it — same row, two answers.
+    Fixing only the surface that was reported is how this bug survived
+    three rounds; the guard now covers every .tsx at once.
+    """
+    web = pathlib.Path("apps/web/src")
+    if not web.exists():
+        return
+    # `classification` steering a colour class, on one line or across a
+    # ternary chain.
+    pat = re.compile(
+        r"classification[^\n]{0,80}\?\s*\"(?:bg-|text-)", re.M
+    )
+    offenders = []
+    for path in list(web.rglob("*.tsx")) + list(web.rglob("*.ts")):
+        if any(p in path.parts for p in ("node_modules", ".next")):
+            continue
+        if path.name == "findingState.ts":
+            continue
+        src = path.read_text(encoding="utf-8", errors="replace")
+        for m in pat.finditer(src):
+            ln = src[: m.start()].count("\n") + 1
+            offenders.append(f"{path}:{ln}")
+    assert not offenders, (
+        "colour must come from statusTone()/statusTextTone(), which key "
+        "on status — not from the classification enum they replaced:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_optimistic_preview_survives_the_migration():
+    """Both panels preview a pending action before the server answers.
+    Keying the badge off the persisted row would have frozen that
+    preview — the action would appear to do nothing until the reload.
+    """
+    lib = pathlib.Path("apps/web/src/lib/findingState.ts")
+    if not lib.exists():
+        return
+    assert "export function previewOf" in lib.read_text(encoding="utf-8")
+    for f in ("apps/web/src/components/findings/FindingPanel.tsx",
+              "apps/web/src/components/incidents/IncidentDetailDrawer.tsx"):
+        assert "previewOf(" in pathlib.Path(f).read_text(encoding="utf-8"), f

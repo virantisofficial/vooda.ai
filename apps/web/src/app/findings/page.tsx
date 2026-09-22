@@ -1,6 +1,6 @@
 "use client";
 import { validityOf, validityLabel } from "@/lib/validity";
-import { classificationLabel, statusLabel, statusShort, statusDetail, statusTone } from "@/lib/findingState";
+import { classificationLabel, statusLabel, statusShort, statusDetail, statusTone, statusTextTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -1441,8 +1441,8 @@ function FindingsPageInner() {
                       )}
                       {visibleColumns.status && (
                         <td className="px-3 py-2">
-                          <span className={`text-[9px] ${sub.classification.includes("true_positive") ? "text-red-400" : sub.classification.includes("false_positive") ? "text-green-400" : "text-yellow-400"}`}>
-                            {sub.classification === "needs_review" ? "Review" : sub.classification.includes("true_positive") ? "TP" : sub.classification.includes("false_positive") ? "FP" : sub.classification.replace(/_/g," ")}
+                          <span className={`text-[9px] ${statusTextTone(sub)}`} title={statusLabel(sub)}>
+                            {statusShort(sub) === "Open" ? "Review" : statusShort(sub)}
                           </span>
                         </td>
                       )}

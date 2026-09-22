@@ -1,5 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
+import { statusLabel, statusTextTone, classificationTextTone, classificationLabel } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -170,12 +171,7 @@ export default function FindingDetailPage() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Actions</h3>
             <span className="text-[10px] text-slate-600">
-              Current: <span className={`font-medium ${
-                finding.classification.includes("true_positive") ? "text-red-400" :
-                finding.classification.includes("false_positive") ? "text-green-400" :
-                finding.classification === "accepted_risk" ? "text-orange-400" :
-                "text-yellow-400"
-              }`}>{finding.classification.replace(/_/g, " ")}</span>
+              Current: <span className={`font-medium ${statusTextTone(finding)}`}>{statusLabel(finding)}</span>
             </span>
           </div>
 
@@ -341,12 +337,7 @@ export default function FindingDetailPage() {
                           <svg className="w-3 h-3 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
                           </svg>
-                          <span className={`font-medium ${
-                            d.new_classification?.includes("true_positive") ? "text-red-400" :
-                            d.new_classification?.includes("false_positive") ? "text-green-400" :
-                            d.new_classification === "accepted_risk" ? "text-orange-400" :
-                            "text-yellow-400"
-                          }`}>{d.new_classification.replace(/_/g, " ")}</span>
+                          <span className={`font-medium ${classificationTextTone(d.new_classification)}`}>{classificationLabel(d.new_classification)}</span>
                         </div>
                       )}
 

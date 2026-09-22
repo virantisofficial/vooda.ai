@@ -1,6 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { classificationLabel } from "@/lib/findingState";
+import { statusLabel, statusTone, previewOf } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -271,18 +271,9 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     Archived source
                   </span>
                 )}
-                <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${
-                  finding.classification.includes("true_positive") ? "bg-red-500/15 text-red-400 border border-red-500/20" :
-                  finding.classification.includes("false_positive") ? "bg-green-500/15 text-green-400 border border-green-500/20" :
-                  finding.classification === "accepted_risk" ? "bg-orange-500/15 text-orange-400 border border-orange-500/20" :
-                  "bg-yellow-500/15 text-yellow-400 border border-yellow-500/20"
-                }`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${
-                    finding.classification.includes("true_positive") ? "bg-red-400" :
-                    finding.classification.includes("false_positive") ? "bg-green-400" :
-                    finding.classification === "accepted_risk" ? "bg-orange-400" : "bg-yellow-400"
-                  }`} />
-                  {finding.classification.replace(/_/g, " ")}
+<span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${statusTone(finding).badge}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${statusTone(finding).dot}`} />
+                  {statusLabel(finding)}
                 </span>
                 {(() => { const sm = (finding as any).source_metadata || {}; const p = sm.provider || ""; return p ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 capitalize">{sm.secret_type?.replace(/_/g, " ") || p}</span> : finding.cwe ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.04] text-slate-400 border border-white/[0.06]">{finding.cwe}</span> : null; })()}
               </div>
@@ -1133,22 +1124,12 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     } as Record<string, string>)[pendingAction] || finding.classification
                   : finding.classification;
 
-                const colorBg =
-                  cls.includes("true_positive") ? "bg-red-500/10 text-red-400 border-red-500/20" :
-                  cls === "rotated" || cls === "revoked" || cls === "resolved" ? "bg-green-500/10 text-green-400 border-green-500/20" :
-                  cls.includes("false_positive") ? "bg-slate-500/10 text-slate-400 border-slate-500/20" :
-                  cls === "test_credential" ? "bg-blue-500/10 text-blue-400 border-blue-500/20" :
-                  cls === "accepted_risk" ? "bg-orange-500/10 text-orange-400 border-orange-500/20" :
-                  "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
-                const colorDot =
-                  cls.includes("true_positive") ? "bg-red-400" :
-                  cls === "rotated" || cls === "revoked" || cls === "resolved" ? "bg-green-400" :
-                  cls.includes("false_positive") ? "bg-slate-400" :
-                  cls === "test_credential" ? "bg-blue-400" :
-                  cls === "accepted_risk" ? "bg-orange-400" :
-                  "bg-yellow-400";
-                const label =
-                  classificationLabel(cls);
+                // `cls` is the PENDING classification while an action is
+                // awaiting the server, so the badge previews the result.
+                const preview = previewOf(finding, cls);
+                const colorBg = statusTone(preview).badge;
+                const colorDot = statusTone(preview).dot;
+                const label = statusLabel(preview);
 
                 // When pending, override with a dashed border + amber
                 // ring so the unsaved state is visually distinct.

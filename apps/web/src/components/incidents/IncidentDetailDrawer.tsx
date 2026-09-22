@@ -1,6 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { classificationLabel } from "@/lib/findingState";
+import { statusLabel, statusTone, previewOf } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -604,22 +604,12 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
     ? (ACTION_TO_PATCH[pendingAction]?.classification || data?.classification || "needs_review")
     : (data?.classification || "needs_review");
 
-  const triggerBg =
-    effectiveCls.includes("true_positive") ? "bg-red-500/10 text-red-400 border-red-500/20" :
-    effectiveCls === "rotated" || effectiveCls === "revoked" || effectiveCls === "resolved" ? "bg-green-500/10 text-green-400 border-green-500/20" :
-    effectiveCls.includes("false_positive") ? "bg-slate-500/10 text-slate-400 border-slate-500/20" :
-    effectiveCls === "test_credential" ? "bg-blue-500/10 text-blue-400 border-blue-500/20" :
-    effectiveCls === "accepted_risk" ? "bg-orange-500/10 text-orange-400 border-orange-500/20" :
-    "bg-yellow-500/10 text-yellow-400 border-yellow-500/20";
-  const triggerDot =
-    effectiveCls.includes("true_positive") ? "bg-red-400" :
-    effectiveCls === "rotated" || effectiveCls === "revoked" || effectiveCls === "resolved" ? "bg-green-400" :
-    effectiveCls.includes("false_positive") ? "bg-slate-400" :
-    effectiveCls === "test_credential" ? "bg-blue-400" :
-    effectiveCls === "accepted_risk" ? "bg-orange-400" :
-    "bg-yellow-400";
-  const triggerLabel =
-    classificationLabel(effectiveCls);
+  // effectiveCls is the PENDING classification while an action is
+  // in flight, so the badge previews the result.
+  const _preview = previewOf(data, effectiveCls);
+  const triggerBg = statusTone(_preview).badge;
+  const triggerDot = statusTone(_preview).dot;
+  const triggerLabel = statusLabel(_preview);
 
   const pendingHint = pendingAction
     ? "border-amber-500/60 ring-1 ring-amber-500/30 [border-style:dashed]"

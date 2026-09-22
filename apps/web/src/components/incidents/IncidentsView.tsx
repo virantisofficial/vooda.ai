@@ -1,5 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
+import { statusLabel, statusShort, statusDetail, statusTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -601,9 +602,15 @@ export function IncidentsView({
                     )}
                     {cols.status && (
                       <td className="py-2.5 px-3">
-                        <span className="text-[10px] text-slate-400 capitalize">
-                          {(inc.classification || "").replace(/_/g, " ")}
-                        </span>
+                        <div className="flex items-center gap-1.5 min-w-0" title={statusLabel(inc)}>
+                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${statusTone(inc).badge}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusTone(inc).dot}`} />
+                            {statusShort(inc)}
+                          </span>
+                          {statusDetail(inc) && (
+                            <span className="text-[10px] text-slate-500 truncate">{statusDetail(inc)}</span>
+                          )}
+                        </div>
                       </td>
                     )}
                     {cols.validity && (

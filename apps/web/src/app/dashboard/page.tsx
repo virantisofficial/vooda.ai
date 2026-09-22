@@ -861,7 +861,9 @@ export default function DashboardPage() {
                   icon: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />,
                 },
                 {
-                  href: `/findings${needsReview > 0 ? "?classification=NEEDS_REVIEW" : ""}`,
+                  // Links to the lifecycle filter rather than the deprecated
+                  // classification param.
+                  href: `/findings${needsReview > 0 ? "?status=open" : ""}`,
                   label: "Triage Queue",
                   desc: needsReview > 0 ? `${needsReview} Findings Need Review` : "Queue Clear",
                   color: "bg-yellow-500/15", tc: "text-yellow-400",

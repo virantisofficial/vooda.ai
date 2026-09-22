@@ -165,3 +165,57 @@ export function statusDetail(obj: any): string {
   }
   return "";
 }
+
+
+/**
+ * Lifecycle for a legacy classification value — the client-side mirror
+ * of core/finding_status.py::from_classification.
+ *
+ * Needed for optimistic UI: when an operator picks an action the panel
+ * previews the result before the server answers, and the only thing it
+ * has at that moment is the classification the action maps to.
+ */
+export function lifecycleOf(cls?: string | null): {
+  status: string;
+  resolution_reason: string | null;
+} {
+  switch ((cls || "").toLowerCase()) {
+    case "confirmed_true_positive":
+      return { status: "triaging", resolution_reason: null };
+    case "confirmed_false_positive":
+      return { status: "dismissed", resolution_reason: "false_positive" };
+    case "test_credential":
+      return { status: "dismissed", resolution_reason: "test_credential" };
+    case "accepted_risk":
+      return { status: "dismissed", resolution_reason: "acceptable_risk" };
+    case "rotated":
+    case "revoked":
+    case "resolved":
+      return { status: "resolved", resolution_reason: "rotated" };
+    case "resolved_file_deleted":
+    case "resolved_item_deleted":
+    case "resolved_repo_removed":
+    case "resolved_source_removed":
+      return { status: "dismissed", resolution_reason: "no_longer_present" };
+    default:
+      return { status: "open", resolution_reason: null };
+  }
+}
+
+/** A finding as it WOULD look under a pending classification change. */
+export function previewOf(obj: any, pendingCls?: string | null): any {
+  if (!pendingCls) return obj;
+  return { ...obj, ...lifecycleOf(pendingCls) };
+}
+
+
+/** Text colour for a lifecycle, for places without a pill. */
+export function statusTextTone(obj: any): string {
+  const t = statusTone(obj).dot;              // bg-xxx-400 / bg-xxx-500
+  return t.replace(/^bg-/, "text-");
+}
+
+/** Text colour for a bare legacy classification (decision history). */
+export function classificationTextTone(cls?: string | null): string {
+  return statusTextTone(lifecycleOf(cls));
+}
