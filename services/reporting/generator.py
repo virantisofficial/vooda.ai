@@ -27,6 +27,10 @@ async def generate_scan_metrics(
     Called after scan completion in the worker pipeline.
     """
     from apps.api.app.models.finding import NormalizedFinding, Classification
+    from apps.api.app.core.finding_state import (
+        FALSE_POSITIVE_VERDICTS,
+        TRUE_POSITIVE_VERDICTS,
+    )
     from apps.api.app.models.metrics import MetricSnapshot
 
     # Count by severity
@@ -41,9 +45,11 @@ async def generate_scan_metrics(
         severity_counts[sev] = cnt.scalar() or 0
 
     # Count by classification
+    # Every value, not a hand-picked six: the old list omitted rotated,
+    # test_credential and the four resolved_* states, so by_classification
+    # did not sum to total_findings in a customer-facing report.
     classification_counts = {}
-    for cls in ["likely_true_positive", "likely_false_positive", "needs_review",
-                "confirmed_true_positive", "confirmed_false_positive", "accepted_risk"]:
+    for cls in [c.value for c in Classification]:
         cnt = await db.execute(
             select(func.count(NormalizedFinding.id)).where(
                 NormalizedFinding.scan_job_id == scan_job_id,
@@ -71,9 +77,8 @@ async def generate_scan_metrics(
     total = total_result.scalar() or 0
 
     # FP rate
-    fp_count = (
-        classification_counts.get("likely_false_positive", 0) +
-        classification_counts.get("confirmed_false_positive", 0)
+    fp_count = sum(
+        classification_counts.get(c.value, 0) for c in FALSE_POSITIVE_VERDICTS
     )
     fp_rate = round(fp_count / max(total, 1), 4)
 
@@ -87,9 +92,8 @@ async def generate_scan_metrics(
         "top_categories": top_categories,
         "false_positive_rate": fp_rate,
         "false_positive_count": fp_count,
-        "true_positive_count": (
-            classification_counts.get("likely_true_positive", 0) +
-            classification_counts.get("confirmed_true_positive", 0)
+        "true_positive_count": sum(
+            classification_counts.get(c.value, 0) for c in TRUE_POSITIVE_VERDICTS
         ),
     }
 

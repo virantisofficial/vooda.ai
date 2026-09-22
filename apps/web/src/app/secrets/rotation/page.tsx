@@ -1,4 +1,5 @@
 "use client";
+import { validity } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -147,7 +148,7 @@ export default function RotationPage() {
             file_path: f.file_path,
             line_start: f.line_start,
             severity: f.severity,
-            validation_status: sm.validation_status || "unknown",
+            validation_status: validity(sm.validation_status),
             first_seen_active_at: sm.first_seen_active_at || null,
             first_seen_at: f.first_seen_at,
             verification_details: sm.verification_details || "",

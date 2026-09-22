@@ -777,15 +777,25 @@ async def test_login_failed_audit_for_unknown_email(client: AsyncClient):
     from sqlalchemy import select as sel
     from datetime import datetime, timezone, timedelta
 
-    bogus = f"qa-unknown-{datetime.now(timezone.utc).timestamp()}@example.invalid"
+    # example.com is RFC 2606 reserved and guaranteed not to resolve to a
+    # real mailbox. NOT .invalid: Pydantic's EmailStr rejects that TLD as
+    # special-use, so the request 422'd on schema validation and this test
+    # skipped every single run — never once exercising the audit path it
+    # was written to protect.
+    bogus = f"qa-unknown-{datetime.now(timezone.utc).timestamp()}@example.com"
     r = await client.post(
         "/api/v1/auth/login",
         json={"email": bogus, "password": "anything"},
     )
-    # Either 401 (normal) or 429 (if rate-limited from a prior test run).
-    # Either way, only check the audit row when we actually got the 401.
-    if r.status_code != 401:
-        pytest.skip(f"login returned {r.status_code} — rate-limited; can't test audit path")
+    # 429 is the one legitimate reason to skip: a prior test in the same
+    # run may have tripped the login rate limiter. Anything else is a
+    # real failure — a blanket skip is how this test hid a 422 for
+    # months while reporting itself as "rate-limited".
+    if r.status_code == 429:
+        pytest.skip("login rate-limited by a prior test; audit path not exercised")
+    assert r.status_code == 401, (
+        f"expected 401 for an unknown email, got {r.status_code}: {r.text[:200]}"
+    )
 
     async with async_session_factory() as s:
         row = (await s.execute(

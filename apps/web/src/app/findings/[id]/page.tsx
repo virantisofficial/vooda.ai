@@ -1,4 +1,5 @@
 "use client";
+import { validityOf } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -60,7 +61,7 @@ export default function FindingDetailPage() {
               {finding.classification.replace(/_/g, " ")}
             </span>
             {(finding as any).source_metadata?.secret_type && <span className="text-xs px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 capitalize">{(finding as any).source_metadata.secret_type.replace(/_/g, " ")}</span>}
-            {(finding as any).source_metadata?.validation_status && <span className={`text-xs px-2.5 py-1 rounded-full border ${(finding as any).source_metadata.validation_status === "active" ? "bg-red-500/10 border-red-500/20 text-red-400" : (finding as any).source_metadata.validation_status === "inactive" ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-slate-500/10 border-slate-500/20 text-slate-400"}`}>{(finding as any).source_metadata.validation_status}</span>}
+            {validityOf(finding) !== "unknown" && <span className={`text-xs px-2.5 py-1 rounded-full border ${(finding as any).source_metadata.validation_status === "active" ? "bg-red-500/10 border-red-500/20 text-red-400" : (finding as any).source_metadata.validation_status === "inactive" ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-slate-500/10 border-slate-500/20 text-slate-400"}`}>{(finding as any).source_metadata.validation_status}</span>}
             {finding.cwe && !((finding as any).source_metadata?.secret_type) && <span className="text-xs px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.06] text-slate-400">{finding.cwe}</span>}
             <span className={`text-xs px-2.5 py-1 rounded-full border ${getScannerColor(finding.scanner_name)}`}>{brandScannerName(finding.scanner_name)}</span>
           </div>

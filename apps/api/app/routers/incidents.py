@@ -36,11 +36,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.app.core.database import get_db
 from apps.api.app.core.access_control import get_accessible_repo_ids
 from apps.api.app.core.classification_provenance import (
+    mirror_lifecycle,
     MECHANISM_BULK_TRIAGE,
     MECHANISM_HUMAN_TRIAGE,
 )
 from apps.api.app.core.occurrences import UNDECIDED, propagate_to_occurrences
 from apps.api.app.models.finding import Classification, NormalizedFinding, SecretIncident
+from apps.api.app.core.validity import normalize as _validity
 from apps.api.app.models.user import User
 from apps.api.app.routers.auth import get_current_user
 
@@ -700,14 +702,14 @@ async def verify_incident_credential(
 
     for occ in all_occ_q.scalars().all():
         merged = dict(occ.source_metadata or occ.raw_data or {})
-        merged["validation_status"] = verification.status
+        merged["validation_status"] = _validity(verification.status).value
         merged["verification_details"] = verification.details
         merged["verification_permissions"] = verification.permissions
         if blast_radius_dict is not None:
             merged["blast_radius"] = blast_radius_dict
         occ.source_metadata = merged
 
-    incident.validation_status = verification.status
+    incident.validation_status = _validity(verification.status).value
     incident.last_validated_at = datetime.utcnow()
 
     await log_audit(
@@ -903,6 +905,7 @@ async def patch_incident(
 
     if patch.classification is not None:
         incident.classification = patch.classification
+        mirror_lifecycle(incident, patch.classification, actor=user)
         _occ_class = _as_finding_classification(patch.classification)
     if patch.review_status is not None:
         incident.review_status = patch.review_status
@@ -925,7 +928,7 @@ async def patch_incident(
             now=datetime.utcnow(),
         )
     if patch.validation_status is not None:
-        incident.validation_status = patch.validation_status
+        incident.validation_status = _validity(patch.validation_status).value
     if patch.assigned_to is not None:
         incident.assigned_to = patch.assigned_to
     if patch.tags is not None:
@@ -1487,6 +1490,7 @@ async def bulk_triage_incidents(
         prev_rotation_status = incident.rotation_status
 
         incident.classification = new_classification
+        mirror_lifecycle(incident, new_classification, actor=user)
         incident.review_status = new_review_status
         if new_rotation_status is not None:
             incident.rotation_status = new_rotation_status

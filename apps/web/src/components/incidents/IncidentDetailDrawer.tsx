@@ -1,4 +1,6 @@
 "use client";
+import { validityOf } from "@/lib/validity";
+import { classificationLabel } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -617,15 +619,7 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
     effectiveCls === "accepted_risk" ? "bg-orange-400" :
     "bg-yellow-400";
   const triggerLabel =
-    effectiveCls === "needs_review" ? "Needs Review"
-    : effectiveCls === "likely_true_positive" ? "True Positive"
-    : effectiveCls === "confirmed_true_positive" ? "True Positive"
-    : effectiveCls === "likely_false_positive" ? "False Positive"
-    : effectiveCls === "confirmed_false_positive" ? "False Positive"
-    : (effectiveCls === "rotated" || effectiveCls === "revoked" || effectiveCls === "resolved") ? "Rotated / Revoked"
-    : effectiveCls === "test_credential" ? "Test Credential"
-    : effectiveCls === "accepted_risk" ? "Accepted Risk"
-    : effectiveCls?.replace(/_/g, " ");
+    classificationLabel(effectiveCls);
 
   const pendingHint = pendingAction
     ? "border-amber-500/60 ring-1 ring-amber-500/30 [border-style:dashed]"
@@ -920,7 +914,7 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                 const iconColor = providerColors[providerKey] || "bg-slate-600";
                 const iconLetter = (data.secret_type || data.title || "?")[0]?.toUpperCase() || "?";
 
-                const valStatus = data.validation_status || "not_validated";
+                const valStatus = validityOf(data);
                 const valStyles: Record<string, string> = {
                   active: "bg-red-500/15 text-red-400",
                   inactive: "bg-green-500/15 text-green-400",
@@ -1141,7 +1135,7 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                   credentials itself. */}
               {activeTab === "next_steps" && (() => {
                 const cls = (data.classification || "").toLowerCase();
-                const validation = (data.validation_status || "").toLowerCase();
+                const validation = validityOf(data);
                 const secretType = (data.secret_type || "").toLowerCase();
                 // Incidents carry no provider field; secret types are
                 // prefixed with it (aws_access_key, github_pat, …).
@@ -1151,13 +1145,15 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                 const status: { tone: Tone; text: string; showSteps: boolean } =
                   rotated
                     ? { tone: "green", text: `✓ Rotated ${fmtAge(data.rotated_at)}. All ${data.occurrence_count} occurrence(s) are covered by this rotation event.`, showSteps: false }
-                  : ["likely_false_positive", "confirmed_false_positive", "test_credential"].includes(cls)
+                  : cls === "likely_false_positive"
+                    ? { tone: "slate", text: "AI assessed this as unlikely to be a real secret. Nobody has reviewed it yet — confirm or dismiss it to close it.", showSteps: false }
+                  : ["confirmed_false_positive", "test_credential"].includes(cls)
                     ? { tone: "slate", text: `No action needed — classified as ${cls.replace(/_/g, " ")}.`, showSteps: false }
                   : cls === "accepted_risk"
                     ? { tone: "slate", text: "Risk accepted — no rotation is planned for this credential.", showSteps: false }
                   : validation === "active"
                     ? { tone: "red", text: "Verified live — anyone who can see it can use it. Revoke it at the provider now, then mark it rotated below.", showSteps: true }
-                  : validation === "inactive" || validation === "revoked"
+                  : validation === "inactive"
                     ? { tone: "green", text: "The provider no longer accepts this credential. Confirm it was revoked on purpose, then mark it rotated below.", showSteps: false }
                   : { tone: "amber", text: "Not verified live. Treat it as exposed, rotate it as a precaution, then mark it rotated below.", showSteps: true };
                 const toneCls: Record<Tone, string> = {

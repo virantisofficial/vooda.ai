@@ -1,4 +1,5 @@
 "use client";
+import { isOpen } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -346,9 +347,9 @@ export default function DashboardPage() {
       getMTTRMetrics().then(r => setMttrData(r.data)),
       getRotationSummary(daysParam ?? 30).then(r => setRotSummary(r.data)),
       getFindings({ page_size: "100", sort_by: "created_at", sort_dir: "asc" } as Record<string, string>).then(r => {
-        const SETTLED = ["likely_false_positive", "confirmed_false_positive", "test_credential", "accepted_risk", "rotated", "revoked"];
-        const oldest = (r.data?.items || []).find((x: any) =>
-          !(SETTLED.includes((x.classification || "").toLowerCase()) || (x.classification || "").toLowerCase().startsWith("resolved")));
+        // "Oldest open finding" must agree with the backend's open
+        // predicate; it used to count an unreviewed AI guess as settled.
+        const oldest = (r.data?.items || []).find((x: any) => isOpen(x.classification));
         setOldestOpenHours(oldest?.created_at ? (Date.now() - new Date(oldest.created_at).getTime()) / 3.6e6 : null);
       }),
       getTrendData(trendDays).then(r => setTrendData(r.data)),
@@ -494,14 +495,18 @@ export default function DashboardPage() {
 
   // ── Row 5: Verifier Breakdown ────────────────────────────────────
   // Map raw validation_status counts → ordered display segments.  We
-  // fix the order (Live → Inactive → Awaiting → Not Validated) so the
-  // donut reads as a "stages of verification" arc rather than random.
+  // fix the order (Live → Dead → Not checked → No checker → Failed) so
+  // the donut reads as a "stages of verification" arc rather than random.
+  // Keys are the canonical Validity vocabulary (see lib/validity.ts);
+  // the old "pending"/"not_validated" buckets could never match a value
+  // the backend produces, so two segments always rendered zero.
   const byValidation = (verifierData?.by_validation as Record<string, number>) || {};
   const verifierSegments = [
     { key: "active",        label: "Live (Verified)",        count: byValidation["active"] || 0,        color: "#ef4444" },
     { key: "inactive",      label: "Verified Inactive",      count: byValidation["inactive"] || 0,      color: "#22c55e" },
-    { key: "pending",       label: "Awaiting Verification",  count: byValidation["pending"] || 0,       color: "#fbbf24" },
-    { key: "not_validated", label: "Not Validated",          count: byValidation["not_validated"] || 0, color: "#64748b" },
+    { key: "unknown",       label: "Not Checked",            count: byValidation["unknown"] || 0,       color: "#64748b" },
+    { key: "unsupported",   label: "No Checker",             count: byValidation["unsupported"] || 0,   color: "#94a3b8" },
+    { key: "check_failed",  label: "Check Failed",           count: byValidation["check_failed"] || 0,  color: "#fbbf24" },
   ];
   const verifierTotal = verifierSegments.reduce((acc, s) => acc + s.count, 0);
   // Per-provider top-3 list for the right-side sub-list — uses the

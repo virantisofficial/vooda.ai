@@ -12,26 +12,18 @@ from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
 from apps.api.app.models.user import User
 from apps.api.app.models.finding import NormalizedFinding, Severity, Classification
+from apps.api.app.core.finding_state import (
+    AI_LOW_RISK,
+    CONFIRMED,
+    FALSE_POSITIVE_VERDICTS,
+    REMEDIATED,
+    TRUE_POSITIVE_VERDICTS,
+    is_open,
+)
 from apps.api.app.models.scan import ScanJob
 
 router = APIRouter()
 
-
-# Classifications that mean "settled — no longer live risk". Everything
-# NOT in this set counts as open, so a newly added classification is
-# treated as open work until someone decides otherwise; the failure mode
-# of a wrong guess here is over-reporting, never a false all-clear.
-_CLOSED_CLASSIFICATIONS = (
-    Classification.LIKELY_FALSE_POSITIVE,
-    Classification.CONFIRMED_FALSE_POSITIVE,
-    Classification.TEST_CREDENTIAL,
-    Classification.ROTATED,
-    Classification.ACCEPTED_RISK,
-    Classification.RESOLVED_FILE_DELETED,
-    Classification.RESOLVED_ITEM_DELETED,
-    Classification.RESOLVED_REPO_REMOVED,
-    Classification.RESOLVED_SOURCE_REMOVED,
-)
 
 
 async def _build_finding_filters(db, user, include_archived_sources: bool = False, open_only: bool = False):
@@ -99,9 +91,7 @@ async def _build_finding_filters(db, user, include_archived_sources: bool = Fals
         )
 
     if open_only:
-        conditions.append(
-            ~NormalizedFinding.classification.in_(_CLOSED_CLASSIFICATIONS)
-        )
+        conditions.append(is_open(NormalizedFinding))
         conditions.append(
             or_(
                 NormalizedFinding.is_suppressed.is_(None),
@@ -209,17 +199,30 @@ async def metrics_overview(
     active_secrets = await db.execute(
         select(func.count(NormalizedFinding.id)).where(
             *conditions,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     inactive_secrets = await db.execute(
         select(func.count(NormalizedFinding.id)).where(
             *conditions,
-            literal_column("source_metadata->>'validation_status'") == "inactive",
+            NormalizedFinding.validation_status == "inactive",
+        )
+    )
+
+    # Open findings the model judged not to be a real exposure. They
+    # are open — nobody decided — but they are not what a responder
+    # should look at first, so the UI collapses them. Reported as its
+    # own number rather than folded into the headline, because an AI
+    # verdict must never be presented as a resolution.
+    _ai_low_risk_q = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(
+            *conditions,
+            NormalizedFinding.classification.in_(AI_LOW_RISK),
         )
     )
 
     _open = total.scalar() or 0
+    _ai_low_risk = _ai_low_risk_q.scalar() or 0
     _detected = detected_total.scalar() or 0
     response = {
         # OPEN findings — the headline, and the denominator every other
@@ -230,6 +233,10 @@ async def metrics_overview(
         # that settled findings are outstanding work.
         "detected_total": _detected,
         "filtered_as_noise": max(_detected - _open, 0),
+        # Split of the headline: what a responder should triage now,
+        # versus what the model assessed as low risk pending review.
+        "open_ai_low_risk": _ai_low_risk,
+        "open_needs_attention": max(_open - _ai_low_risk, 0),
         "needs_review_open": _needs_review_q.scalar() or 0,
         "total_scans": total_scans.scalar() or 0,
         "by_severity": {str(s): c for s, c in by_severity.all()},
@@ -267,7 +274,7 @@ async def metrics_overview(
         prev_active = await db.execute(
             select(func.count(NormalizedFinding.id)).where(
                 *prev_conditions,
-                literal_column("source_metadata->>'validation_status'") == "active",
+                NormalizedFinding.validation_status == "active",
             )
         )
         response["previous_period"] = {
@@ -531,10 +538,9 @@ async def findings_metrics(
         .where(*conditions)
         .group_by(NormalizedFinding.scanner_name)
     )
-    fp_conditions = list(conditions) + [NormalizedFinding.classification.in_([
-        Classification.LIKELY_FALSE_POSITIVE,
-        Classification.CONFIRMED_FALSE_POSITIVE,
-    ])]
+    fp_conditions = list(conditions) + [
+        NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS)
+    ]
     fp_rate = await db.execute(
         select(func.count(NormalizedFinding.id)).where(*fp_conditions)
     )
@@ -794,7 +800,7 @@ async def ai_accuracy_metrics(
             NormalizedFinding.ai_confidence.isnot(None),
             NormalizedFinding.ai_confidence < 0.5,
             NormalizedFinding.review_status == "unreviewed",
-            NormalizedFinding.classification.notin_(["confirmed_false_positive", "confirmed_true_positive"]),
+            NormalizedFinding.classification.notin_(CONFIRMED),
         ).order_by(NormalizedFinding.severity, NormalizedFinding.ai_confidence).limit(100)
     )
     low_conf_findings = low_conf_q.scalars().all()
@@ -828,7 +834,7 @@ async def ai_accuracy_metrics(
             *conditions,
             NormalizedFinding.ai_confidence >= 0.9,
             NormalizedFinding.review_status == "unreviewed",
-            NormalizedFinding.classification.in_(["likely_false_positive"]),
+            NormalizedFinding.classification.in_(AI_LOW_RISK),
         )
     )
     high_conf_fp_count = high_conf_unreviewed_q.scalar() or 0
@@ -838,7 +844,7 @@ async def ai_accuracy_metrics(
         select(NormalizedFinding).join(FindingDecision, FindingDecision.finding_id == NormalizedFinding.id)
         .where(
             *base_join_conds,
-            NormalizedFinding.classification.in_(["likely_false_positive", "confirmed_false_positive"]),
+            NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS),
             FindingDecision.action == "mark_tp",
         ).limit(20)
     )
@@ -846,7 +852,7 @@ async def ai_accuracy_metrics(
         select(NormalizedFinding).join(FindingDecision, FindingDecision.finding_id == NormalizedFinding.id)
         .where(
             *base_join_conds,
-            NormalizedFinding.classification.in_(["likely_true_positive", "confirmed_true_positive"]),
+            NormalizedFinding.classification.in_(TRUE_POSITIVE_VERDICTS),
             FindingDecision.action == "mark_fp",
         ).limit(20)
     )
@@ -916,11 +922,7 @@ async def mttr_metrics(
     resolved_conds = list(conditions) + [
         _or(
             NormalizedFinding.remediation_status == "applied",
-            NormalizedFinding.classification.in_([
-                Classification.ROTATED,
-                Classification.RESOLVED_FILE_DELETED,
-                Classification.RESOLVED_ITEM_DELETED,
-            ]),
+            NormalizedFinding.classification.in_(REMEDIATED),
         ),
     ]
 
@@ -962,7 +964,7 @@ async def findings_breakdown(
 
     # Use literal_column for JSONB text extraction to avoid GROUP BY issues
     provider_col = literal_column("source_metadata->>'provider'")
-    validation_col = literal_column("source_metadata->>'validation_status'")
+    validation_col = NormalizedFinding.validation_status
     method_col = literal_column("source_metadata->>'detection_method'")
 
     # By provider
@@ -1019,7 +1021,9 @@ async def scanner_comparison(
     )
 
     # FP per scanner
-    fp_conditions = list(conditions) + [NormalizedFinding.classification.in_(["likely_false_positive", "confirmed_false_positive"])]
+    fp_conditions = list(conditions) + [
+        NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS)
+    ]
     fp_by_scanner = await db.execute(
         select(NormalizedFinding.scanner_name, func.count(NormalizedFinding.id))
         .where(*fp_conditions)

@@ -1,4 +1,5 @@
 "use client";
+import { validityOf } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -339,7 +340,7 @@ export default function IncidentDetailPage() {
 
   const severity = (data?.severity_max || "info").toLowerCase();
   const rotated = (data?.rotation_status || "").toLowerCase() === "rotated";
-  const valStatus = data?.validation_status || "not_validated";
+  const valStatus = validityOf(data);
   const valStyles: Record<string, string> = {
     active: "bg-red-500/15 text-red-400",
     inactive: "bg-green-500/15 text-green-400",

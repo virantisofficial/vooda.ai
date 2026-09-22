@@ -20,6 +20,12 @@ from apps.worker.celery_app import (
     SCAN_TASK_SOFT_TIME_LIMIT,
 )
 from apps.api.app.core.config import settings
+from apps.api.app.core.validity import normalize as _validity
+from apps.api.app.core.classification_provenance import mirror_lifecycle
+from apps.api.app.core.finding_state import (
+    ANY_VERDICT,
+    FALSE_POSITIVE_VERDICTS,
+)
 
 logger = structlog.get_logger()
 
@@ -158,7 +164,7 @@ async def _upsert_secret_incident(
         occurrence_count=1,
         classification="needs_review",
         review_status="unreviewed",
-        validation_status=raw.get("validation_status"),
+        validation_status=_validity(raw.get("validation_status")).value,
         first_seen_at=now_ts,
         last_seen_at=now_ts,
         version=1,
@@ -418,6 +424,9 @@ async def _store_imported_findings(
             updated += 1
         else:
             finding = NormalizedFinding(
+                # Canonical validity on the column too, not only in the
+                # JSONB blob — the column is NOT NULL and CHECK-constrained.
+                validation_status=_validity(it.get("validation_status")).value,
                 scan_job_id=job.id,
                 repository_id=repo.id,
                 tenant_id=tenant_id,
@@ -1338,8 +1347,21 @@ async def _run_ai_triage_retro(scan_job_id: str):
         # persisted phase timeline) stay in sync — a real phase emit, not a
         # silent DB status flip the drawer never sees.
         job.status = ScanStatus.ANALYZING
+        _retro_started = datetime.now(timezone.utc)
         try:
-            job.heartbeat_at = datetime.now(timezone.utc)
+            job.heartbeat_at = _retro_started
+        except Exception:
+            pass
+        # Mark when THIS run began. The stale-scan watchdog's absolute
+        # backstop reaps any non-terminal job whose row is older than the
+        # maximum scan age, heartbeat or not — and re-running triage
+        # reuses the ORIGINAL job row. A scan from two days ago therefore
+        # flipped to ANALYZING and was killed on the watchdog's next pass,
+        # about a minute later, while actively heartbeating: retrying
+        # triage on any scan older than 4h could never finish, and the
+        # findings stayed at "needs review" with no explanation.
+        try:
+            job.stats = {**(job.stats or {}), "run_started_at": _retro_started.isoformat()}
         except Exception:
             pass
         await _emit_retro_phase(db, job, scan_job_id, "analyzing", 62,
@@ -1350,7 +1372,7 @@ async def _run_ai_triage_retro(scan_job_id: str):
             triaged, dedup_saved, failure_summary = await _run_ai_triage(db, job, repo_path)
             fp_after = (await db.execute(select(sa_func.count(NormalizedFinding.id)).where(
                 NormalizedFinding.scan_job_id == job.id,
-                NormalizedFinding.classification.in_([Cls.LIKELY_FALSE_POSITIVE, Cls.CONFIRMED_FALSE_POSITIVE]),
+                NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS),
             ))).scalar() or 0
             tp_after = (await db.execute(select(sa_func.count(NormalizedFinding.id)).where(
                 NormalizedFinding.scan_job_id == job.id,
@@ -1719,7 +1741,7 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
                 return False
             if not result or result.status not in ("active", "inactive"):
                 return False
-            rd["validation_status"] = result.status
+            rd["validation_status"] = _validity(result.status).value
             rd["verification_details"] = result.details
             rd["verification_permissions"] = getattr(result, "permissions", None)
             rd["verification_source"] = "live"
@@ -1985,6 +2007,9 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
                     # and behave as before).
                     incident_uuid = await _upsert_incident_for(secret_hash_val, pf, now)
                     finding = NormalizedFinding(
+                        # Canonical validity on the column too, not only in the
+                        # JSONB blob — the column is NOT NULL and CHECK-constrained.
+                        validation_status=_validity(raw_data_persisted.get("validation_status")).value,
                         scan_job_id=job.id,
                         # repository_id inherited from the job (set at
                         # dispatch time from source.target_repository_id)
@@ -2600,6 +2625,9 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
                 # the FK ready and don't need a follow-up UPDATE.
                 incident_uuid = await _upsert_incident_for_webhook(secret_hash, pf, now) if secret_hash else None
                 finding = NormalizedFinding(
+                    # Canonical validity on the column too, not only in the
+                    # JSONB blob — the column is NOT NULL and CHECK-constrained.
+                    validation_status=_validity((pf.raw_data or {}).get("validation_status")).value,
                     scan_job_id=scan_job.id,
                     repository_id=repo.id,
                     tenant_id=repo.tenant_id,
@@ -2975,7 +3003,7 @@ async def _verify_batch(verifiable, tenant_id, *, concurrency=8, abs_budget_s=12
                 return "error"
             if not (result and result.status in ("active", "inactive")):
                 return "skipped"
-            rd["validation_status"] = result.status
+            rd["validation_status"] = _validity(result.status).value
             rd["verification_details"] = result.details
             rd["verification_permissions"] = result.permissions
             if result.status != "active":
@@ -4791,6 +4819,9 @@ async def _run_scan_job(scan_job_id: str):
                     if _supp_inactive:
                         suppressed_inactive_count += 1
                     finding = NormalizedFinding(
+                        # Canonical validity on the column too, not only in the
+                        # JSONB blob — the column is NOT NULL and CHECK-constrained.
+                        validation_status=_validity((pf.raw_data or {}).get("validation_status")).value,
                         scan_job_id=job.id,
                         repository_id=repo.id,
                         tenant_id=job.tenant_id,
@@ -5431,6 +5462,7 @@ async def _run_scan_job(scan_job_id: str):
                                     else Classification.LIKELY_TRUE_POSITIVE
                                 )
                                 f.classification = _cached_class
+                                mirror_lifecycle(f, _cached_class)
                             else:
                                 set_classification(
                                     f, _cached_class,
@@ -5527,7 +5559,7 @@ async def _run_scan_job(scan_job_id: str):
                     fp_after_triage = await db.execute(
                         select(sa_func.count(NormalizedFinding.id)).where(
                             NormalizedFinding.scan_job_id == job.id,
-                            NormalizedFinding.classification.in_([Cls.LIKELY_FALSE_POSITIVE, Cls.CONFIRMED_FALSE_POSITIVE]),
+                            NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS),
                         )
                     )
                     tp_after_triage = await db.execute(
@@ -5601,43 +5633,44 @@ async def _run_scan_job(scan_job_id: str):
                 job.progress_pct = 75
                 await db.commit()
 
-            # ── Step 5c: Secret Validation (verify if detected secrets are active) ──
+            # ── Step 5c: stamp validity on findings that have none ──
+            # This does NOT verify anything. The raw secret value is
+            # deliberately never persisted, so a scan cannot check a
+            # credential against its provider afterwards — verification
+            # is an explicit, user-triggered action that runs through
+            # services.secret_verification (egress-guarded, rate-limited,
+            # tenant-scoped).
+            #
+            # Until 2026-09-22 this block also constructed a second,
+            # parallel SecretValidationEngine and then never called it.
+            # That package has been deleted: it was unreachable, carried
+            # its own competing status vocabulary, and its validators
+            # called httpx directly, bypassing the egress guard that the
+            # real verifier enforces.
             try:
-                from services.secret_validation.engine import SecretValidationEngine, ValidationStatus
-                validation_engine = SecretValidationEngine()
-
-                tp_findings = await db.execute(
+                unstamped = await db.execute(
                     select(NormalizedFinding).where(
                         NormalizedFinding.scan_job_id == job.id,
-                        NormalizedFinding.classification.notin_(["likely_false_positive", "confirmed_false_positive"]),
+                        NormalizedFinding.classification.notin_(FALSE_POSITIVE_VERDICTS),
                         NormalizedFinding.is_suppressed == False,
                     )
                 )
-                tp_list = tp_findings.scalars().all()
-
-                validated_count = 0
-                for finding in tp_list:
+                stamped = 0
+                for finding in unstamped.scalars().all():
                     sm = finding.source_metadata or {}
-                    secret_type = sm.get("secret_type")
-                    if not secret_type:
+                    if not sm.get("secret_type") or sm.get("validation_status"):
                         continue
+                    sm["validation_status"] = _validity(None).value
+                    sm["validated_at"] = None
+                    finding.source_metadata = {**sm}
+                    stamped += 1
 
-                    # We don't have the raw secret value in DB (by design — security).
-                    # Validation runs on findings that the scanner just found,
-                    # using the secret_hash for dedup. In a production setup,
-                    # validation would run in the scanner process before DB storage.
-                    # For now, mark as NOT_VALIDATED and let users trigger validation
-                    # manually via the API for specific findings.
-                    if not sm.get("validation_status"):
-                        sm["validation_status"] = ValidationStatus.NOT_VALIDATED.value
-                        sm["validated_at"] = None
-                        finding.source_metadata = {**sm}
-                        validated_count += 1
-
-                if validated_count > 0:
+                if stamped > 0:
                     await db.commit()
-                    logger.info("secret_validation_status_set", scan_job_id=scan_job_id, count=validated_count)
-
+                    logger.info(
+                        "secret_validation_status_set",
+                        scan_job_id=scan_job_id, count=stamped,
+                    )
             except Exception as ve:
                 logger.warning("secret_validation_step_failed", error=str(ve)[:200])
 
@@ -5656,7 +5689,7 @@ async def _run_scan_job(scan_job_id: str):
             fp_count_result = await db.execute(
                 select(sa_func.count(NormalizedFinding.id)).where(
                     NormalizedFinding.scan_job_id == job.id,
-                    NormalizedFinding.classification.in_(["likely_false_positive", "confirmed_false_positive"]),
+                    NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS),
                 )
             )
             # Count of findings that carry an AI verdict (FP OR TP) — INCLUDING the
@@ -5670,10 +5703,7 @@ async def _run_scan_job(scan_job_id: str):
             ai_classified_result = await db.execute(
                 select(sa_func.count(NormalizedFinding.id)).where(
                     NormalizedFinding.scan_job_id == job.id,
-                    NormalizedFinding.classification.in_([
-                        "likely_false_positive", "confirmed_false_positive",
-                        "likely_true_positive", "confirmed_true_positive",
-                    ]),
+                    NormalizedFinding.classification.in_(ANY_VERDICT),
                 )
             )
 
@@ -7142,9 +7172,11 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
             and float(_ai_conf) < _conf_threshold
         ):
             finding.classification = Classification.NEEDS_REVIEW
+            mirror_lifecycle(finding, Classification.NEEDS_REVIEW)
             below_threshold_count += 1
         else:
             finding.classification = _proposed
+            mirror_lifecycle(finding, _proposed)
         finding.ai_confidence = _ai_conf
         finding.ai_explanation = result.get("reasoning_summary")
         finding.exploitability_score = result.get("exploitability_score")
@@ -7181,6 +7213,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 # subsequent scans.
                 if (inc_row.classification or "needs_review") == "needs_review":
                     inc_row.classification = ai_class_value
+                    mirror_lifecycle(inc_row, ai_class_value)
                 # AI explanation + confidence always refresh — they're
                 # informational, not authoritative, and the freshest
                 # reasoning is the most useful one to display.
@@ -7751,14 +7784,24 @@ async def _cleanup_stale_running_scans() -> dict:
         # card flips to "Last scan failed" without waiting for the
         # next manual scan).
         from sqlalchemy import select as sa_select, or_ as sa_or, func as sa_func
+        from sqlalchemy import cast as sa_cast
+        from sqlalchemy.types import TIMESTAMP as sa_TIMESTAMP
         candidates = (await db.execute(
             sa_select(ScanJob).where(
                 ScanJob.status.in_(non_terminal),
                 sa_or(
                     # 1. stalled — no progress (heartbeat) for stall_seconds
                     sa_func.coalesce(ScanJob.heartbeat_at, ScanJob.created_at) < stall_cutoff,
-                    # 2. absolute backstop — older than absolute_seconds
-                    ScanJob.created_at < absolute_cutoff,
+                    # 2. absolute backstop — older than absolute_seconds.
+                    #    Measured from the CURRENT run: a job that was
+                    #    handed back to a worker (retry of AI triage on an
+                    #    older scan) records `stats.run_started_at`, and
+                    #    that run gets the full budget rather than
+                    #    inheriting the age of the original scan.
+                    sa_func.coalesce(
+                        sa_cast(ScanJob.stats["run_started_at"].astext, sa_TIMESTAMP(timezone=True)),
+                        ScanJob.created_at,
+                    ) < absolute_cutoff,
                 ),
             ).limit(500)  # Bound the per-pass batch — anything bigger
                           # than 500 zombies in one tick is a sign of
@@ -8366,7 +8409,7 @@ async def _verify_scan_findings(scan_job_id: str, tenant_id: str):
                         prev_verified_at = sm.get("verified_at", "")
 
                         updated_sm = dict(sm)
-                        updated_sm["validation_status"] = cached["status"]
+                        updated_sm["validation_status"] = _validity(cached["status"]).value
                         updated_sm["verification_details"] = cached.get("details", "")
                         updated_sm["verification_permissions"] = cached.get("permissions")
                         updated_sm["verified_at"] = cached.get("verified_at", "")
@@ -8485,7 +8528,7 @@ async def _verify_scan_findings(scan_job_id: str, tenant_id: str):
                     prev_verified_at = sm.get("verified_at", "")
 
                     updated_sm = dict(sm)
-                    updated_sm["validation_status"] = verification.status
+                    updated_sm["validation_status"] = _validity(verification.status).value
                     updated_sm["verification_details"] = verification.details
                     updated_sm["verification_permissions"] = verification.permissions
                     updated_sm["verified_at"] = verified_at_iso
@@ -8771,7 +8814,7 @@ async def _reverify_incident(
             return
 
         previous_status = incident.validation_status
-        incident.validation_status = verification.status
+        incident.validation_status = _validity(verification.status).value
         incident.last_validated_at = _dt.utcnow()
 
         # Propagate the verifier's verdict into each occurrence's
@@ -8784,7 +8827,7 @@ async def _reverify_incident(
         )
         for o in all_occ_q.scalars().all():
             o_sm = dict(o.source_metadata or {})
-            o_sm["validation_status"] = verification.status
+            o_sm["validation_status"] = _validity(verification.status).value
             o_sm["validation_details"] = verification.details
             o_sm["validation_provider"] = verification.provider
             o_sm["last_validated_at"] = _dt.utcnow().isoformat()

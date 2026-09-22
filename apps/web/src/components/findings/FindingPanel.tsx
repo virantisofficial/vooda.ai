@@ -1,4 +1,6 @@
 "use client";
+import { validityOf } from "@/lib/validity";
+import { classificationLabel } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -393,7 +395,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     is_placeholder: sm.is_placeholder === true,
                     is_test_file: sm.file_context === "test_file",
                     is_git_history: sm.detection_engine === "secret_scan_history",
-                    validation_status: sm.validation_status,
+                    validation_status: validityOf(finding),
                   }}
                   classification={finding.classification}
                   aiConfidence={finding.ai_confidence ?? null}
@@ -429,7 +431,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
           {activeSection === "overview" && (() => {
             const sm = (finding as any).source_metadata || {};
             const conf = finding.ai_confidence ?? finding.confidence ?? 0;
-            const valStatus = sm.validation_status || "not_validated";
+            const valStatus = validityOf(finding);
             const valStyles: Record<string, string> = { active: "bg-red-500/15 text-red-400", inactive: "bg-green-500/15 text-green-400", revoked: "bg-green-500/15 text-green-400", unknown: "bg-slate-500/15 text-slate-400", not_validated: "bg-slate-500/10 text-slate-500" };
             const valLabels: Record<string, string> = { active: "Active (Exposed!)", inactive: "Inactive", revoked: "Revoked", unknown: "Unknown", not_validated: "Not Validated" };
             const providerColors: Record<string, string> = { aws: "bg-orange-500", gcp: "bg-blue-500", azure: "bg-blue-600", github: "bg-slate-600", gitlab: "bg-orange-500", stripe: "bg-purple-500", slack: "bg-purple-600", unknown: "bg-slate-600" };
@@ -541,7 +543,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                   verification_risk_level, blast_radius_summary) and falls
                   back to the legacy string fields for verifiers that haven't
                   been upgraded yet. */}
-              {sm.validation_status === "active" && (() => {
+              {validityOf(finding) === "active" && (() => {
                 const detail = sm.verification_permissions_detail || {};
                 const riskLevel: string =
                   sm.verification_risk_level || detail.risk_level || "";
@@ -973,7 +975,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
             const provider = (sm.provider || "").toLowerCase();
             const secretType = (sm.secret_type || rd.secret_type || "").toLowerCase();
             const fixHint: string = rd.fix_hint || "";
-            const validation = (sm.validation_status || "").toLowerCase();
+            const validation = validityOf(finding);
             const cls = (finding.classification || "").toLowerCase();
             const consoleLink = providerConsole(provider, secretType);
             const inRepo = !!finding.repository_id && !(finding as any).scan_source_id;
@@ -992,13 +994,15 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
             const status: { tone: Tone; text: string; showSteps: boolean } =
               ["rotated", "revoked", "resolved"].includes(cls)
                 ? { tone: "green", text: "Resolved — this credential was marked rotated / revoked.", showSteps: false }
-              : ["likely_false_positive", "confirmed_false_positive", "test_credential"].includes(cls)
+              : cls === "likely_false_positive"
+                ? { tone: "slate", text: "AI assessed this as unlikely to be a real secret. Nobody has reviewed it yet — confirm or dismiss it to close it.", showSteps: false }
+              : ["confirmed_false_positive", "test_credential"].includes(cls)
                 ? { tone: "slate", text: `No action needed — classified as ${cls.replace(/_/g, " ")}.`, showSteps: false }
               : cls === "accepted_risk"
                 ? { tone: "slate", text: "Risk accepted — no rotation is planned for this credential.", showSteps: false }
               : validation === "active"
                 ? { tone: "red", text: `${removedNote}Verified live — anyone who can see this ${inRepo ? "code" : "content"} can use it. Revoke it at the provider now.`, showSteps: true }
-              : validation === "inactive" || validation === "revoked"
+              : validation === "inactive"
                 ? { tone: "green", text: "The provider no longer accepts this credential. Confirm it was revoked on purpose, then mark it Rotated / Revoked.", showSteps: false }
               : { tone: "amber", text: `${removedNote}Not verified live. Treat it as exposed and rotate it as a precaution.`, showSteps: true };
             const toneCls: Record<Tone, string> = {
@@ -1144,15 +1148,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                   cls === "accepted_risk" ? "bg-orange-400" :
                   "bg-yellow-400";
                 const label =
-                  cls === "needs_review" ? "Needs Review"
-                  : cls === "likely_true_positive" ? "True Positive"
-                  : cls === "confirmed_true_positive" ? "True Positive"
-                  : cls === "likely_false_positive" ? "False Positive"
-                  : cls === "confirmed_false_positive" ? "False Positive"
-                  : cls === "rotated" || cls === "revoked" || cls === "resolved" ? "Rotated / Revoked"
-                  : cls === "test_credential" ? "Test Credential"
-                  : cls === "accepted_risk" ? "Accepted Risk"
-                  : cls?.replace(/_/g, " ");
+                  classificationLabel(cls);
 
                 // When pending, override with a dashed border + amber
                 // ring so the unsaved state is visually distinct.

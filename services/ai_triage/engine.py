@@ -23,6 +23,7 @@ from typing import Optional
 
 from services.ai_triage.provider import AIProvider, AIResponse
 from packages.prompts.triage import TRIAGE_SYSTEM_PROMPT, TRIAGE_PROMPT_V1, TRIAGE_PROMPT_VERSION
+from apps.api.app.core.validity import normalize as _validity
 
 logger = structlog.get_logger()
 
@@ -163,7 +164,7 @@ class TriageEngine:
             # call rather than silently auto-suppressing revoked-leak
             # signal that security teams explicitly want to see.
             sm = finding.get("source_metadata") or finding.get("raw_data") or {}
-            val_status = sm.get("validation_status", "not_validated")
+            val_status = _validity(sm.get("validation_status")).value
             val_details = sm.get("verification_details", "")
             val_perms = sm.get("verification_permissions", "")
             if val_status == "active":

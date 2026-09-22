@@ -26,22 +26,20 @@ callers can report what actually happened.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.app.core.classification_provenance import build, requires_provenance
+from apps.api.app.core.finding_status import CLOSING_STATUSES, from_classification
 from apps.api.app.models.finding import Classification, NormalizedFinding, ReviewStatus
 
-#: Occurrences nobody has ruled on yet. A verdict propagates into these
-#: and stops at anything a person decided — accepted risk, a confirmed
-#: verdict, a test credential, or a closure that already happened.
-UNDECIDED = (
-    Classification.NEEDS_REVIEW,
-    Classification.LIKELY_TRUE_POSITIVE,
-    Classification.LIKELY_FALSE_POSITIVE,
-)
+#: Re-exported for callers that already import it from here. The set
+#: itself is owned by ``finding_state`` so it cannot drift from the
+#: open/closed predicate again.
+from apps.api.app.core.finding_state import UNDECIDED  # noqa: E402,F401
 
 
 async def propagate_to_occurrences(
@@ -77,6 +75,25 @@ async def propagate_to_occurrences(
         values["classification_provenance"] = build(
             mechanism=mechanism, actor=actor, note=note,
         )
+
+    # For exactly the same reason, the Phase 2 lifecycle columns have to
+    # be derived here too. mirror_lifecycle() only runs on ORM attribute
+    # writes; a Core UPDATE that set classification and nothing else left
+    # status stale — 26 occurrences sat at CONFIRMED_FALSE_POSITIVE with
+    # status 'open' before this was caught.
+    _m = from_classification(classification)
+    values["status"] = _m.status.value
+    values["resolution_reason"] = _m.reason.value if _m.reason else None
+    if _m.ai_verdict is not None:
+        values["ai_verdict"] = _m.ai_verdict.value
+    if _m.status in CLOSING_STATUSES:
+        values["resolved_at"] = now or datetime.now(timezone.utc)
+        values["resolved_by"] = getattr(actor, "id", None)
+        if note:
+            values["resolution_note"] = note
+    else:
+        values["resolved_at"] = None
+        values["resolved_by"] = None
 
     stmt = (
         update(NormalizedFinding)

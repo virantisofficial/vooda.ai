@@ -1,4 +1,5 @@
 "use client";
+import { isDead } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -177,7 +178,7 @@ export function computeSuggestions(
   // skip to avoid auto-suggesting "rotated" for a possibly-live key.
   if (
     signals.is_git_history === true
-    && (signals.validation_status === "inactive" || signals.validation_status === "revoked")
+    && isDead(signals.validation_status)
   ) {
     candidates.push({
       signalId: "suggestion_git_history",

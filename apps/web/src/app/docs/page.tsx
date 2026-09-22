@@ -1343,7 +1343,7 @@ function FindingsContent() {
         ["remediation_status", "NONE | APPLIED"],
         ["ai_confidence", "0.0–1.0, post-calibration"],
         ["ai_confidence_raw", "0.0–1.0, pre-calibration (debug)"],
-        ["validation_status", "active | inactive | not_validated | error"],
+        ["validation_status", "active | inactive | unknown | unsupported | check_failed"],
         ["tags", "Free-form labels (string[])"],
         ["source_metadata", "Provider-specific: { repo, branch, commit_sha, file, line, slack_channel_id, jira_issue, s3_key, ... }"],
       ]} />

@@ -11,12 +11,13 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_
 
 from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
 from apps.api.app.models.user import User
 from apps.api.app.models.finding import NormalizedFinding
+from apps.api.app.core.finding_state import AI_LOW_RISK, is_open
 
 router = APIRouter()
 
@@ -302,7 +303,7 @@ async def executive_summary(
         select(func.count(NormalizedFinding.id)).where(
             NormalizedFinding.tenant_id == tenant,
             NormalizedFinding.severity == "critical",
-            NormalizedFinding.classification.notin_(["confirmed_false_positive", "likely_false_positive"]),
+            is_open(NormalizedFinding),
             NormalizedFinding.created_at < (datetime.now(timezone.utc) - timedelta(days=critical_sla_days)),
         )
     )
@@ -312,11 +313,40 @@ async def executive_summary(
         select(func.count(NormalizedFinding.id)).where(
             NormalizedFinding.tenant_id == tenant,
             NormalizedFinding.severity == "high",
-            NormalizedFinding.classification.notin_(["confirmed_false_positive", "likely_false_positive"]),
+            is_open(NormalizedFinding),
             NormalizedFinding.created_at < (datetime.now(timezone.utc) - timedelta(days=high_sla_days)),
         )
     )
     overdue_high_count = overdue_high_r.scalar() or 0
+
+    # Of the overdue population, how much is open only because nobody
+    # has reviewed the model's low-risk verdict yet. Reported beside
+    # the totals rather than removed from them: an unreviewed finding
+    # IS past SLA, but a reader needs to see whether the breach is
+    # un-triaged backlog or genuinely unremediated risk.
+    # Must carry the same age cutoffs as the counts it is a subset of —
+    # critical and high have different SLA windows, so the two branches
+    # cannot share one cutoff.
+    overdue_ai_low_risk_r = await db.execute(
+        select(func.count(NormalizedFinding.id)).where(
+            NormalizedFinding.tenant_id == tenant,
+            NormalizedFinding.classification.in_(AI_LOW_RISK),
+            is_open(NormalizedFinding),
+            or_(
+                and_(
+                    NormalizedFinding.severity == "critical",
+                    NormalizedFinding.created_at
+                    < (datetime.now(timezone.utc) - timedelta(days=critical_sla_days)),
+                ),
+                and_(
+                    NormalizedFinding.severity == "high",
+                    NormalizedFinding.created_at
+                    < (datetime.now(timezone.utc) - timedelta(days=high_sla_days)),
+                ),
+            ),
+        )
+    )
+    overdue_ai_low_risk = overdue_ai_low_risk_r.scalar() or 0
 
     sla_compliance = {
         "critical_overdue": overdue_crit_count,
@@ -325,6 +355,9 @@ async def executive_summary(
         "high_sla_days": high_sla_days,
         "critical_in_compliance": max(0, criticals - overdue_crit_count),
         "high_in_compliance": max(0, highs - overdue_high_count),
+        # Subset of the overdue counts above that is awaiting first
+        # review rather than awaiting remediation.
+        "overdue_awaiting_first_review": overdue_ai_low_risk,
     }
 
     # ── Scan coverage ─────────────────────────────────
@@ -419,7 +452,7 @@ async def vulnerability_aging(
     query = select(NormalizedFinding).where(
         NormalizedFinding.tenant_id == tenant,
         NormalizedFinding.is_suppressed == False,
-        NormalizedFinding.classification.notin_(["confirmed_false_positive", "likely_false_positive"]),
+        is_open(NormalizedFinding),
     )
     if repository_id:
         query = query.where(NormalizedFinding.repository_id == repository_id)
@@ -931,7 +964,7 @@ async def developer_remediation_report(
             query = query.where(NormalizedFinding.repository_id.in_(accessible))
 
     query = query.where(
-        NormalizedFinding.classification.notin_(["confirmed_false_positive", "likely_false_positive"])
+        is_open(NormalizedFinding)
     ).order_by(NormalizedFinding.severity).limit(50)
 
     result = await db.execute(query)

@@ -1,4 +1,5 @@
 "use client";
+import { validityOf } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -54,7 +55,7 @@ export default function HeatmapPage() {
           const high = findings.filter((f: any) => f.severity === "high").length;
           const medium = findings.filter((f: any) => f.severity === "medium").length;
           const low = findings.filter((f: any) => f.severity === "low").length;
-          const active = findings.filter((f: any) => f.source_metadata?.validation_status === "active").length;
+          const active = findings.filter((f: any) => validityOf(f) === "active").length;
 
           const riskScore = Math.min(100, critical * 25 + high * 10 + medium * 3 + low * 1 + active * 15);
 

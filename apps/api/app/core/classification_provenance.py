@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Optional
+from uuid import UUID
 
 from sqlalchemy import event, inspect as sa_inspect
 from sqlalchemy.orm import Session
@@ -128,13 +129,59 @@ def set_classification(
     note: Optional[str] = None,
 ) -> None:
     """Set a classification and, when it is an established one, its
-    provenance. The single supported way to write `CONFIRMED_*`."""
+    provenance. The single supported way to write `CONFIRMED_*`.
+
+    Also writes the Phase 2 lifecycle columns (status / resolution_reason
+    / ai_verdict) derived from the same value, so the two representations
+    cannot drift while both are live. Routing every write through one
+    helper is what makes the eventual cutover a deletion rather than an
+    audit.
+    """
     if requires_provenance(classification):
         finding.classification_provenance = build(
             mechanism=mechanism, actor=actor, decision_id=decision_id,
             source_finding_id=source_finding_id, note=note,
         )
     finding.classification = classification
+    mirror_lifecycle(finding, classification, actor=actor, note=note)
+
+
+def mirror_lifecycle(finding, classification, *, actor=None, note=None) -> None:
+    """Derive status / resolution_reason / ai_verdict from a legacy
+    classification and stamp the audit trail on a closing transition.
+
+    Imported lazily: core.finding_status imports the finding model, and
+    this module is imported by it.
+    """
+    from apps.api.app.core.finding_status import (
+        CLOSING_STATUSES, from_classification,
+    )
+
+    mapped = from_classification(classification)
+    was_closing = getattr(finding, "status", None) in {
+        s.value for s in CLOSING_STATUSES
+    }
+
+    finding.status = mapped.status.value
+    finding.resolution_reason = mapped.reason.value if mapped.reason else None
+    if mapped.ai_verdict is not None:
+        finding.ai_verdict = mapped.ai_verdict.value
+
+    if mapped.status in CLOSING_STATUSES:
+        # Only stamp on the transition into a closing state, so a later
+        # unrelated write does not rewrite when it was closed.
+        if not was_closing:
+            finding.resolved_at = datetime.now(timezone.utc)
+            finding.resolved_by = getattr(actor, "id", None) or (
+                actor if isinstance(actor, UUID) else None
+            )
+        if note and not getattr(finding, "resolution_note", None):
+            finding.resolution_note = note
+    else:
+        # Re-opening clears the audit stamp; leaving it would assert a
+        # resolution that no longer holds.
+        finding.resolved_at = None
+        finding.resolved_by = None
 
 
 def _changed_to_established(obj, is_new: bool) -> bool:

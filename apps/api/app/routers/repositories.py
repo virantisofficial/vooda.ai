@@ -1074,7 +1074,7 @@ async def get_delete_preview(
         select(sa_func.count(NormalizedFinding.id)).where(
             NormalizedFinding.repository_id == repo_id,
             NormalizedFinding.tenant_id == user.tenant_id,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     active_credentials = active_q.scalar() or 0
@@ -1220,7 +1220,7 @@ async def bulk_delete_preview(
         select(sa_func.count(NormalizedFinding.id)).where(
             NormalizedFinding.repository_id.in_(body.ids),
             NormalizedFinding.tenant_id == user.tenant_id,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     active_credentials = active_q.scalar() or 0
@@ -1298,7 +1298,7 @@ async def delete_repository(
     active_q = await db.execute(
         select(sa_func.count(NormalizedFinding.id)).where(
             NormalizedFinding.repository_id == repo_id,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     active_credentials = active_q.scalar() or 0

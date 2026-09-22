@@ -418,7 +418,7 @@ async def get_source_delete_preview(
         select(sa_func.count(NormalizedFinding.id)).where(
             NormalizedFinding.scan_source_id == source_id,
             NormalizedFinding.tenant_id == user.tenant_id,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     active_credentials = active_q.scalar() or 0
@@ -520,7 +520,7 @@ async def delete_scan_source(
     active_q = await db.execute(
         select(sa_func.count(NormalizedFinding.id)).where(
             NormalizedFinding.scan_source_id == source_id,
-            literal_column("source_metadata->>'validation_status'") == "active",
+            NormalizedFinding.validation_status == "active",
         )
     )
     active_credentials = active_q.scalar() or 0

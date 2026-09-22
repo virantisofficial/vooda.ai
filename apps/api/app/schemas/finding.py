@@ -23,6 +23,10 @@ class FindingListItem(BaseModel):
     ai_confidence: Optional[float]
     code_snippet: Optional[str] = None
     assigned_to: Optional[UUID] = None
+    # Canonical credential validity, from the CHECK-constrained
+    # column. The client used to read source_metadata's copy,
+    # which is often absent and carries legacy spellings.
+    validation_status: str = "unknown"
     source_metadata: Optional[dict] = None
     # See _none_tags_to_empty in FindingDetail — same DB column nullable
     # vs schema list-required mismatch applies to the list endpoint too.
@@ -106,6 +110,10 @@ class FindingDetail(BaseModel):
     remediation_status: str
     is_suppressed: bool
 
+    # Canonical credential validity, from the CHECK-constrained
+    # column. The client used to read source_metadata's copy,
+    # which is often absent and carries legacy spellings.
+    validation_status: str = "unknown"
     source_metadata: Optional[dict] = None
     sink_metadata: Optional[dict] = None
 

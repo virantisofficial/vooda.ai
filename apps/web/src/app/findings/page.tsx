@@ -1,4 +1,6 @@
 "use client";
+import { validityOf } from "@/lib/validity";
+import { classificationLabel } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -903,8 +905,8 @@ function FindingsPageInner() {
           </select>
           <select value={filters.classification} onChange={(e) => { setFilters((f) => ({ ...f, classification: e.target.value })); setPage(1); }} className="select-dark">
             <option value="">All Statuses</option>
-            <option value="likely_true_positive">True Positive</option>
-            <option value="likely_false_positive">False Positive</option>
+            <option value="likely_true_positive">AI: likely real</option>
+            <option value="likely_false_positive">AI: likely not a secret</option>
             <option value="needs_review">Needs Review</option>
             <option value="confirmed_true_positive">Confirmed True Positive</option>
             <option value="confirmed_false_positive">Confirmed False Positive</option>
@@ -1231,13 +1233,13 @@ function FindingsPageInner() {
                             {(f as any).source_metadata?.file_context === "test_file" && (
                               <span className="text-[8px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-medium whitespace-nowrap" title="Finding is in a test/spec file — typically lower production priority">Test</span>
                             )}
-                            {(f as any).source_metadata?.validation_status === "active" && (
+                            {validityOf(f) === "active" && (
                               <span className="text-[8px] px-1 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30 font-bold whitespace-nowrap" title="Live credential — verified active against the provider API. Rotate immediately.">● Live</span>
                             )}
-                            {(f as any).source_metadata?.validation_status === "inactive" && (
+                            {validityOf(f) === "inactive" && (
                               <span className="text-[8px] px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium whitespace-nowrap" title="Verified inactive — credential rejected by provider. Still remove from code for hygiene.">✓ Rotated</span>
                             )}
-                            {(f as any).source_metadata?.validation_status === "error" && (
+                            {validityOf(f) === "check_failed" && (
                               <span className="text-[8px] px-1 py-0.5 rounded bg-slate-500/10 text-slate-400 border border-slate-500/20 font-medium whitespace-nowrap" title="Verification could not complete (network error). Status unknown.">? Unverified</span>
                             )}
                             {(f as any).source_metadata?._pair_key && (
@@ -1261,7 +1263,7 @@ function FindingsPageInner() {
                     )}
                     {visibleColumns.validity && (
                       <td className="px-3 py-3">
-                        {(() => { const vs = (f as any).source_metadata?.validation_status || "not_validated"; const styles: Record<string, string> = { active: "bg-red-500/15 text-red-400 border-red-500/20", inactive: "bg-green-500/15 text-green-400 border-green-500/20", revoked: "bg-green-500/15 text-green-400 border-green-500/20", unknown: "bg-slate-500/10 text-slate-400 border-slate-500/20", not_validated: "bg-slate-500/5 text-slate-500 border-slate-500/10" }; const labels: Record<string, string> = { active: "Active", inactive: "Inactive", revoked: "Revoked", unknown: "Unknown", not_validated: "Unverified" }; return <span className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
+                        {(() => { const vs = validityOf(f); const styles: Record<string, string> = { active: "bg-red-500/15 text-red-400 border-red-500/20", inactive: "bg-green-500/15 text-green-400 border-green-500/20", revoked: "bg-green-500/15 text-green-400 border-green-500/20", unknown: "bg-slate-500/10 text-slate-400 border-slate-500/20", not_validated: "bg-slate-500/5 text-slate-500 border-slate-500/10" }; const labels: Record<string, string> = { active: "Active", inactive: "Inactive", revoked: "Revoked", unknown: "Unknown", not_validated: "Unverified" }; return <span className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
                       </td>
                     )}
                     {visibleColumns.status && (
@@ -1278,13 +1280,7 @@ function FindingsPageInner() {
                             : f.classification === "accepted_risk" ? "bg-orange-400"
                             : "bg-yellow-400"
                           }`} />
-                          {f.classification === "needs_review" ? "Needs Review"
-                            : f.classification === "likely_true_positive" ? "True Positive"
-                            : f.classification === "likely_false_positive" ? "False Positive"
-                            : f.classification === "confirmed_true_positive" ? "Confirmed TP"
-                            : f.classification === "confirmed_false_positive" ? "Confirmed FP"
-                            : f.classification === "accepted_risk" ? "Accepted Risk"
-                            : f.classification?.replace(/_/g, " ")}
+                          {classificationLabel(f.classification)}
                         </span>
                       </td>
                     )}
@@ -1380,7 +1376,7 @@ function FindingsPageInner() {
                       )}
                       {visibleColumns.validity && (
                         <td className="px-3 py-2">
-                          {(() => { const vs = (sub as any).source_metadata?.validation_status || "not_validated"; const labels: Record<string,string> = { active: "Active", inactive: "Inactive", not_validated: "Unverified" }; const styles: Record<string,string> = { active: "text-red-400", inactive: "text-green-400", not_validated: "text-slate-600" }; return <span className={`text-[8px] ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
+                          {(() => { const vs = validityOf(sub); const labels: Record<string,string> = { active: "Active", inactive: "Inactive", not_validated: "Unverified" }; const styles: Record<string,string> = { active: "text-red-400", inactive: "text-green-400", not_validated: "text-slate-600" }; return <span className={`text-[8px] ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
                         </td>
                       )}
                       {visibleColumns.status && (

@@ -1,4 +1,5 @@
 "use client";
+import { validityOf } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -47,7 +48,7 @@ export default function SecretDetailPage() {
 
   const sm = finding.source_metadata || {};
   const sevClass = SEV[finding.severity as keyof typeof SEV] || SEV.medium;
-  const valStatus = sm.validation_status || "not_validated";
+  const valStatus = validityOf(finding ?? { source_metadata: sm });
   const valClass = VAL[valStatus as keyof typeof VAL] || VAL.unknown;
 
   return (

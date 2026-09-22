@@ -12,6 +12,17 @@ it that way means a classification added later counts as open until
 someone decides otherwise — the failure mode is over-reporting, never a
 false all-clear.
 
+LIKELY_FALSE_POSITIVE used to be listed as settled. It no longer is.
+It is an AI verdict with nobody behind it, and counting it as settled
+meant the dashboard reported ~90% of all findings as resolved on the
+model's say-so, while the occurrence propagator simultaneously treated
+the same rows as undecided. One of the two had to move; closure is the
+side that requires a decision, so the propagator was right. The AI's
+opinion still shapes the view — those rows are AI_LOW_RISK and the
+findings list collapses them by default — but the system no longer
+asserts they are resolved. GitHub, GitGuardian and GitLab all require
+an explicit resolution reason to leave the open state for this reason.
+
 NEEDS_REVIEW is the load-bearing inclusion, pinned below. An
 un-adjudicated finding is open work, and excluding it would make a scan
 whose triage failed render as zero risk.
@@ -28,7 +39,9 @@ import pytest
 
 from apps.api.app.models.finding import Classification
 from apps.api.app.routers import metrics
-from apps.api.app.routers.metrics import _CLOSED_CLASSIFICATIONS
+from apps.api.app.core import finding_state as fs
+from apps.api.app.core.finding_state import AI_LOW_RISK
+from apps.api.app.core.finding_state import CLOSED as _CLOSED_CLASSIFICATIONS
 
 
 OVERVIEW_SRC = inspect.getsource(metrics.metrics_overview)
@@ -38,7 +51,6 @@ FILTER_SRC = inspect.getsource(metrics._build_finding_filters)
 # ── what counts as settled ───────────────────────────────────────────
 
 @pytest.mark.parametrize("closed", [
-    Classification.LIKELY_FALSE_POSITIVE,
     Classification.CONFIRMED_FALSE_POSITIVE,
     Classification.TEST_CREDENTIAL,
     Classification.ROTATED,
@@ -54,6 +66,7 @@ def test_settled_classifications_are_excluded(closed):
 
 @pytest.mark.parametrize("open_state", [
     Classification.NEEDS_REVIEW,
+    Classification.LIKELY_FALSE_POSITIVE,
     Classification.LIKELY_TRUE_POSITIVE,
     Classification.CONFIRMED_TRUE_POSITIVE,
     Classification.NOT_ENOUGH_EVIDENCE,
@@ -71,6 +84,7 @@ def test_every_classification_is_deliberately_placed():
     """A new classification must be considered, not silently inherited."""
     known_open = {
         Classification.NEEDS_REVIEW,
+        Classification.LIKELY_FALSE_POSITIVE,
         Classification.LIKELY_TRUE_POSITIVE,
         Classification.CONFIRMED_TRUE_POSITIVE,
         Classification.NOT_ENOUGH_EVIDENCE,
@@ -156,8 +170,14 @@ def test_mttr_counts_only_actual_resolutions():
     resolved classification (rotated / removed)."""
     src = inspect.getsource(metrics.mttr_metrics)
     assert '== "applied"' in src
-    assert "Classification.ROTATED" in src
-    assert "RESOLVED_FILE_DELETED" in src
+    # Assert the contract, not the SQL text, so a refactor cannot
+    # quietly widen it — and so losing visibility can never be counted
+    # as a fix.
+    assert "REMEDIATED" in src
+    assert Classification.ROTATED in fs.REMEDIATED
+    assert Classification.RESOLVED_FILE_DELETED in fs.REMEDIATED
+    assert Classification.RESOLVED_REPO_REMOVED not in fs.REMEDIATED
+    assert Classification.RESOLVED_SOURCE_REMOVED not in fs.REMEDIATED
 
 
 def test_needs_review_count_matches_the_queue_it_links_to():

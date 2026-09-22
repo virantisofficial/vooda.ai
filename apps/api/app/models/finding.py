@@ -194,6 +194,37 @@ class NormalizedFinding(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # See apps/api/app/core/classification_provenance.py
     classification_provenance = Column(JSONB, nullable=True)
     remediation_status = Column(SAEnum(RemediationStatus), default=RemediationStatus.NONE, nullable=False, index=True)
+
+    # Live-validation against the provider's API. Promoted out of
+    # ``source_metadata`` (migration l8g9h0i1j2k3) because an
+    # unconstrained JSONB key let eight spellings of five states
+    # accumulate. Values are the canonical Validity vocabulary and are
+    # enforced by a CHECK constraint — see apps/api/app/core/validity.py.
+    validation_status = Column(
+        String(20), nullable=False, default="unknown",
+        server_default="unknown", index=True,
+    )
+
+    # ── Lifecycle (Phase 2). ``classification`` above is still
+    # authoritative; these are written alongside it until the cutover.
+    # See apps/api/app/core/finding_status.py.
+    #
+    # status + resolution_reason replace the four jobs the 13-value
+    # Classification was doing at once. The pairing is enforced by a
+    # CHECK constraint: closing without a reason is rejected by the
+    # database, not merely discouraged in code.
+    status = Column(
+        String(20), nullable=False, default="open",
+        server_default="open", index=True,
+    )
+    resolution_reason = Column(String(30), nullable=True, index=True)
+    resolution_note = Column(Text, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(UUID(as_uuid=True), nullable=True)
+    # Advisory only. An AI verdict annotates an open finding; it never
+    # closes one.
+    ai_verdict = Column(String(20), nullable=True)
+
     is_suppressed = Column(Boolean, default=False)
     suppression_reason = Column(String(255), nullable=True)
 
@@ -384,8 +415,33 @@ class SecretIncident(Base, UUIDMixin, TimestampMixin, TenantMixin):
     classification = Column(String(40), nullable=False, default="needs_review", index=True)
     review_status = Column(String(40), nullable=False, default="unreviewed")
 
-    # Live-validation against the provider's API
-    validation_status = Column(String(50), nullable=True)
+    # Live-validation against the provider's API. Canonical Validity
+    # vocabulary, CHECK-constrained — see apps/api/app/core/validity.py.
+    validation_status = Column(
+        String(20), nullable=False, default="unknown",
+        server_default="unknown",
+    )
+
+    # ── Lifecycle (Phase 2). ``classification`` above is still
+    # authoritative; these are written alongside it until the cutover.
+    # See apps/api/app/core/finding_status.py.
+    #
+    # status + resolution_reason replace the four jobs the 13-value
+    # Classification was doing at once. The pairing is enforced by a
+    # CHECK constraint: closing without a reason is rejected by the
+    # database, not merely discouraged in code.
+    status = Column(
+        String(20), nullable=False, default="open",
+        server_default="open",
+    )
+    resolution_reason = Column(String(30), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_by = Column(UUID(as_uuid=True), nullable=True)
+    # Advisory only. An AI verdict annotates an open finding; it never
+    # closes one.
+    ai_verdict = Column(String(20), nullable=True)
+
     last_validated_at = Column(DateTime(timezone=True), nullable=True)
 
     # Rotation lifecycle (credential-level)

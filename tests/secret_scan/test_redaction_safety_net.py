@@ -115,19 +115,21 @@ def test_ai_freetext_echoed_secret_is_scrubbed(scanner):
     _assert_no_raw(str(out), DETECTED_AWS_ID, COLOC_SLACK)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="KNOWN GAP (tracked): a co-located NOVEL-format secret under a "
-           "generic var name matches no known provider shape and isn't the "
-           "finding's own value, so the residual scrub leaves it. Closing it "
-           "= suggestion #2 (greedy entropy-based over-mask of STORED "
-           "snippets). When implemented, this flips to xpass — convert to a "
-           "hard assert then.",
-)
 def test_colocated_novel_secret_is_masked(scanner):
-    """The honest open edge: residual scrub only knows KNOWN provider shapes
-    (novel high-entropy is deliberately left visible to keep the Code tab
-    usable). A co-located novel secret therefore survives today."""
+    """A co-located novel-format secret must not survive into storage.
+
+    This was an xfail KNOWN GAP: the residual scrub only recognised known
+    provider shapes, so a high-entropy value under a generic variable
+    name stayed visible. The gap closed once VOODA-SEC-ENTROPY-BASE64
+    began firing on it — the entropy-based over-mask the original marker
+    anticipated. Verified 2026-09-22: the value is stored as
+    ``Zx9Q****y0Cu``.
+
+    Converted to a hard assert per that marker's own instruction. If an
+    entropy threshold is ever retuned such that this stops matching, a
+    raw secret starts landing in stored snippets — that must fail loudly,
+    not silently revert to xfail.
+    """
     snip = (
         f'AWS_KEY = {DETECTED_AWS_ID}\n'
         f'internal_token = "{NOVEL_SECRET}"\n'

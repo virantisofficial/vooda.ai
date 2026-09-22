@@ -24,6 +24,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
+from apps.api.app.core.validity import normalize as _validity
 
 logger = structlog.get_logger()
 
@@ -1425,7 +1426,7 @@ class NotificationDispatcher:
         sm = finding.source_metadata or {}
         masked_value = sm.get("masked_value") or sm.get("masked") or "(not captured)"
         secret_type = sm.get("secret_type") or sm.get("type") or finding.vulnerability_category
-        validation_status = sm.get("validation_status") or "unverified"
+        validation_status = _validity(sm.get("validation_status")).value
 
         sev_value = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity)
         cls_value = finding.classification.value if hasattr(finding.classification, "value") else str(finding.classification or "needs_review")

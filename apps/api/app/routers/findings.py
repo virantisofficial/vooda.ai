@@ -18,6 +18,7 @@ from apps.api.app.core.classification_provenance import (
     set_classification,
 )
 from apps.api.app.core.occurrences import propagate_to_occurrences
+from apps.api.app.core.validity import normalize as _validity
 from apps.api.app.models.finding import (
     NormalizedFinding,
     FindingEvidence,
@@ -30,6 +31,36 @@ from apps.api.app.schemas.finding import (
     FindingDetail,
     TriageRequest,
 )
+
+
+def _incident_lifecycle_values(classification, *, actor=None, now=None) -> dict:
+    """Column values for a Core UPDATE of an incident's triage state.
+
+    A Core UPDATE bypasses mirror_lifecycle(), so status /
+    resolution_reason have to be derived explicitly or the incident's
+    lifecycle drifts from its classification.
+    """
+    from datetime import datetime, timezone
+    from apps.api.app.core.finding_status import (
+        CLOSING_STATUSES, from_classification,
+    )
+    m = from_classification(classification)
+    vals = {
+        "classification": classification,
+        "review_status": "reviewed",
+        "status": m.status.value,
+        "resolution_reason": m.reason.value if m.reason else None,
+    }
+    if m.ai_verdict is not None:
+        vals["ai_verdict"] = m.ai_verdict.value
+    if m.status in CLOSING_STATUSES:
+        vals["resolved_at"] = now or datetime.now(timezone.utc)
+        vals["resolved_by"] = getattr(actor, "id", None)
+    else:
+        vals["resolved_at"] = None
+        vals["resolved_by"] = None
+    return vals
+
 
 router = APIRouter()
 
@@ -163,7 +194,7 @@ async def list_findings(
     if validation_status:
         from sqlalchemy import literal_column
         conditions.append(
-            literal_column("source_metadata->>'validation_status'") == validation_status
+            NormalizedFinding.validation_status == _validity(validation_status).value
         )
 
     # ── Archive filter ─────────────────────────────────────────────
@@ -504,7 +535,7 @@ async def triage_finding(
                 SecretIncident.id == finding.incident_id,
                 SecretIncident.tenant_id == user.tenant_id,
             )
-            .values(classification=inc_class, review_status="reviewed")
+            .values(**_incident_lifecycle_values(inc_class, actor=user))
         )
         # Cascade to sibling occurrences (other findings of the same
         # incident), excluding this one — it was set above.
@@ -723,7 +754,7 @@ async def bulk_triage_findings(
                 SecretIncident.id == incident_id,
                 SecretIncident.tenant_id == user.tenant_id,
             )
-            .values(classification=inc_class_str, review_status="reviewed")
+            .values(**_incident_lifecycle_values(inc_class_str, actor=user))
         )
         incidents_cascaded += inc_result.rowcount or 0
 
@@ -815,7 +846,7 @@ async def verify_finding_credential(
     verification = await _verify(sm)
     if verification:
         updated_sm = dict(sm)
-        updated_sm["validation_status"] = verification.status
+        updated_sm["validation_status"] = _validity(verification.status).value
         updated_sm["verification_details"] = verification.details
         updated_sm["verification_permissions"] = verification.permissions
 

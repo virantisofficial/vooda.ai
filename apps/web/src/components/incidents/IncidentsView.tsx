@@ -1,4 +1,5 @@
 "use client";
+import { validityOf } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -607,9 +608,9 @@ export function IncidentsView({
                     )}
                     {cols.validity && (
                       <td className="py-2.5 px-3">
-                        {inc.validation_status === "active" ? (
+                        {validityOf(inc) === "active" ? (
                           <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/15 text-red-400 uppercase">Active</span>
-                        ) : inc.validation_status === "inactive" ? (
+                        ) : validityOf(inc) === "inactive" ? (
                           <span className="text-[10px] px-2 py-0.5 rounded bg-slate-500/10 text-slate-500 uppercase">Inactive</span>
                         ) : (
                           <span className="text-[10px] text-slate-600">—</span>

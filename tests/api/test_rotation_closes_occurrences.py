@@ -11,7 +11,7 @@ covered end to end against a live scan.
 """
 from apps.api.app.core.classification_provenance import ESTABLISHED_CLASSIFICATIONS
 from apps.api.app.models.finding import Classification
-from apps.api.app.routers.metrics import _CLOSED_CLASSIFICATIONS
+from apps.api.app.core.finding_state import CLOSED as _CLOSED_CLASSIFICATIONS
 
 
 def test_rotated_counts_as_closed():
@@ -48,8 +48,13 @@ def test_only_undecided_occurrences_are_touched():
     """
     from apps.api.app.core.occurrences import UNDECIDED
 
+    # NOT_ENOUGH_EVIDENCE joined this set when the vocabulary moved to
+    # finding_state: it means the model could not decide, so no human
+    # verdict is at stake and a later decision must be free to land on
+    # it. Leaving it out stranded such occurrences permanently.
     assert set(UNDECIDED) == {
         Classification.NEEDS_REVIEW,
+        Classification.NOT_ENOUGH_EVIDENCE,
         Classification.LIKELY_TRUE_POSITIVE,
         Classification.LIKELY_FALSE_POSITIVE,
     }

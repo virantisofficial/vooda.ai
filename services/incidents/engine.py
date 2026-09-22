@@ -14,6 +14,8 @@ from typing import Optional
 from enum import Enum
 from datetime import datetime
 
+from apps.api.app.core.validity import Validity, normalize as _validity
+
 logger = structlog.get_logger()
 
 
@@ -45,7 +47,7 @@ class SecretIncident:
     affected_files: list[str] = field(default_factory=list)
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None
-    validation_status: str = "not_validated"
+    validation_status: str = "unknown"   # canonical Validity
     finding_ids: list[str] = field(default_factory=list)
     provider: str = "unknown"
 
@@ -71,7 +73,7 @@ def group_findings_into_incidents(findings: list[dict]) -> list[SecretIncident]:
                 secret_type=sm.get("secret_type", "unknown"),
                 masked_value=sm.get("masked_value", "****"),
                 severity=severity,
-                validation_status=sm.get("validation_status", "not_validated"),
+                validation_status=_validity(sm.get("validation_status")).value,
                 provider=sm.get("provider", "unknown"),
                 first_seen=f.get("first_seen_at") or f.get("created_at"),
             )
@@ -97,8 +99,8 @@ def group_findings_into_incidents(findings: list[dict]) -> list[SecretIncident]:
             incident.severity = finding_severity
 
         # Escalate to active if any occurrence is validated active
-        if sm.get("validation_status") == "active":
-            incident.validation_status = "active"
+        if _validity(sm.get("validation_status")) is Validity.ACTIVE:
+            incident.validation_status = Validity.ACTIVE.value
 
     incidents = sorted(
         incidents_map.values(),
