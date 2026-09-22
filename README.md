@@ -196,6 +196,7 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 | Audit log — view & search | ✅ | ✅ |
 | Audit export & retention enforcement | — | ✅ |
 | Org-specific custom detectors | — | ✅ |
+| Migrate from another scanner — import findings **and triage history** | — | ✅ |
 | Scheduled scans | on demand, CLI, CI & webhooks | ✅ adds scheduling |
 | Secret-manager coverage & rotation write-back — Vault, AWS, Azure, GCP, CyberArk | — | ✅ |
 | **Detection & signature updates** | published here **monthly** (~30 days behind) | **continuous** — new detectors the day they ship |
@@ -207,6 +208,7 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 Three honest asterisks on the community edition:
 
 - **Free for non-commercial use.** The community edition is free for individuals, non-commercial research and education, and non-profits. Business or for-profit use — including internal production use — needs a commercial licence (see [License](#license)).
+- **Migrating from another scanner is an Enterprise service.** Community imports findings from your own CI and CLI runs. Bringing a *different* scanner's history across — GitHub Advanced Security, GitGuardian, GitLab Secret Detection, TruffleHog — including every verdict your team recorded there, is Enterprise. Keeping those decisions is what stops a migration re-opening thousands of findings your team already settled.
 - **A curated set of sources.** Community scans your code plus the primary connector in each category — issue tracking (Jira, ServiceNow, Azure DevOps), cloud storage (Amazon S3, Azure Blob, Google Cloud Storage), and CI / build surfaces (container registries, CI/CD logs, container images). Enterprise unlocks the rest: team chat (Slack, Teams, Mattermost), wikis (Confluence, Notion, SharePoint), additional ticketing and object-store connectors, and secret-manager coverage with rotation write-back (HashiCorp Vault, AWS, Azure, GCP, CyberArk).
 - **Detection updates land monthly.** You get the same rules and signatures Enterprise gets — just on a ~30-day lag, not the continuous feed. A `git pull` always brings you to the latest community release; the engine itself never lags.
 - **Support is the community forum.** [Discussions](../../discussions) and [Issues](../../issues), answered best-effort by us and other users — no guaranteed response time, no phone number. That's what Enterprise is for.
