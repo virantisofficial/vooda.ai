@@ -238,23 +238,31 @@ def test_the_optimistic_preview_survives_the_migration():
 
 def test_delete_paths_never_reference_a_table_that_does_not_exist():
     """A governance product was removed in 2026-05, taking several
-    tables with it. The repository delete path filtered its raw DELETEs
-    through an existence check; the scan-source path did so for the
-    scan_job children but NOT for the finding children. The one
-    unguarded statement made every scan-source deletion 500 for four
-    months, and nothing noticed because nothing deleted a source.
+    tables with it. `DELETE FROM quantum_assessments` stayed behind in
+    the scan-source delete path, so EVERY scan-source deletion 500'd for
+    four months — nothing noticed, because nothing deleted a source.
+
+    Checked against the live model metadata rather than a hand-written
+    list, so the next table that goes away fails here on the commit that
+    removes it.
     """
     import re as _re
+
+    from apps.api.app.core.database import Base
+    import apps.api.app.models  # noqa: F401  (registers every table)
+
+    known = set(Base.metadata.tables)
+    offenders = []
     for path in ("apps/api/app/routers/scan_sources.py",
                  "apps/api/app/routers/repositories.py"):
         src = pathlib.Path(path).read_text(encoding="utf-8")
         for m in _re.finditer(r'"DELETE FROM ([a-z_]+)', src):
             table = m.group(1)
-            if table.startswith("{"):
+            if table in known:
                 continue
             ln = src[: m.start()].count("\n") + 1
-            assert False, (
-                f"{path}:{ln} deletes from a hard-coded table "
-                f"({table!r}). Route it through _existing_tables() so a "
-                "table removed later cannot break deletion."
-            )
+            offenders.append(f"{path}:{ln} -> {table}")
+    assert not offenders, (
+        "these delete from tables no model defines; route them through "
+        "_existing_tables() or remove them:\n" + "\n".join(offenders)
+    )
