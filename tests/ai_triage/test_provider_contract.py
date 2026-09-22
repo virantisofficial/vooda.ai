@@ -373,3 +373,48 @@ def test_the_engine_does_not_decide_the_json_mechanism():
     src = inspect.getsource(TriageEngine)
     assert 'json_mode = self._config.get("supports_json_mode"' not in src
     assert "json_mode = True" in src
+
+
+# ── Clause 7: request field names match each provider's documentation ─
+
+def test_google_request_uses_the_documented_field_names(monkeypatch):
+    """Verified against ai.google.dev/api/generate-content.
+
+    We sent `system_instruction`. The documented name is
+    `systemInstruction`. Proto3 JSON generally accepts snake_case as
+    well, so this may have worked — but if it were ever ignored, Gemini
+    would triage with NO system prompt and still return a confident
+    answer. Silent degradation, not a crash.
+    """
+    _patch(monkeypatch, GOOGLE_OK)
+    cap = _patch(monkeypatch, GOOGLE_OK)
+    _run(GoogleProvider(api_key="k", model="m").complete("SYS", "USER"))
+    body = cap["json"]
+    assert "systemInstruction" in body, "documented spelling is camelCase"
+    assert body["systemInstruction"] == {"parts": [{"text": "SYS"}]}
+    assert body["contents"] == [{"parts": [{"text": "USER"}]}]
+    # generationConfig keys are camelCase per the same reference
+    gc = body["generationConfig"]
+    assert "maxOutputTokens" in gc and "temperature" in gc
+    assert cap["url"].startswith(
+        "https://generativelanguage.googleapis.com/v1beta/models/")
+    assert "key=" in cap["url"], "Gemini takes the key as a query param"
+
+
+def test_claude_request_matches_the_documented_shape(monkeypatch):
+    """Verified against platform.claude.com/docs/en/api/messages:
+    `system` is top-level (there is no system ROLE), `stop_sequences`
+    is the field name, and a final assistant message makes the response
+    continue from it — which is what prefill relies on.
+    """
+    cap = _patch(monkeypatch, CLAUDE_OK)
+    _run(ClaudeProvider(api_key="k", model="m").complete(
+        "SYS", "USER", stop_sequences=["END"]))
+    body = cap["json"]
+    assert body["system"] == "SYS"
+    assert all(m["role"] != "system" for m in body["messages"]), (
+        "the Messages API has no system role for input messages"
+    )
+    assert body["stop_sequences"] == ["END"]
+    assert isinstance(body["max_tokens"], int)
+    assert cap["headers"]["anthropic-version"] == "2023-06-01"

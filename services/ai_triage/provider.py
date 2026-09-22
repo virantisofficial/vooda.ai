@@ -510,7 +510,15 @@ class GoogleProvider(AIProvider):
         if json_mode and self.json_strategy == JSON_MIME:
             gen_config["responseMimeType"] = "application/json"
         payload = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
+            # camelCase, as the REST API documents it. We sent
+            # `system_instruction`: proto3 JSON mapping generally accepts
+            # snake_case too, so this may well have worked — but nothing
+            # here had ever made a real call, and relying on undocumented
+            # leniency for the field carrying the ENTIRE system prompt is
+            # a silent-degradation risk, not a style preference. If it is
+            # ignored, Gemini triages with no instructions at all and
+            # still returns something.
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [{"text": user_prompt}]}],
             "generationConfig": gen_config,
         }
