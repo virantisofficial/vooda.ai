@@ -101,8 +101,8 @@ export function statusLabel(obj: any): string {
   if (st === "open") {
     // An open finding shows the model's opinion, clearly marked as one.
     const v = (obj?.ai_verdict || "").toLowerCase();
-    if (v === "likely_fp") return "Open — AI: likely not a secret";
-    if (v === "likely_tp") return "Open — AI: likely real";
+    if (v === "likely_fp") return "Open — AI: Likely Not a Secret";
+    if (v === "likely_tp") return "Open — AI: Likely Real";
     return "Open";
   }
   return classificationLabel(obj?.classification);
@@ -153,12 +153,15 @@ export function statusShort(obj: any): string {
 export function statusDetail(obj: any): string {
   const st = (obj?.status || "").toLowerCase();
   const rs = (obj?.resolution_reason || "").toLowerCase();
-  if (rs) return rs.replace(/_/g, " ").replace(/^./, (c: string) => c.toUpperCase());
+  if (rs)
+    return rs
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c: string) => c.toUpperCase());
   if (st === "open") {
     const v = (obj?.ai_verdict || "").toLowerCase();
-    if (v === "likely_fp") return "AI: likely not a secret";
-    if (v === "likely_tp") return "AI: likely real";
-    if (v === "unsure") return "AI: unsure";
+    if (v === "likely_fp") return "AI: Likely Not a Secret";
+    if (v === "likely_tp") return "AI: Likely Real";
+    if (v === "unsure") return "AI: Unsure";
   }
   return "";
 }

@@ -1,5 +1,5 @@
 "use client";
-import { validityOf } from "@/lib/validity";
+import { validityOf, validityLabel } from "@/lib/validity";
 import { classificationLabel, statusLabel, statusShort, statusDetail, statusTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
@@ -888,7 +888,7 @@ function FindingsPageInner() {
               })()}
               {filters.validation_status && (
                 <span className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-red-500/15 text-red-400 border border-red-500/20 font-medium">
-                  Verifier: {filters.validation_status}
+                  Validity: {validityLabel(filters.validation_status)}
                   <button onClick={() => { setFilters((f) => ({ ...f, validation_status: "" })); setPage(1); window.history.replaceState(null, "", "/findings"); }} className="ml-1 hover:text-white"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
                 </span>
               )}
