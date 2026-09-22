@@ -1146,15 +1146,38 @@ function AIModelsFullSection() {
                     <div>
                       <label className="text-xs text-slate-400 mb-2 block">Output Controls</label>
                       <div className="space-y-2">
-                        <label className="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-white/[0.02]">
-                          <input type="checkbox" checked={form.supports_json_mode}
-                            onChange={(e) => setForm((f) => ({ ...f, supports_json_mode: e.target.checked }))}
-                            className="w-4 h-4 mt-0.5 rounded border-slate-600 bg-dark-950 text-red-500 shrink-0" />
-                          <div>
-                            <div className="text-xs text-slate-300 font-medium">JSON Mode</div>
-                            <div className="text-[10px] text-slate-600">Ask the provider to enforce valid JSON output. Disable if the model truncates or errors — some routes don't support this flag cleanly.</div>
+                        {/* JSON handling is decided per provider now, not
+                            by a checkbox that meant three different things:
+                            response_format on OpenAI, responseMimeType on
+                            Google, and NOTHING on Anthropic — where the flag
+                            was simply dead while prefill went unused. Shown,
+                            not asked. */}
+                        <div className="p-2 rounded bg-white/[0.02]">
+                          <div className="text-xs text-slate-300 font-medium mb-0.5">
+                            JSON Handling — automatic
                           </div>
-                        </label>
+                          <div className="text-[10px] text-slate-500 leading-relaxed">
+                            {form.provider === "anthropic" || form.provider === "claude"
+                              ? "Claude is asked for JSON by seeding the reply, which it cannot open with prose or a code fence."
+                              : form.provider === "google"
+                              ? "Gemini is asked for JSON through its response MIME type."
+                              : form.provider === "openai" || form.provider === "azure_openai" || form.provider === "ollama"
+                              ? "This provider enforces JSON natively, so Vooda asks it to."
+                              : "Self-hosted and gateway routes honour the native JSON field inconsistently — forcing it has been seen to cut responses off mid-JSON — so the prompt asks instead. Tick below only if you know your route supports it."}
+                          </div>
+                          {!(form.provider === "anthropic" || form.provider === "claude"
+                             || form.provider === "google" || form.provider === "openai"
+                             || form.provider === "azure_openai" || form.provider === "ollama") && (
+                            <label className="flex items-center gap-2 mt-2 cursor-pointer">
+                              <input type="checkbox" checked={form.supports_json_mode}
+                                onChange={(e) => setForm((f) => ({ ...f, supports_json_mode: e.target.checked }))}
+                                className="w-3.5 h-3.5 rounded border-slate-600 bg-dark-950 text-red-500 shrink-0" />
+                              <span className="text-[10px] text-slate-500">
+                                My route supports native JSON mode
+                              </span>
+                            </label>
+                          )}
+                        </div>
                         <label className="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-white/[0.02]">
                           <input type="checkbox" checked={form.use_compact_prompt}
                             onChange={(e) => setForm((f) => ({ ...f, use_compact_prompt: e.target.checked }))}

@@ -280,3 +280,96 @@ def test_every_provider_exposes_the_same_vocabulary():
     # absence of a signal is not success
     assert normalize_stop_reason(None) == STOP_UNKNOWN
     assert normalize_stop_reason("") == STOP_UNKNOWN
+
+
+# ── Clause 6: every provider is asked for JSON its own way ───────────
+
+CLAUDE_PREFILL_REPLY = {
+    # A prefilled reply CONTINUES from "{" — the brace is not echoed.
+    "content": [{"type": "text", "text": '"classification":"likely_true_positive"}'}],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 100, "output_tokens": 12},
+}
+
+
+def test_claude_is_asked_for_json_by_prefill(monkeypatch):
+    """Anthropic has no response_format. supports_json_mode was simply
+    DEAD for Claude, so it fell back to asking in the prompt and got the
+    weakest handling of any provider despite prefill being available.
+    """
+    from services.ai_triage.provider import JSON_PREFILL
+    cap = _patch(monkeypatch, CLAUDE_PREFILL_REPLY)
+    prov = ClaudeProvider(api_key="k", model="m", json_strategy=JSON_PREFILL)
+    resp = _run(prov.complete("s", "u", json_mode=True))
+
+    msgs = cap["json"]["messages"]
+    assert msgs[-1] == {"role": "assistant", "content": "{"}, (
+        "the assistant turn must be seeded so the model cannot open with "
+        "prose or a markdown fence"
+    )
+    # and the brace must be restored, or every reply fails to parse
+    assert resp.content.startswith("{")
+    assert json.loads(resp.content)["classification"] == "likely_true_positive"
+
+
+def test_claude_is_not_prefilled_when_json_was_not_requested(monkeypatch):
+    cap = _patch(monkeypatch, CLAUDE_OK)
+    _run(ClaudeProvider(api_key="k", model="m").complete("s", "u", json_mode=False))
+    assert all(m["role"] != "assistant" for m in cap["json"]["messages"])
+
+
+def test_openrouter_is_not_sent_response_format(monkeypatch):
+    """Forcing it there was observed to truncate mid-JSON, which is why
+    the custom default is prompt-only. Silently enabling it would
+    reintroduce a bug somebody already fixed."""
+    from services.ai_triage.provider import JSON_PROMPT_ONLY
+    prov = OpenAIProvider(api_key="k", model="m", json_strategy=JSON_PROMPT_ONLY)
+    payload = prov._build_payload("s", "u", 1024, 0.0, None, json_mode=True)
+    assert "response_format" not in payload
+
+
+def test_openai_proper_is_sent_response_format():
+    from services.ai_triage.provider import JSON_NATIVE
+    prov = OpenAIProvider(api_key="k", model="m", json_strategy=JSON_NATIVE)
+    payload = prov._build_payload("s", "u", 1024, 0.0, None, json_mode=True)
+    assert payload["response_format"] == {"type": "json_object"}
+
+
+def test_every_provider_resolves_to_a_known_strategy():
+    """A new provider must land on one of the four, not on None."""
+    from services.ai_triage.provider import (
+        JSON_MIME, JSON_NATIVE, JSON_PREFILL, JSON_PROMPT_ONLY,
+        create_provider, resolve_json_strategy,
+    )
+    known = {JSON_MIME, JSON_NATIVE, JSON_PREFILL, JSON_PROMPT_ONLY}
+    for name in ("claude", "anthropic", "openai", "azure_openai", "google",
+                 "ollama", "custom", "vllm", "lm_studio", "localai",
+                 "huggingface_tgi", "aws_bedrock"):
+        for flag in (None, True, False):
+            assert resolve_json_strategy(name, flag) in known, (name, flag)
+        prov = create_provider(name, "k", "m", "http://x")
+        assert getattr(prov, "json_strategy", None) in known, name
+
+
+def test_the_legacy_flag_cannot_disable_prefill():
+    """supports_json_mode=False exists because response_format broke
+    OpenRouter. Prefill has no such failure mode, so switching the flag
+    off must not silently downgrade Claude."""
+    from services.ai_triage.provider import JSON_PREFILL, resolve_json_strategy
+    assert resolve_json_strategy("anthropic", False) == JSON_PREFILL
+    assert resolve_json_strategy("claude", False) == JSON_PREFILL
+
+
+def test_the_engine_does_not_decide_the_json_mechanism():
+    """It used to pass supports_json_mode straight through as
+    `json_mode`, so a tenant with the flag off — the default for every
+    custom provider — also lost Claude's prefill, which has none of the
+    failure modes that flag exists to avoid.
+
+    Triage always wants JSON. How to ask is the adapter's business.
+    """
+    import inspect
+    from services.ai_triage.engine import TriageEngine
+    src = inspect.getsource(TriageEngine)
+    assert 'json_mode = self._config.get("supports_json_mode"' not in src
+    assert "json_mode = True" in src

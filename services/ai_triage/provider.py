@@ -19,6 +19,58 @@ import structlog
 logger = structlog.get_logger()
 
 
+#: HOW a provider is asked for JSON. `supports_json_mode` was a single
+#: boolean that meant three different things and, for one provider,
+#: nothing at all:
+#:
+#:   OpenAI / Azure   response_format={"type":"json_object"}
+#:   Google           responseMimeType="application/json"
+#:   Anthropic        NO equivalent — the flag was simply dead, so Claude
+#:                    fell back to asking in the prompt and got the
+#:                    WEAKEST handling of any provider despite having one
+#:                    of the strongest available to it
+#:   OpenRouter/vLLM  honoured inconsistently; forcing it was observed to
+#:                    cause mid-JSON truncation, which is why the custom
+#:                    default is off
+#:
+#: Each adapter declares its own, so the engine keeps asking a single
+#: question — "give me JSON" — and never learns which provider answered.
+JSON_NATIVE = "native_response_format"   # OpenAI-compatible response_format
+JSON_MIME = "mime_type"                  # Google responseMimeType
+JSON_PREFILL = "prefill"                 # Anthropic: open the reply with "{"
+JSON_PROMPT_ONLY = "prompt_only"         # no mechanism; the prompt asks
+
+#: Providers whose upstream route does not reliably honour
+#: `response_format`. Kept as data so a deployment that knows its route
+#: DOES support it can say so, rather than editing a branch.
+_PROMPT_ONLY_PROVIDERS = {
+    "custom", "openrouter", "vllm", "lm_studio", "localai",
+    "huggingface_tgi", "aws_bedrock",
+}
+
+
+def resolve_json_strategy(provider_name: str, explicit: bool | None = None) -> str:
+    """Pick how this provider should be asked for JSON.
+
+    `explicit` is the legacy supports_json_mode flag. False still means
+    "do not use a native mechanism" — that setting exists because
+    forcing response_format through OpenRouter truncated responses, and
+    silently overriding it would reintroduce a bug somebody already
+    fixed. It does NOT disable prefill, which has no such failure mode
+    and costs nothing.
+    """
+    name = (provider_name or "").lower()
+    if name in ("claude", "anthropic"):
+        return JSON_PREFILL
+    if explicit is False:
+        return JSON_PROMPT_ONLY
+    if name == "google":
+        return JSON_MIME
+    if name in _PROMPT_ONLY_PROVIDERS and explicit is not True:
+        return JSON_PROMPT_ONLY
+    return JSON_NATIVE
+
+
 #: Why generation stopped, normalised across providers. Anthropic says
 #: stop_reason="max_tokens", Google says finishReason="MAX_TOKENS",
 #: OpenAI says finish_reason="length" — three names, three values, for
@@ -75,9 +127,11 @@ class AIProvider(ABC):
 
 
 class ClaudeProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
+                 json_strategy: str = JSON_PREFILL):
         self._api_key = api_key
         self.model = model
+        self.json_strategy = json_strategy
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096, temperature: float = 0.1, stop_sequences: list[str] | None = None, json_mode: bool = False) -> AIResponse:
         """Use httpx directly to avoid async client event loop issues in Celery workers."""
@@ -90,12 +144,22 @@ class ClaudeProvider(AIProvider):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        messages = [{"role": "user", "content": user_prompt}]
+        # Anthropic has no response_format. Its equivalent is PREFILL:
+        # seed the assistant turn with "{" and the model continues from
+        # there, so it cannot open with prose, a markdown fence or a
+        # preamble. Stronger than asking in the prompt, and it was not
+        # being used at all — supports_json_mode simply did nothing here.
+        prefilled = json_mode and self.json_strategy == JSON_PREFILL
+        if prefilled:
+            messages.append({"role": "assistant", "content": "{"})
+
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
+            "messages": messages,
         }
         if stop_sequences:
             payload["stop_sequences"] = stop_sequences
@@ -125,6 +189,11 @@ class ClaudeProvider(AIProvider):
             for b in (data.get("content") or [])
             if isinstance(b, dict) and b.get("type") == "text"
         )
+        # The prefill is not echoed back — the response CONTINUES from
+        # it — so the opening brace has to be restored or every reply
+        # fails to parse. Guarded in case a future model does echo it.
+        if prefilled and content and not content.lstrip().startswith("{"):
+            content = "{" + content
         usage = data.get("usage", {})
 
         return AIResponse(
@@ -145,7 +214,12 @@ class OpenAIProvider(AIProvider):
         base_url: Optional[str] = None,
         timeout: int = 120,
         extra_payload: Optional[dict] = None,
+        json_strategy: str = JSON_NATIVE,
     ):
+        #: How this route should be asked for JSON. Defaults to the
+        #: native field; create_provider resolves the right one for
+        #: OpenRouter and friends, where it is not reliably honoured.
+        self.json_strategy = json_strategy
         self._api_key = api_key
         self._base_url = (base_url or "https://api.openai.com").rstrip("/")
         self._timeout = timeout  # 120s default — accommodates both fast cloud and slow local models
@@ -276,7 +350,11 @@ class OpenAIProvider(AIProvider):
         }
         if stop_sequences:
             payload["stop"] = stop_sequences
-        if json_mode:
+        # Only when this route actually honours it. OpenRouter and some
+        # self-hosted gateways accept the field and then truncate
+        # mid-JSON, which is why the custom default resolves to
+        # prompt-only — the prompt still asks for JSON either way.
+        if json_mode and self.json_strategy == JSON_NATIVE:
             payload["response_format"] = {"type": "json_object"}
         # Merge per-model extra fields last so they can override anything above
         # if explicitly specified (rare; typically additive top-level keys like
@@ -416,9 +494,11 @@ class OpenAIProvider(AIProvider):
 
 
 class GoogleProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash",
+                 json_strategy: str = JSON_MIME):
         self.api_key = api_key
         self.model = model
+        self.json_strategy = json_strategy
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096, temperature: float = 0.1, stop_sequences: list[str] | None = None, json_mode: bool = False) -> AIResponse:
         import httpx
@@ -427,7 +507,7 @@ class GoogleProvider(AIProvider):
         gen_config: dict = {"maxOutputTokens": max_tokens, "temperature": temperature}
         if stop_sequences:
             gen_config["stopSequences"] = stop_sequences
-        if json_mode:
+        if json_mode and self.json_strategy == JSON_MIME:
             gen_config["responseMimeType"] = "application/json"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -472,6 +552,7 @@ def create_provider(
     model: Optional[str] = None,
     endpoint_url: Optional[str] = None,
     extra_payload: Optional[dict] = None,
+    supports_json_mode: Optional[bool] = None,
 ) -> AIProvider:
     """Create an AI provider instance from configuration.
 
@@ -479,20 +560,24 @@ def create_provider(
     compatible providers only). Used for provider-specific knobs like
     OpenRouter's `{"provider": {"ignore": [...]}}` routing controls.
     """
+    strategy = resolve_json_strategy(provider_name, supports_json_mode)
+
     if provider_name in ("claude", "anthropic"):
-        return ClaudeProvider(api_key=api_key, model=model or "claude-sonnet-4-20250514")
+        return ClaudeProvider(
+            api_key=api_key, model=model or "claude-sonnet-4-20250514",
+            json_strategy=strategy)
     elif provider_name == "openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", extra_payload=extra_payload)
+        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "azure_openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", base_url=endpoint_url, extra_payload=extra_payload)
+        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "google":
-        return GoogleProvider(api_key=api_key, model=model or "gemini-2.0-flash")
+        return GoogleProvider(api_key=api_key, model=model or "gemini-2.0-flash", json_strategy=strategy)
     elif provider_name == "ollama":
         # Ollama uses OpenAI-compatible API at /v1/chat/completions — no API key needed
-        return OpenAIProvider(api_key=api_key or "ollama", model=model or "phi3.5", base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload)
+        return OpenAIProvider(api_key=api_key or "ollama", model=model or "phi3.5", base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name in ("custom", "aws_bedrock", "lm_studio", "vllm", "localai", "huggingface_tgi"):
         # Custom / self-hosted endpoints use OpenAI-compatible API
-        return OpenAIProvider(api_key=api_key or "none", model=model or "default", base_url=endpoint_url, extra_payload=extra_payload)
+        return OpenAIProvider(api_key=api_key or "none", model=model or "default", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     else:
         raise ValueError(f"Unknown AI provider: {provider_name}")
 
@@ -524,6 +609,11 @@ async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[
         return create_provider(
             m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
             extra_payload=m.provider_config or None,
+            # The tenant's legacy flag still steers the NATIVE mechanism
+            # (it exists because forcing response_format through
+            # OpenRouter truncated responses). It has never had any
+            # effect on Anthropic, which resolves to prefill regardless.
+            supports_json_mode=m.supports_json_mode,
         )
 
     # Fallback: env vars

@@ -103,7 +103,16 @@ class TriageEngine:
         # Build prompt — select template based on model config
         use_compact = self._config.get("use_compact_prompt", False)
         stop_seqs = self._config.get("stop_sequences") or []
-        json_mode = self._config.get("supports_json_mode", False)
+        # Triage ALWAYS wants JSON — that is the whole contract of this
+        # call. What varies is the mechanism, and that is the adapter's
+        # business now (response_format / responseMimeType / prefill /
+        # prompt-only), resolved once in create_provider.
+        #
+        # This used to read supports_json_mode and pass it through, which
+        # meant a tenant with the flag off — the DEFAULT for every custom
+        # provider — also switched off Claude's prefill, a mechanism that
+        # has none of the failure modes the flag exists to avoid.
+        json_mode = True
         # Sized to THIS model's window rather than to a constant.
         _budget = self._input_budget_chars()
 
