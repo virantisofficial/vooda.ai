@@ -201,6 +201,17 @@ function ScanJobCard({ scan, repoId, onCancel, onDelete, onOpenDetail, onTriage 
                 {scan.stats.ai_triaged} AI-triaged
               </span>
             )}
+            {/* Failures sit beside the successes rather than being
+                folded into them. ai_triaged used to count ATTEMPTS, so
+                a run that produced 24 verdicts out of 28 read "28
+                AI-triaged" and the four that returned nothing looked
+                settled. */}
+            {(scan.stats.ai_triage_failed ?? 0) > 0 && (
+              <span className="flex items-center gap-1 text-amber-400"
+                    title={`${Object.entries(scan.stats.ai_triage_failures || {}).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(" · ")}${scan.stats.ai_triage_model ? ` — ${scan.stats.ai_triage_model}` : ""}`}>
+                {scan.stats.ai_triage_failed} triage failed
+              </span>
+            )}
             {scan.stats.false_positives > 0 && (
               <span className="flex items-center gap-1 text-green-400">
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
@@ -227,6 +238,19 @@ function ScanJobCard({ scan, repoId, onCancel, onDelete, onOpenDetail, onTriage 
             {(() => {
               if (scan.stats.findings_total <= 0) return null;
               if (scan.stats.ai_triaged > 0) return null;  // AI ran on something
+
+              // Triage RAN and every call failed. Saying "configure AI
+              // model" here sends the reader to settings for a problem
+              // that is not configuration — the model is configured and
+              // answering, just not usefully.
+              const failed = scan.stats.ai_triage_failed ?? 0;
+              if (failed > 0) {
+                return (
+                  <span className="text-amber-400/80 italic">
+                    AI triage failed on all {failed} finding{failed === 1 ? "" : "s"} — these are untriaged, not low-risk
+                  </span>
+                );
+              }
 
               // Case 1 — user picked "Scan Without AI"
               if (scan.config?.skip_ai) {

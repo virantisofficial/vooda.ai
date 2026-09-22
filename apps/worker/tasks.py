@@ -1374,7 +1374,7 @@ async def _run_ai_triage_retro(scan_job_id: str):
         await db.commit()
 
         try:
-            triaged, dedup_saved, failure_summary = await _run_ai_triage(db, job, repo_path)
+            triaged, dedup_saved, failure_summary, _triage_model_label = await _run_ai_triage(db, job, repo_path)
             fp_after = (await db.execute(select(sa_func.count(NormalizedFinding.id)).where(
                 NormalizedFinding.scan_job_id == job.id,
                 NormalizedFinding.classification.in_(FALSE_POSITIVE_VERDICTS),
@@ -1389,6 +1389,13 @@ async def _run_ai_triage_retro(scan_job_id: str):
             # (don't rebuild) to preserve files_analyzed / findings_total / etc.
             _stats = dict(job.stats or {})
             _stats["ai_triaged"] = fp_after + tp_after
+            _stats["ai_triage_attempted"] = triaged
+            _stats["ai_triage_failed"] = (
+                sum((failure_summary or {}).values())
+                or max(0, triaged - (fp_after + tp_after))
+            )
+            _stats["ai_triage_failures"] = dict(failure_summary or {})
+            _stats["ai_triage_model"] = _triage_model_label
             _stats["false_positives"] = fp_after
             _stats["true_positives"] = tp_after
             job.stats = _stats
@@ -5591,7 +5598,7 @@ async def _run_scan_job(scan_job_id: str):
                 await db.commit()
 
                 try:
-                    triaged, dedup_saved, failure_summary = await _run_ai_triage(db, job, repo_path)
+                    triaged, dedup_saved, failure_summary, _triage_model_label = await _run_ai_triage(db, job, repo_path)
 
                     # Count results
                     from apps.api.app.models.finding import Classification as Cls
@@ -5882,10 +5889,31 @@ async def _run_scan_job(scan_job_id: str):
                 "credentials_active": active_count,
                 "credentials_inactive": max(0, verified_count - active_count),
                 "credentials_suppressed": suppressed_inactive_count,
-                # AI-triaged = findings carrying an AI verdict (this run's
-                # `triaged` OR an inherited verdict), so a clean re-scan reads
-                # "N AI-triaged" instead of a false "AI triage pending".
-                "ai_triaged": max(triaged, ai_classified_count),
+                # AI-triaged = findings actually CARRYING a verdict.
+                # This was max(triaged, ai_classified_count), and
+                # `triaged` counts ATTEMPTS — so a run that attempted 28
+                # and produced 24 verdicts reported 28. Four findings,
+                # one of them an RSA private key, were presented as
+                # triaged when the model had returned nothing.
+                #
+                # ai_classified_count alone still covers what the max()
+                # was for: on a clean re-scan the verdicts are inherited
+                # via dedup, `triaged` is 0, and the card must not read
+                # "AI triage pending".
+                "ai_triaged": ai_classified_count,
+                "ai_triage_attempted": triaged,
+                # The engine COUNTED the failures; derive from that, not from
+                # (attempted - classified). Dedup inherits verdicts from
+                # earlier scans, so on a re-scan `attempted` is smaller
+                # than `classified` and the subtraction goes negative —
+                # reporting 0 failures beside a breakdown listing 3.
+                # Same formula _emit_triage_health_signal already uses.
+                "ai_triage_failed": (
+                    sum((failure_summary or {}).values())
+                    or max(0, triaged - ai_classified_count)
+                ),
+                "ai_triage_failures": dict(failure_summary or {}),
+                "ai_triage_model": _triage_model_label,
                 "cache_hits": cache_hits,
                 "cache_invalidated": cache_invalidated,
                 "cache_new": cache_new,
@@ -6676,7 +6704,8 @@ def _is_local_endpoint(base_url: str) -> bool:
     return False
 
 
-async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, int, dict[str, int]]:
+async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, int, dict[str, int], str]:
+    _triage_model_label = ""
     """Run AI triage on all normalized findings for a scan job using batch processing."""
     from apps.api.app.models.finding import NormalizedFinding, Classification
     from apps.api.app.models.repository import RepositorySnapshot
@@ -6727,6 +6756,12 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
             )
             mc = mc_result.scalars().first()
             if mc:
+                # Which model produced these verdicts. A bare failure
+                # count is not comparable across providers — "returned
+                # empty on 11%" and "truncated on 2%" are different
+                # problems with different fixes, and Vooda can be
+                # pointed at anything.
+                _triage_model_label = f"{mc.provider}:{mc.model_id}"
                 model_config_dict = {
                     "use_compact_prompt": mc.use_compact_prompt or False,
                     "system_prompt_override": mc.system_prompt_override or "",
@@ -6901,7 +6936,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
             logger.debug("test_file_handling_read_failed", error=str(_tfhe)[:120])
 
     if not findings:
-        return 0, 0, {}
+        return 0, 0, {}, ""
 
     # Get framework context from snapshot — only meaningful for git-
     # scan jobs (a Slack workspace doesn't have a `requirements.txt`).
@@ -7351,7 +7386,7 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
             held_for_review=below_threshold_count,
             triaged=triaged,
         )
-    return triaged, dedup_saved, failure_summary
+    return triaged, dedup_saved, failure_summary, _triage_model_label
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -7443,7 +7478,7 @@ async def _normalize_and_triage(scan_job_id: str):
                 snapshot = snap_result.scalar_one_or_none()
                 repo_path = snapshot.storage_path if snapshot else ""
 
-            triaged, _dedup, _failure_summary = await _run_ai_triage(db, job, repo_path)
+            triaged, _dedup, _failure_summary, _model_label = await _run_ai_triage(db, job, repo_path)
             logger.info("ai_triage_complete", scan_job_id=str(job.id), triaged=triaged)
 
 
