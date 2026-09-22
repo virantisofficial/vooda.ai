@@ -4412,6 +4412,7 @@ async def _run_scan_job(scan_job_id: str):
                               if (pf.raw_data or {}).get("_raw_value_for_verification")
                               and (pf.raw_data or {}).get("provider", "unknown").lower() in SUPPORTED_PROVIDERS]
 
+
                 if verifiable and not _auto_verify:
                     logger.info(
                         "credential_verification_disabled_by_setting",
@@ -5767,6 +5768,50 @@ async def _run_scan_job(scan_job_id: str):
             # still reference them; the metric will now always read "passed".
             policy_passed = True
             policy_violations = 0
+
+            # ── Record "no checker" for providers nothing can verify ──
+            # A provider with no verifier is filtered out BEFORE any
+            # verification code runs, so the paths that learnt to stamp
+            # `unsupported` never saw these findings. Done as a sweep
+            # rather than at insert because a re-scan UPDATES existing
+            # rows — an insert-time stamp reached new findings only, and
+            # the ones already sitting at "Not checked" stayed there.
+            #
+            # Only `unknown` is overwritten. A verified verdict, or a
+            # check that ran and failed, is real information and must
+            # not be replaced by "we were never going to try".
+            try:
+                # Imported locally: `_sa_update` is bound inside a
+                # CONDITIONAL block earlier in this function, so relying
+                # on it here made the sweep depend on whether an
+                # unrelated branch had run.
+                from sqlalchemy import update as _unsup_update
+                from services.secret_verification.verifier import (
+                    SUPPORTED_PROVIDERS as _SUPPORTED,
+                )
+                _unsup_res = await db.execute(
+                    _unsup_update(NormalizedFinding)
+                    .where(
+                        NormalizedFinding.scan_job_id == job.id,
+                        NormalizedFinding.tenant_id == job.tenant_id,
+                        NormalizedFinding.validation_status == Validity.UNKNOWN.value,
+                        sa_func.lower(
+                            NormalizedFinding.source_metadata["provider"].astext
+                        ).notin_(list(_SUPPORTED)),
+                    )
+                    .values(validation_status=Validity.UNSUPPORTED.value)
+                )
+                await db.commit()
+                logger.info(
+                    "unsupported_validity_sweep",
+                    scan_job_id=scan_job_id,
+                    marked=_unsup_res.rowcount or 0,
+                )
+            except Exception as _unsup_err:
+                logger.warning(
+                    "unsupported_validity_sweep_failed",
+                    scan_job_id=scan_job_id, error=str(_unsup_err)[:160],
+                )
 
             # ── Step 8: Generate metrics snapshot ─────────────────
             try:

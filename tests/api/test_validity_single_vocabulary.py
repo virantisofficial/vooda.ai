@@ -150,3 +150,22 @@ def test_the_three_not_verified_states_stay_distinct():
     for v in (Validity.UNSUPPORTED, Validity.CHECK_FAILED, Validity.UNKNOWN):
         assert v in INCONCLUSIVE, v
         assert v not in PROVABLY_DEAD, v
+
+
+def test_every_verification_path_records_no_checker():
+    """There are THREE places a finding can miss verification, and each
+    had to learn this separately.
+
+    The repository-scan path filters unsupported providers out BEFORE
+    calling any verifier, so the two paths that were taught to stamp
+    `unsupported` never saw them. An end-to-end scan of DVWA came back
+    with postgresql and generic findings marked "Not checked" — a check
+    that can never happen.
+    """
+    src = pathlib.Path("apps/worker/tasks.py").read_text(encoding="utf-8")
+    assert src.count("Validity.UNSUPPORTED.value") >= 2, (
+        "the pre-verification filter must stamp what it filters out"
+    )
+    # and the stamp must sit beside the filter that causes the skip
+    idx = src.index("in SUPPORTED_PROVIDERS]")
+    assert "Validity.UNSUPPORTED.value" in src[idx: idx + 1200]
