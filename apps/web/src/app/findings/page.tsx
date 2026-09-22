@@ -218,7 +218,10 @@ function FindingsPageInner() {
     { key: "masked_value", label: "Masked Value", weight: 14 },
     { key: "severity",     label: "Severity",     weight: 10 },
     { key: "validity",     label: "Validity",     weight: 10 },
-    { key: "status",       label: "Status",       weight: 14 },
+    // Widened for the lifecycle pair: the status pill plus its
+    // reason needs more room than the single word it replaced,
+    // which was truncating "False positive" to "Fals...".
+    { key: "status",       label: "Status",       weight: 20 },
     { key: "confidence",   label: "Confidence",   weight: 12 },
     { key: "found",        label: "Found",        weight: 10 },
   ];

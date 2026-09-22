@@ -97,6 +97,17 @@ CLOSING_STATUSES: tuple[FindingStatus, ...] = (
     FindingStatus.DISMISSED,
 )
 
+#: Reasons a person may choose. NO_LONGER_PRESENT is excluded: it means
+#: Vooda lost sight of the artifact — set by the repository- and
+#: source-delete sweeps — and is a statement about our visibility, not a
+#: judgement anyone can make about the credential. Offering it in a
+#: triage menu invites someone to assert it while the secret is still
+#: live in every clone that carried it.
+HUMAN_SELECTABLE_REASONS: tuple[ResolutionReason, ...] = tuple(
+    r for rs in REASONS_FOR.values() for r in rs
+    if r is not ResolutionReason.NO_LONGER_PRESENT
+)
+
 #: The leak was actually cleaned up. Only these may count toward MTTR —
 #: NO_LONGER_PRESENT is excluded on purpose, so deleting a repository
 #: can never read as an instant fix.

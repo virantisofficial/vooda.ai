@@ -155,3 +155,35 @@ def test_the_status_cell_cannot_shove_the_next_column_off_the_row():
     cell = src[start: src.index("</td>", start)]
     assert "truncate" in cell, "the reason must be able to truncate"
     assert "min-w-0" in cell, "truncation needs a min-w-0 flex parent"
+
+
+def test_a_person_cannot_dismiss_something_as_no_longer_present():
+    """That reason is a statement about Vooda's visibility, not a
+    judgement about the credential.
+
+    It is set by the repository- and source-delete sweeps. Offering it
+    in a triage menu invites someone to assert it while the secret is
+    still live in every clone that ever carried it.
+    """
+    from apps.api.app.core.finding_status import (
+        HUMAN_SELECTABLE_REASONS, REASONS_FOR, ResolutionReason,
+    )
+    assert ResolutionReason.NO_LONGER_PRESENT not in HUMAN_SELECTABLE_REASONS
+    # every other reason stays selectable
+    every = {r for rs in REASONS_FOR.values() for r in rs}
+    assert set(HUMAN_SELECTABLE_REASONS) == every - {
+        ResolutionReason.NO_LONGER_PRESENT
+    }
+    src = ROUTER.read_text(encoding="utf-8")
+    assert "HUMAN_SELECTABLE_REASONS" in src, (
+        "the close action must enforce it, not just document it"
+    )
+
+
+def test_the_filter_still_offers_every_reason():
+    """Filtering is not deciding. A reason that exists in the data must
+    be findable even when no person may assign it."""
+    from apps.api.app.core.finding_status import ResolutionReason
+    web = WEB.read_text(encoding="utf-8")
+    for reason in ResolutionReason:
+        assert f'value="{reason.value}"' in web, reason.value

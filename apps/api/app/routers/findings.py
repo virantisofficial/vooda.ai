@@ -99,6 +99,18 @@ def _classification_for_close(action: str, reason: Optional[str]):
                 f"{[r.value for r in ResolutionReason]}"
             ),
         )
+    from apps.api.app.core.finding_status import HUMAN_SELECTABLE_REASONS
+    if parsed not in HUMAN_SELECTABLE_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"'{parsed.value}' is set by Vooda when it loses sight of "
+                "the artifact carrying a credential; it is not a triage "
+                "decision. Dismiss as false_positive, test_credential, "
+                "acceptable_risk or mitigating_control, or rotate the "
+                "credential and resolve."
+            ),
+        )
     status = (FindingStatus.RESOLVED if action == "resolve"
               else FindingStatus.DISMISSED)
     try:
