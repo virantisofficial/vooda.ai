@@ -163,20 +163,40 @@ def test_core_updates_write_the_lifecycle_columns_too():
     it. Any Core UPDATE touching classification must set status in the
     same statement.
     """
+    # Parse each .values(...) block across lines. The first version of
+    # this guard matched one line at a time and so missed every
+    # multi-line block — including the repository-delete sweep, which
+    # left 173 incidents reading resolved_repo_removed on the legacy
+    # column while status still said open.
     offenders = []
     for root in ("apps", "services"):
         for path in pathlib.Path(root).rglob("*.py"):
             if "__pycache__" in path.parts:
                 continue
             src = path.read_text(encoding="utf-8", errors="replace")
-            for i, line in enumerate(src.splitlines(), 1):
-                if ".values(" not in line or "classification" not in line:
+            for m in re.finditer(r"\.values\(", src):
+                depth, i = 0, m.end() - 1
+                while i < len(src):
+                    if src[i] == "(":
+                        depth += 1
+                    elif src[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                block = src[m.end():i]
+                if "classification" not in block:
                     continue
-                # Either the statement also sets status, or it delegates
-                # to a helper that does.
-                if "status" in line or "_lifecycle_values" in line:
+                # Must be the `status=` kwarg itself. A bare substring
+                # test matches `review_status=`, which is a different
+                # column — the guard then passes on the exact bug it
+                # exists to catch. Verified by reintroducing it.
+                if re.search(r"(?<![a-z_])status\s*=", block):
                     continue
-                offenders.append(f"{path}:{i}: {line.strip()[:80]}")
+                if "_lifecycle_values" in block:
+                    continue
+                ln = src[: m.start()].count("\n") + 1
+                offenders.append(f"{path}:{ln}")
     assert not offenders, (
         "Core UPDATEs writing classification without the lifecycle "
         "columns:\n" + "\n".join(offenders)

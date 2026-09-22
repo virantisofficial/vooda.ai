@@ -22,6 +22,7 @@ from apps.worker.celery_app import (
 from apps.api.app.core.config import settings
 from apps.api.app.core.validity import normalize as _validity
 from apps.api.app.core.classification_provenance import mirror_lifecycle
+from apps.api.app.core.finding_status import from_classification as _lc
 from apps.api.app.core.finding_state import (
     ANY_VERDICT,
     FALSE_POSITIVE_VERDICTS,
@@ -164,6 +165,10 @@ async def _upsert_secret_incident(
         occurrence_count=1,
         classification="needs_review",
         review_status="unreviewed",
+        # A Core insert, so mirror_lifecycle() does not run: a new
+        # incident starts open with no resolution.
+        status="open",
+        resolution_reason=None,
         validation_status=_validity(raw.get("validation_status")).value,
         first_seen_at=now_ts,
         last_seen_at=now_ts,
@@ -7240,6 +7245,17 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                     )
                     .values(
                         classification=finding.classification,
+                        # Core UPDATE — mirror_lifecycle() does not run
+                        # here, so the pair is derived in the statement.
+                        status=_lc(finding.classification).status.value,
+                        resolution_reason=(
+                            _lc(finding.classification).reason.value
+                            if _lc(finding.classification).reason else None
+                        ),
+                        ai_verdict=(
+                            _lc(finding.classification).ai_verdict.value
+                            if _lc(finding.classification).ai_verdict else None
+                        ),
                         ai_explanation=finding.ai_explanation,
                         ai_confidence=finding.ai_confidence,
                     )

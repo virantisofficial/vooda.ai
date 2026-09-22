@@ -621,6 +621,18 @@ async def delete_scan_source(
                     classification="resolved_source_removed",
                     review_status="reviewed",
                     occurrence_count=0,
+                    # Core UPDATE — the lifecycle pair must be set in
+                    # the same statement. Dismissed, not resolved: we
+                    # lost sight of the credential, nobody revoked it.
+                    status="dismissed",
+                    resolution_reason="no_longer_present",
+                    resolved_at=sa_func.now(),
+                    resolution_note=(
+                        "The scan source carrying this credential was "
+                        "removed from Vooda. That is a loss of "
+                        "visibility, not a revocation — the credential "
+                        "may still be live."
+                    ),
                 )
             )
 

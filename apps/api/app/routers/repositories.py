@@ -1411,6 +1411,20 @@ async def delete_repository(
                     classification="resolved_repo_removed",
                     review_status="reviewed",
                     occurrence_count=0,
+                    # A Core UPDATE bypasses mirror_lifecycle(), so the
+                    # lifecycle pair has to be written in the same
+                    # statement. Without this the incident reads
+                    # "resolved_repo_removed" on the legacy column while
+                    # status still says open.
+                    status="dismissed",
+                    resolution_reason="no_longer_present",
+                    resolved_at=sa_func.now(),
+                    resolution_note=(
+                        "The repository carrying this credential was "
+                        "removed from Vooda. That is a loss of "
+                        "visibility, not a revocation — the credential "
+                        "may still be live."
+                    ),
                 )
             )
         incidents_closed = len(orphan_ids)
