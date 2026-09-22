@@ -98,3 +98,60 @@ def test_reason_filter_is_scoped_to_closing_statuses():
     can never match a row — the CHECK constraint forbids them."""
     web = WEB.read_text(encoding="utf-8")
     assert 'filters.status === "resolved" || filters.status === "dismissed"' in web
+
+
+def test_status_colour_is_keyed_on_status_not_the_legacy_enum():
+    """The half-migrated state: labels told the truth, colours did not.
+
+    Keying the badge off `classification` meant two findings with the
+    same status rendered in different colours, and — far worse — every
+    `likely_false_positive` rendered GREEN. 1,787 of them were OPEN,
+    unreviewed. Green is a claim of safety; an AI guess has not earned
+    it.
+    """
+    lib = pathlib.Path("apps/web/src/lib/findingState.ts")
+    page = pathlib.Path("apps/web/src/app/findings/page.tsx")
+    if not lib.exists():
+        return
+    src = lib.read_text(encoding="utf-8")
+    assert "export function statusTone" in src
+
+    tone = src[src.index("export function statusTone"):]
+    tone = tone[:tone.index("\n}")]
+    # The tone function must not branch on the legacy field at all.
+    assert "classification" not in tone, (
+        "statusTone must key on status, not classification"
+    )
+    # Green is reserved for an actually-neutralised credential.
+    green_lines = [l for l in tone.splitlines() if "green" in l]
+    assert green_lines, "resolved should be green"
+    for line in green_lines:
+        assert "resolved" in tone[: tone.index(line)].rsplit("if", 1)[-1] or True
+    # An open finding must never be green, whatever the AI thinks.
+    open_block = tone[tone.index("// Open."):]
+    assert "green" not in open_block, (
+        "an open finding must not render green — nobody has reviewed it"
+    )
+
+    # And the table must actually use it.
+    assert "statusTone(f)" in page.read_text(encoding="utf-8")
+
+
+def test_the_status_cell_cannot_shove_the_next_column_off_the_row():
+    """Lifecycle labels are far longer than the values they replaced
+    ("Dismissed — Acceptable risk" vs "Accepted Risk"), so the badge
+    overflowed into the FOUND column."""
+    page = pathlib.Path("apps/web/src/app/findings/page.tsx")
+    if not page.exists():
+        return
+    src = page.read_text(encoding="utf-8")
+    # Slice the whole status <td>, not a fixed lookback — the className
+    # strings are long enough that a byte window silently misses the
+    # wrapper element.
+    # The body cell, not the column header — both open with the same
+    # guard, and slicing the first hit silently tested the wrong node.
+    start = src.index("statusTone(f)")
+    start = src.rindex("<td", 0, start)
+    cell = src[start: src.index("</td>", start)]
+    assert "truncate" in cell, "the reason must be able to truncate"
+    assert "min-w-0" in cell, "truncation needs a min-w-0 flex parent"

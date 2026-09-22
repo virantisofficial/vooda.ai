@@ -1,6 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { classificationLabel, statusLabel } from "@/lib/findingState";
+import { classificationLabel, statusLabel, statusShort, statusDetail, statusTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -55,7 +55,9 @@ const PAGE_SIZE = 50;
 // file for the implementation + the `kind` prop that toggles between
 // findings (/reports/export/{format}) and incidents (/incidents/export/csv).
 
-type SortField = "priority" | "created_at" | "severity" | "classification" | "ai_confidence" | "title";
+// "status" is the lifecycle axis the Status column now sorts on;
+// "classification" stays for deep links that still carry it.
+type SortField = "priority" | "created_at" | "severity" | "status" | "resolution_reason" | "ai_verdict" | "classification" | "ai_confidence" | "title";
 type SortDir = "asc" | "desc";
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
@@ -1175,7 +1177,7 @@ function FindingsPageInner() {
                     <th className="px-3 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-left" style={{ color: "#475569", width: columnWidths.validity }}>Validity</th>
                   )}
                   {visibleColumns.status && (
-                    <SortableHeader label="Status" field="classification" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left whitespace-nowrap" style={{ width: columnWidths.status }} />
+                    <SortableHeader label="Status" field="status" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left whitespace-nowrap" style={{ width: columnWidths.status }} />
                   )}
                   {visibleColumns.confidence && (
                     <th className="px-3 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-left" style={{ color: "#475569", width: columnWidths.confidence }}>Confidence</th>
@@ -1312,20 +1314,19 @@ function FindingsPageInner() {
                     )}
                     {visibleColumns.status && (
                       <td className="px-3 py-3">
-                        <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded whitespace-nowrap ${
-                          f.classification.includes("true_positive") ? "bg-red-500/10 text-red-400"
-                          : f.classification.includes("false_positive") ? "bg-green-500/10 text-green-400"
-                          : f.classification === "accepted_risk" ? "bg-orange-500/10 text-orange-400"
-                          : "bg-yellow-500/10 text-yellow-400"
-                        }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                            f.classification.includes("true_positive") ? "bg-red-400"
-                            : f.classification.includes("false_positive") ? "bg-green-400"
-                            : f.classification === "accepted_risk" ? "bg-orange-400"
-                            : "bg-yellow-400"
-                          }`} />
-                          {statusLabel(f)}
-                        </span>
+                        <div className="flex items-center gap-1.5 min-w-0" title={statusLabel(f)}>
+                          <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${statusTone(f).badge}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusTone(f).dot}`} />
+                            {statusShort(f)}
+                          </span>
+                          {/* The reason is the useful half, but it is
+                              long. Kept outside the pill so it can
+                              truncate instead of shoving the next
+                              column off the row. */}
+                          {statusDetail(f) && (
+                            <span className="text-[10px] text-slate-500 truncate">{statusDetail(f)}</span>
+                          )}
+                        </div>
                       </td>
                     )}
                     {/* Confidence — restored 2026-05-14 as a default-on

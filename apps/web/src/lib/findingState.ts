@@ -107,3 +107,58 @@ export function statusLabel(obj: any): string {
   }
   return classificationLabel(obj?.classification);
 }
+
+
+/**
+ * Badge colour for a finding's lifecycle.
+ *
+ * Keyed on status — NOT on the legacy classification, which produced
+ * two wrong results at once: findings with the same status rendered in
+ * different colours, and every `likely_false_positive` rendered green
+ * even though it is OPEN and nobody has reviewed it. Green is a claim
+ * of safety, and an unreviewed AI guess has not earned it.
+ *
+ * Green therefore means one thing only: the credential was actually
+ * neutralised. Dismissed is neutral — correct, but not an achievement.
+ */
+export function statusTone(obj: any): { badge: string; dot: string } {
+  const st = (obj?.status || "").toLowerCase();
+  const verdict = (obj?.ai_verdict || "").toLowerCase();
+
+  if (st === "resolved")
+    return { badge: "bg-green-500/10 text-green-400", dot: "bg-green-400" };
+  if (st === "dismissed")
+    return { badge: "bg-slate-500/10 text-slate-400", dot: "bg-slate-400" };
+  if (st === "triaging")
+    return { badge: "bg-blue-500/10 text-blue-400", dot: "bg-blue-400" };
+  // Open. The model's opinion sets emphasis, never safety.
+  if (verdict === "likely_fp")
+    return { badge: "bg-slate-500/10 text-slate-400", dot: "bg-slate-500" };
+  if (verdict === "likely_tp")
+    return { badge: "bg-red-500/10 text-red-400", dot: "bg-red-400" };
+  return { badge: "bg-amber-500/10 text-amber-400", dot: "bg-amber-400" };
+}
+
+/** Short badge text: the status word. */
+export function statusShort(obj: any): string {
+  const st = (obj?.status || "").toLowerCase();
+  if (st === "resolved") return "Resolved";
+  if (st === "dismissed") return "Dismissed";
+  if (st === "triaging") return "Triaging";
+  if (st === "open") return "Open";
+  return classificationLabel(obj?.classification);
+}
+
+/** Secondary detail: the reason, or the AI's opinion on an open one. */
+export function statusDetail(obj: any): string {
+  const st = (obj?.status || "").toLowerCase();
+  const rs = (obj?.resolution_reason || "").toLowerCase();
+  if (rs) return rs.replace(/_/g, " ").replace(/^./, (c: string) => c.toUpperCase());
+  if (st === "open") {
+    const v = (obj?.ai_verdict || "").toLowerCase();
+    if (v === "likely_fp") return "AI: likely not a secret";
+    if (v === "likely_tp") return "AI: likely real";
+    if (v === "unsure") return "AI: unsure";
+  }
+  return "";
+}

@@ -343,6 +343,11 @@ async def list_findings(
         "created_at": NormalizedFinding.created_at,
         "severity": NormalizedFinding.severity,
         "classification": NormalizedFinding.classification,
+        # The lifecycle axis. The Status column header sorts on this;
+        # `classification` remains sortable for older deep links.
+        "status": NormalizedFinding.status,
+        "resolution_reason": NormalizedFinding.resolution_reason,
+        "ai_verdict": NormalizedFinding.ai_verdict,
         "ai_confidence": NormalizedFinding.ai_confidence,
         "title": NormalizedFinding.title,
         "remediation_status": NormalizedFinding.remediation_status,
