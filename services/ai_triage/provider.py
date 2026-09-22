@@ -128,10 +128,20 @@ class AIProvider(ABC):
 
 class ClaudeProvider(AIProvider):
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
-                 json_strategy: str = JSON_PREFILL):
+                 json_strategy: str = JSON_PREFILL,
+                 workspace_id: str | None = None):
         self._api_key = api_key
         self.model = model
         self.json_strategy = json_strategy
+        #: Anthropic ORG-level keys are not scoped to a workspace and are
+        #: rejected without this header:
+        #:   400 "This API key is not scoped to a workspace, so this
+        #:        request must include the anthropic-workspace-id header"
+        #: Workspace-scoped keys do not need it. An enterprise customer
+        #: is likely to hand over an org key, so supporting both is the
+        #: difference between Vooda working and not on first contact.
+        #: Set via provider_config: {"workspace_id": "wrkspc_..."}.
+        self._workspace_id = workspace_id
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096, temperature: float = 0.1, stop_sequences: list[str] | None = None, json_mode: bool = False) -> AIResponse:
         """Use httpx directly to avoid async client event loop issues in Celery workers."""
@@ -144,6 +154,8 @@ class ClaudeProvider(AIProvider):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        if self._workspace_id:
+            headers["anthropic-workspace-id"] = self._workspace_id
         messages = [{"role": "user", "content": user_prompt}]
         # Anthropic has no response_format. Its equivalent is PREFILL:
         # seed the assistant turn with "{" and the model continues from
@@ -573,7 +585,9 @@ def create_provider(
     if provider_name in ("claude", "anthropic"):
         return ClaudeProvider(
             api_key=api_key, model=model or "claude-sonnet-4-20250514",
-            json_strategy=strategy)
+            json_strategy=strategy,
+            workspace_id=(extra_payload or {}).get("workspace_id"),
+        )
     elif provider_name == "openai":
         return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "azure_openai":

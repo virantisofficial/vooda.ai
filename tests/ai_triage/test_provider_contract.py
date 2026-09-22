@@ -418,3 +418,36 @@ def test_claude_request_matches_the_documented_shape(monkeypatch):
     assert body["stop_sequences"] == ["END"]
     assert isinstance(body["max_tokens"], int)
     assert cap["headers"]["anthropic-version"] == "2023-06-01"
+
+
+def test_claude_sends_the_workspace_header_for_an_org_key(monkeypatch):
+    """Found by a REAL call, not by any contract fixture.
+
+    Anthropic ORG-level keys are not scoped to a workspace and are
+    rejected outright:
+      400 "This API key is not scoped to a workspace, so this request
+           must include the anthropic-workspace-id header"
+
+    An enterprise customer is likelier to hand over an org key than a
+    workspace-scoped one, so this is the difference between Vooda
+    working and not on first contact.
+    """
+    cap = _patch(monkeypatch, CLAUDE_OK)
+    prov = ClaudeProvider(api_key="k", model="m", workspace_id="wrkspc_123")
+    _run(prov.complete("s", "u"))
+    assert cap["headers"]["anthropic-workspace-id"] == "wrkspc_123"
+
+
+def test_no_workspace_header_when_the_key_is_workspace_scoped(monkeypatch):
+    """Sending an empty or wrong workspace id is worse than sending none —
+    a workspace-scoped key does not need it."""
+    cap = _patch(monkeypatch, CLAUDE_OK)
+    _run(ClaudeProvider(api_key="k", model="m").complete("s", "u"))
+    assert "anthropic-workspace-id" not in cap["headers"]
+
+
+def test_workspace_id_reaches_the_adapter_from_provider_config():
+    from services.ai_triage.provider import create_provider
+    p = create_provider("anthropic", "k", "m", None,
+                        {"workspace_id": "wrkspc_abc"})
+    assert p._workspace_id == "wrkspc_abc"
