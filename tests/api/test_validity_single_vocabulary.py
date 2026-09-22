@@ -164,8 +164,22 @@ def test_every_verification_path_records_no_checker():
     """
     src = pathlib.Path("apps/worker/tasks.py").read_text(encoding="utf-8")
     assert src.count("Validity.UNSUPPORTED.value") >= 2, (
-        "the pre-verification filter must stamp what it filters out"
+        "every path that can skip verification must record why"
     )
-    # and the stamp must sit beside the filter that causes the skip
-    idx = src.index("in SUPPORTED_PROVIDERS]")
-    assert "Validity.UNSUPPORTED.value" in src[idx: idx + 1200]
+    # The repository path stamps as a post-store SWEEP, not at insert:
+    # a re-scan UPDATES existing rows, so an insert-time stamp reaches
+    # new findings only and anything already at "Not checked" stays
+    # there. The sweep must therefore exist and be observable.
+    assert "unsupported_validity_sweep" in src, (
+        "the repository path needs a post-store sweep, not an "
+        "insert-time stamp"
+    )
+    assert "NormalizedFinding.validation_status == Validity.UNKNOWN.value" in src, (
+        "only `unknown` may be overwritten — a verified verdict, or a "
+        "check that ran and failed, must survive"
+    )
+    assert 'marked=' in src, (
+        "report the row count: the first version of this sweep looked "
+        "correct and updated nothing, because it used a name bound "
+        "inside an unrelated conditional block"
+    )
