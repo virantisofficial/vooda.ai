@@ -27,6 +27,15 @@ class FindingListItem(BaseModel):
     # column. The client used to read source_metadata's copy,
     # which is often absent and carries legacy spellings.
     validation_status: str = "unknown"
+    # Phase 2 lifecycle. status + resolution_reason are the pair that
+    # replaces the 13-value classification; both are returned while the
+    # legacy field is still populated.
+    status: str = "open"
+    resolution_reason: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[UUID] = None
+    ai_verdict: Optional[str] = None
     source_metadata: Optional[dict] = None
     # See _none_tags_to_empty in FindingDetail — same DB column nullable
     # vs schema list-required mismatch applies to the list endpoint too.
@@ -114,6 +123,15 @@ class FindingDetail(BaseModel):
     # column. The client used to read source_metadata's copy,
     # which is often absent and carries legacy spellings.
     validation_status: str = "unknown"
+    # Phase 2 lifecycle. status + resolution_reason are the pair that
+    # replaces the 13-value classification; both are returned while the
+    # legacy field is still populated.
+    status: str = "open"
+    resolution_reason: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[UUID] = None
+    ai_verdict: Optional[str] = None
     source_metadata: Optional[dict] = None
     sink_metadata: Optional[dict] = None
 
@@ -173,6 +191,22 @@ class TriageRequest(BaseModel):
     )
     comment: Optional[str] = Field(
         None, examples=["Hard-coded test fixture; safe to ignore."],
+    )
+    # Phase 3: an explicit reason for leaving the open states.
+    # The legacy actions (mark_fp, accept_risk, mark_rotated, …) each
+    # imply exactly one reason and do not need this. The generic
+    # ``resolve`` / ``dismiss`` actions require it, which is what lets a
+    # client pick e.g. "mitigating_control" — a disposition the fixed
+    # action set could not express without another enum value.
+    resolution_reason: Optional[str] = Field(
+        None,
+        examples=["mitigating_control"],
+        description=(
+            "Required for the `resolve` and `dismiss` actions. "
+            "resolve: rotated | revoked | provider_disabled. "
+            "dismiss: false_positive | test_credential | acceptable_risk "
+            "| mitigating_control | no_longer_present."
+        ),
     )
     # Provenance marker — when the action came from a SuggestionChip
     # click (gap #6) the frontend sets this to "suggestion_placeholder",

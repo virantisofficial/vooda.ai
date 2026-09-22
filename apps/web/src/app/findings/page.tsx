@@ -1,6 +1,6 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { classificationLabel } from "@/lib/findingState";
+import { classificationLabel, statusLabel } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -124,6 +124,7 @@ function FindingsPageInner() {
   // ?validation_status=active. The URL filter must be honored on the
   // initial render so it lands on a pre-filtered list, not "all findings".
   const validationStatusFromUrl = searchParams?.get("validation_status") || "";
+  const statusFromUrl = searchParams?.get("status") || "";
   // Tab state removed — Suppressions and Schedules moved to Settings
 
   const [findings, setFindings] = useState<FindingListItem[]>([]);
@@ -139,6 +140,11 @@ function FindingsPageInner() {
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState({
     severity: "",
+    // Lifecycle pair that replaces the 13-value classification filter.
+    // `classification` stays in state for deep links from older URLs.
+    status: statusFromUrl,
+    resolution_reason: "",
+    ai_verdict: "",
     classification: classificationFromUrl,
     search: "",
     repository_id: repoIdFromUrl,
@@ -478,6 +484,9 @@ function FindingsPageInner() {
     setLoading(true);
     const params: Record<string, string> = { page: String(page), page_size: String(PAGE_SIZE), sort_by: sortBy, sort_dir: sortDir };
     if (filters.severity) params.severity = filters.severity;
+    if (filters.status) params.status = filters.status;
+    if (filters.resolution_reason) params.resolution_reason = filters.resolution_reason;
+    if (filters.ai_verdict) params.ai_verdict = filters.ai_verdict;
     if (filters.classification) params.classification = filters.classification;
     if (filters.search) params.search = filters.search;
     if (filters.repository_id) params.repository_id = filters.repository_id;
@@ -880,8 +889,8 @@ function FindingsPageInner() {
               )}
             </div>
           </div>
-          {(repoName || filters.classification || filters.severity || filters.tag || filters.validation_status || filters.scan_source_id) && (
-            <button onClick={() => { setFilters({ severity: "", classification: "", search: "", repository_id: "", scan_source_id: "", tag: "", scanner_name: "", validation_status: "" }); setRepoName(null); setPage(1); window.history.replaceState(null, "", "/findings"); }}
+          {(repoName || filters.status || filters.resolution_reason || filters.ai_verdict || filters.classification || filters.severity || filters.tag || filters.validation_status || filters.scan_source_id) && (
+            <button onClick={() => { setFilters({ severity: "", status: "", resolution_reason: "", ai_verdict: "", classification: "", search: "", repository_id: "", scan_source_id: "", tag: "", scanner_name: "", validation_status: "" }); setRepoName(null); setPage(1); window.history.replaceState(null, "", "/findings"); }}
               className="text-xs text-slate-500 hover:text-slate-300 transition-colors">Clear all filters</button>
           )}
         </div>
@@ -903,14 +912,49 @@ function FindingsPageInner() {
             <option value="low">Low</option>
             <option value="info">Info</option>
           </select>
-          <select value={filters.classification} onChange={(e) => { setFilters((f) => ({ ...f, classification: e.target.value })); setPage(1); }} className="select-dark">
+          {/* Lifecycle filters. Replaces a single 7-option list whose
+              values fused four different questions — the verdict, who
+              reached it, why it closed and how. Status answers "where is
+              this", Reason answers "why did it leave the open states". */}
+          <select value={filters.status} onChange={(e) => { setFilters((f) => ({ ...f, status: e.target.value, resolution_reason: e.target.value === "resolved" || e.target.value === "dismissed" ? f.resolution_reason : "" })); setPage(1); }}
+            className="select-dark">
             <option value="">All Statuses</option>
-            <option value="likely_true_positive">AI: likely real</option>
-            <option value="likely_false_positive">AI: likely not a secret</option>
-            <option value="needs_review">Needs Review</option>
-            <option value="confirmed_true_positive">Confirmed True Positive</option>
-            <option value="confirmed_false_positive">Confirmed False Positive</option>
-            <option value="accepted_risk">Accepted Risk</option>
+            <option value="open">Open</option>
+            <option value="triaging">Triaging</option>
+            <option value="resolved">Resolved</option>
+            <option value="dismissed">Dismissed</option>
+          </select>
+          {/* Reason only applies to the closing statuses, so it is shown
+              when one is selected rather than offering combinations that
+              can never match. */}
+          {(filters.status === "resolved" || filters.status === "dismissed") && (
+            <select value={filters.resolution_reason} onChange={(e) => { setFilters((f) => ({ ...f, resolution_reason: e.target.value })); setPage(1); }}
+              className="select-dark">
+              <option value="">All Reasons</option>
+              {filters.status === "resolved" ? (
+                <>
+                  <option value="rotated">Rotated</option>
+                  <option value="revoked">Revoked</option>
+                  <option value="provider_disabled">Provider disabled</option>
+                </>
+              ) : (
+                <>
+                  <option value="false_positive">False positive</option>
+                  <option value="test_credential">Test credential</option>
+                  <option value="acceptable_risk">Acceptable risk</option>
+                  <option value="mitigating_control">Mitigating control</option>
+                  <option value="no_longer_present">No longer present</option>
+                </>
+              )}
+            </select>
+          )}
+          {/* The model's opinion, as its own axis — never a status. */}
+          <select value={filters.ai_verdict} onChange={(e) => { setFilters((f) => ({ ...f, ai_verdict: e.target.value })); setPage(1); }}
+            className="select-dark">
+            <option value="">Any AI verdict</option>
+            <option value="likely_tp">AI: likely real</option>
+            <option value="likely_fp">AI: likely not a secret</option>
+            <option value="unsure">AI: unsure</option>
           </select>
           {/* Project filter — scopes the list to one repository. Shares the
                `repository_id` filter that drill-through from a repository
@@ -1280,7 +1324,7 @@ function FindingsPageInner() {
                             : f.classification === "accepted_risk" ? "bg-orange-400"
                             : "bg-yellow-400"
                           }`} />
-                          {classificationLabel(f.classification)}
+                          {statusLabel(f)}
                         </span>
                       </td>
                     )}

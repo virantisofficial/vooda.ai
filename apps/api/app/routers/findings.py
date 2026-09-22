@@ -62,6 +62,52 @@ def _incident_lifecycle_values(classification, *, actor=None, now=None) -> dict:
     return vals
 
 
+
+#: Reason -> the legacy Classification that still carries it, while both
+#: representations are live. Once `classification` is dropped (Phase 5)
+#: the reason is written directly and this table goes away.
+_CLOSE_REASON_TO_CLASSIFICATION = {
+    "rotated": Classification.ROTATED,
+    "revoked": Classification.ROTATED,
+    "provider_disabled": Classification.ROTATED,
+    "false_positive": Classification.CONFIRMED_FALSE_POSITIVE,
+    "test_credential": Classification.TEST_CREDENTIAL,
+    "acceptable_risk": Classification.ACCEPTED_RISK,
+    "mitigating_control": Classification.ACCEPTED_RISK,
+    "no_longer_present": Classification.CONFIRMED_FALSE_POSITIVE,
+}
+
+
+def _classification_for_close(action: str, reason: Optional[str]):
+    """Validate a generic close and map it onto the legacy enum."""
+    from apps.api.app.core.finding_status import (
+        FindingStatus, ResolutionReason, validate as _validate_lifecycle,
+    )
+
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail=f"action '{action}' requires a resolution_reason.",
+        )
+    try:
+        parsed = ResolutionReason(reason.lower())
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unknown resolution_reason '{reason}'. Valid: "
+                f"{[r.value for r in ResolutionReason]}"
+            ),
+        )
+    status = (FindingStatus.RESOLVED if action == "resolve"
+              else FindingStatus.DISMISSED)
+    try:
+        _validate_lifecycle(status, parsed)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _CLOSE_REASON_TO_CLASSIFICATION[parsed.value], parsed
+
+
 router = APIRouter()
 
 
@@ -110,7 +156,18 @@ async def list_tags(
 @router.get("")
 async def list_findings(
     severity: Optional[str] = Query(None),
-    classification: Optional[str] = Query(None),
+    # Phase 2 lifecycle filters. ``status`` and ``resolution_reason``
+    # are the pair that replaces the 13-value ``classification``; the
+    # legacy param still works while both representations are live.
+    status: Optional[str] = Query(
+        None, description="open | triaging | resolved | dismissed"),
+    resolution_reason: Optional[str] = Query(
+        None, description="why a finding left the open states"),
+    ai_verdict: Optional[str] = Query(
+        None, description="likely_tp | likely_fp | unsure (advisory)"),
+    classification: Optional[str] = Query(
+        None, deprecated=True,
+        description="Legacy. Use status + resolution_reason."),
     review_status: Optional[str] = Query(None),
     remediation_status: Optional[str] = Query(None),
     scanner_name: Optional[str] = Query(None),
@@ -162,6 +219,13 @@ async def list_findings(
 
     if severity:
         conditions.append(NormalizedFinding.severity == severity)
+    if status:
+        conditions.append(NormalizedFinding.status == status.lower())
+    if resolution_reason:
+        conditions.append(
+            NormalizedFinding.resolution_reason == resolution_reason.lower())
+    if ai_verdict:
+        conditions.append(NormalizedFinding.ai_verdict == ai_verdict.lower())
     if classification:
         conditions.append(NormalizedFinding.classification == classification)
     if review_status:
@@ -489,7 +553,26 @@ async def triage_finding(
         "mark_test": Classification.TEST_CREDENTIAL,
     }
 
-    new_class = action_map.get(body.action)
+    # ── Phase 3: generic close actions ──────────────────────────────
+    # The fixed actions above each hard-code one disposition, which is
+    # why expressing a new one used to mean adding an enum value. These
+    # two take the reason as data instead, and refuse to close without
+    # it — the *why* is the thing an auditor always asks for.
+    explicit_reason = None
+    if body.action in ("resolve", "dismiss"):
+        new_class, explicit_reason = _classification_for_close(
+            body.action, body.resolution_reason)
+    else:
+        if body.resolution_reason:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"action '{body.action}' already implies its resolution "
+                    "reason; pass resolution_reason only with 'resolve' or "
+                    "'dismiss'."
+                ),
+            )
+        new_class = action_map.get(body.action)
     old_class = finding.classification
 
     decision = FindingDecision(
@@ -512,6 +595,15 @@ async def triage_finding(
             actor=user.id,
             decision_id=decision.id,
         )
+        if explicit_reason is not None:
+            # set_classification derived resolution_reason from the legacy
+            # enum, which is coarser than the reason vocabulary
+            # (mitigating_control and acceptable_risk share ACCEPTED_RISK;
+            # revoked and rotated share ROTATED). The operator's actual
+            # choice is the truth and must not be flattened back.
+            finding.resolution_reason = explicit_reason.value
+            if body.comment and not finding.resolution_note:
+                finding.resolution_note = body.comment
     finding.review_status = ReviewStatus.REVIEWED
 
     # ── Case-B: cascade triage UP to the parent incident ──

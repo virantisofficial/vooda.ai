@@ -76,3 +76,34 @@ export function classificationLabel(cls?: string | null): string {
     default: return norm(cls).replace(/_/g, " ");
   }
 }
+
+
+/** Human label for the lifecycle pair. Prefers the new columns and
+ *  falls back to the legacy classification for any stale payload. */
+export function statusLabel(obj: any): string {
+  const st = (obj?.status || "").toLowerCase();
+  const rs = (obj?.resolution_reason || "").toLowerCase();
+  const REASONS: Record<string, string> = {
+    rotated: "Rotated",
+    revoked: "Revoked",
+    provider_disabled: "Provider disabled",
+    false_positive: "False positive",
+    test_credential: "Test credential",
+    acceptable_risk: "Acceptable risk",
+    mitigating_control: "Mitigating control",
+    no_longer_present: "No longer present",
+  };
+  if (st === "resolved" || st === "dismissed") {
+    const head = st === "resolved" ? "Resolved" : "Dismissed";
+    return rs ? `${head} — ${REASONS[rs] || rs.replace(/_/g, " ")}` : head;
+  }
+  if (st === "triaging") return "Triaging";
+  if (st === "open") {
+    // An open finding shows the model's opinion, clearly marked as one.
+    const v = (obj?.ai_verdict || "").toLowerCase();
+    if (v === "likely_fp") return "Open — AI: likely not a secret";
+    if (v === "likely_tp") return "Open — AI: likely real";
+    return "Open";
+  }
+  return classificationLabel(obj?.classification);
+}
