@@ -20,7 +20,7 @@ from apps.worker.celery_app import (
     SCAN_TASK_SOFT_TIME_LIMIT,
 )
 from apps.api.app.core.config import settings
-from apps.api.app.core.validity import normalize as _validity
+from apps.api.app.core.validity import Validity, normalize as _validity
 from apps.api.app.core.classification_provenance import mirror_lifecycle
 from apps.api.app.core.finding_status import from_classification as _lc
 from apps.api.app.core.finding_state import (
@@ -1729,7 +1729,22 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
             rd = pf.raw_data or {}
             raw_val = rd.get("_raw_value_for_verification", "")
             provider = (rd.get("provider") or "").lower()
-            if not raw_val or provider not in _SUPPORTED_PROVIDERS:
+            # No verifier will ever exist for this provider, so record
+            # that rather than leaving the finding at the default.
+            # "Not checked" invites a retry; "No checker" tells the
+            # truth — this will never resolve. The two were
+            # indistinguishable before, because every path that could
+            # not verify simply returned without writing anything.
+            if provider not in _SUPPORTED_PROVIDERS:
+                rd["validation_status"] = Validity.UNSUPPORTED.value
+                rd["verification_details"] = (
+                    f"No verifier exists for provider '{provider or 'unknown'}'."
+                )
+                rd["verification_source"] = "static"
+                return False
+            # The raw value is only in memory during the scan; without
+            # it nothing can be attempted now or later.
+            if not raw_val:
                 return False
             if _time.monotonic() - verify_budget_start > verify_budget_s:
                 return False
@@ -1743,8 +1758,19 @@ async def _run_source_scan(scan_job_id: str, scan_source_id: str):
                 result = await _verify_with_cache(verify_sm, job.tenant_id, rd.get("secret_hash", ""))
             except (asyncio.TimeoutError, Exception) as ve:
                 logger.warning("source_validation_failed", provider=provider, error=str(ve)[:160])
+                # A checker ran and broke. Distinct from "no checker":
+                # retrying may succeed, so say so.
+                rd["validation_status"] = Validity.CHECK_FAILED.value
+                rd["verification_details"] = str(ve)[:200]
                 return False
-            if not result or result.status not in ("active", "inactive"):
+            if not result:
+                return False
+            if result.status not in ("active", "inactive"):
+                # unsupported / error / rate-limited all carry real
+                # information; the old code discarded every one of them.
+                rd["validation_status"] = _validity(result.status).value
+                rd["verification_details"] = getattr(result, "details", None)
+                rd["verification_source"] = "live"
                 return False
             rd["validation_status"] = _validity(result.status).value
             rd["verification_details"] = result.details
@@ -3005,8 +3031,16 @@ async def _verify_batch(verifiable, tenant_id, *, concurrency=8, abs_budget_s=12
                 result = await _verify_with_cache(verify_sm, tenant_id, rd.get("secret_hash", ""))
             except (_asyncio.TimeoutError, Exception) as ve:
                 logger.warning("inline_verify_error", provider=provider, error=str(ve)[:120])
+                rd["validation_status"] = Validity.CHECK_FAILED.value
+                rd["verification_details"] = str(ve)[:200]
                 return "error"
             if not (result and result.status in ("active", "inactive")):
+                # Keep the verdict instead of dropping it: "no checker"
+                # and "check failed" are different facts, and both are
+                # more useful than an unexplained "not checked".
+                if result is not None:
+                    rd["validation_status"] = _validity(result.status).value
+                    rd["verification_details"] = getattr(result, "details", None)
                 return "skipped"
             rd["validation_status"] = _validity(result.status).value
             rd["verification_details"] = result.details

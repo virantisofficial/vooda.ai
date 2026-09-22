@@ -78,8 +78,18 @@ async def test_counts_and_mutations(stub_verify):
     for pf in pfs[5:8]:
         assert pf.raw_data["validation_status"] == "inactive"
         assert pf.severity == "medium"
-    # error + skip → untouched
-    for pf in pfs[8:14]:
+    # A checker that RAN and broke is a fact worth keeping. This used
+    # to assert "untouched", which is how "the check blew up" became
+    # indistinguishable from "we never tried" — 1,129 findings sat at
+    # "Not checked" waiting for a check that could never happen.
+    # CHECK_FAILED is retryable; UNKNOWN means nothing was attempted.
+    for pf in pfs[8:10]:
+        assert pf.raw_data["validation_status"] == "check_failed"
+        assert pf.raw_data["verification_details"]
+
+    # A verifier returning None genuinely has no answer — nothing to
+    # record, so the finding keeps the default.
+    for pf in pfs[10:14]:
         assert "validation_status" not in pf.raw_data
 
 

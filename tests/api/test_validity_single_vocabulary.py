@@ -118,3 +118,35 @@ def test_every_canonical_value_survives_a_round_trip():
     """
     for value in Validity:
         assert normalize(value.value) is value, value.value
+
+
+def test_a_provider_with_no_verifier_is_recorded_as_unsupported():
+    """"Not checked" and "No checker" are different facts.
+
+    Both verification paths used to bail out with a bare `return`
+    whenever they could not verify, so a provider Vooda will NEVER be
+    able to check looked identical to one it simply had not got to
+    yet. 1,129 findings were presented as pending a check that could
+    never happen.
+
+    The distinction is operational: "Not checked" invites a retry,
+    "No checker" says this will not resolve — stop waiting for it.
+    """
+    src = pathlib.Path("apps/worker/tasks.py").read_text(encoding="utf-8")
+    assert "Validity.UNSUPPORTED.value" in src, (
+        "an unverifiable provider must be stamped, not silently skipped"
+    )
+    # and a checker that ran and broke is a third, retryable state
+    assert src.count("Validity.CHECK_FAILED.value") >= 2, (
+        "both verification paths must record a failed check"
+    )
+
+
+def test_the_three_not_verified_states_stay_distinct():
+    """UNSUPPORTED / CHECK_FAILED / UNKNOWN must not collapse into
+    each other — that collapse is what hid the gap."""
+    assert len({Validity.UNSUPPORTED, Validity.CHECK_FAILED,
+                Validity.UNKNOWN}) == 3
+    for v in (Validity.UNSUPPORTED, Validity.CHECK_FAILED, Validity.UNKNOWN):
+        assert v in INCONCLUSIVE, v
+        assert v not in PROVABLY_DEAD, v
