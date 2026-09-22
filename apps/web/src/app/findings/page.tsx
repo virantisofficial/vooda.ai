@@ -940,26 +940,38 @@ function FindingsPageInner() {
                 <>
                   <option value="rotated">Rotated</option>
                   <option value="revoked">Revoked</option>
-                  <option value="provider_disabled">Provider disabled</option>
+                  <option value="provider_disabled">Provider Disabled</option>
                 </>
               ) : (
                 <>
-                  <option value="false_positive">False positive</option>
-                  <option value="test_credential">Test credential</option>
-                  <option value="acceptable_risk">Acceptable risk</option>
-                  <option value="mitigating_control">Mitigating control</option>
-                  <option value="no_longer_present">No longer present</option>
+                  <option value="false_positive">False Positive</option>
+                  <option value="test_credential">Test Credential</option>
+                  <option value="acceptable_risk">Acceptable Risk</option>
+                  <option value="mitigating_control">Mitigating Control</option>
+                  <option value="no_longer_present">No Longer Present</option>
                 </>
               )}
             </select>
           )}
+          {/* Validity — is the credential still live? Its own axis,
+              independent of triage: a dismissed finding can still be
+              live, and an open one can be long dead. */}
+          <select value={filters.validation_status} onChange={(e) => { setFilters((f) => ({ ...f, validation_status: e.target.value })); setPage(1); }}
+            className="select-dark">
+            <option value="">Any Validity</option>
+            <option value="active">Live</option>
+            <option value="inactive">Revoked or Dead</option>
+            <option value="unknown">Not Checked</option>
+            <option value="unsupported">No Checker</option>
+            <option value="check_failed">Check Failed</option>
+          </select>
           {/* The model's opinion, as its own axis — never a status. */}
           <select value={filters.ai_verdict} onChange={(e) => { setFilters((f) => ({ ...f, ai_verdict: e.target.value })); setPage(1); }}
             className="select-dark">
-            <option value="">Any AI verdict</option>
-            <option value="likely_tp">AI: likely real</option>
-            <option value="likely_fp">AI: likely not a secret</option>
-            <option value="unsure">AI: unsure</option>
+            <option value="">Any AI Verdict</option>
+            <option value="likely_tp">Likely Real</option>
+            <option value="likely_fp">Likely Not a Secret</option>
+            <option value="unsure">Unsure</option>
           </select>
           {/* Project filter — scopes the list to one repository. Shares the
                `repository_id` filter that drill-through from a repository

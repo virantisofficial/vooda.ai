@@ -109,3 +109,12 @@ def test_sql_predicates_use_the_constrained_column_not_the_json_blob():
         "these query the unconstrained JSONB key instead of the "
         f"validation_status column: {offenders}"
     )
+
+
+def test_every_canonical_value_survives_a_round_trip():
+    """A canonical value missing from the alias table folds into
+    UNKNOWN. `check_failed` was missing, so the UI's "Check Failed"
+    filter returned all 1,374 unchecked findings instead of none.
+    """
+    for value in Validity:
+        assert normalize(value.value) is value, value.value

@@ -67,6 +67,10 @@ _LEGACY: dict[str, Validity] = {
     "pending": Validity.UNKNOWN,
     "unsupported": Validity.UNSUPPORTED,
     "no_checker": Validity.UNSUPPORTED,
+    # The canonical value itself. Missing it meant normalize() sent
+    # "check_failed" to UNKNOWN, so filtering the UI's "Check Failed"
+    # option silently returned every not-checked finding instead.
+    "check_failed": Validity.CHECK_FAILED,
     "error": Validity.CHECK_FAILED,
     "validation_error": Validity.CHECK_FAILED,
     "failed_to_check": Validity.CHECK_FAILED,
@@ -114,6 +118,17 @@ def _assert_total() -> None:
     for legacy, target in _LEGACY.items():
         if not isinstance(target, Validity):
             raise RuntimeError(f"validity: bad legacy mapping for {legacy!r}")
+    # Every canonical value must survive a round trip. Without this the
+    # table can quietly omit one of its own values, and normalize()
+    # then folds it into UNKNOWN — which is how the "Check Failed"
+    # filter came to return every unchecked finding. The severity module
+    # has carried this guard since it was written; this one did not.
+    for value in Validity:
+        if normalize(value.value) is not value:
+            raise RuntimeError(
+                f"validity: {value.value!r} does not map to itself — add "
+                "it to _LEGACY."
+            )
 
 
 _assert_total()
