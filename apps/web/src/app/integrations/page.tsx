@@ -1090,6 +1090,23 @@ function AIModelsFullSection() {
 
                     {/* Numeric parameters — 2×2 symmetric grid */}
                     <div>
+                      {/* Most people should never open this. Say so,
+                          and say what the system already did, rather
+                          than presenting six empty boxes. */}
+                      <div className="mb-3 p-2.5 rounded-lg bg-blue-500/[0.06] border border-blue-500/15">
+                        <div className="text-[11px] text-slate-300 font-medium mb-1">
+                          These are filled in automatically
+                        </div>
+                        <div className="text-[10px] text-slate-500 leading-relaxed">
+                          Picking a model sets these from what the provider reports about it —
+                          its context window, output limit and size class. Vooda sizes each
+                          triage prompt against those values, so a small local model and a
+                          large hosted one both get a prompt that fits.
+                          <br />
+                          Change something here only to work around a specific problem. If a
+                          value looks wrong, re-selecting the model is usually the fix.
+                        </div>
+                      </div>
                       <label className="text-xs text-slate-400 mb-2 block">Model Parameters</label>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
@@ -1105,7 +1122,7 @@ function AIModelsFullSection() {
                             className="input-dark text-xs" />
                         </div>
                         <div>
-                          <label className="text-[10px] text-slate-600 mb-1 block" title="Maximum input context. Use the model's real window (e.g. 32K for Mistral Small, 128K for Llama 3.x).">Context Window</label>
+                          <label className="text-[10px] text-slate-600 mb-1 block" title="Taken from the provider when it reports one. Vooda derives how much code context each triage prompt can carry from this, so a wrong value means prompts that are needlessly small or that overflow. Maximum input context. Use the model's real window (e.g. 32K for Mistral Small, 128K for Llama 3.x).">Context Window</label>
                           <input type="number" min="0" value={form.context_window}
                             onChange={(e) => { const v = parseInt(e.target.value, 10); setForm((f) => ({ ...f, context_window: Number.isNaN(v) ? 4096 : v })); }}
                             className="input-dark text-xs" />
@@ -1115,6 +1132,12 @@ function AIModelsFullSection() {
                           <input value={(form.stop_sequences || []).join(", ")}
                             onChange={(e) => setForm((f) => ({ ...f, stop_sequences: e.target.value ? e.target.value.split(",").map((s: string) => s.trim()) : [] }))}
                             placeholder="Leave blank (recommended)" className="input-dark text-xs" />
+                          <div className="text-[10px] text-amber-500/70 mt-1 leading-relaxed">
+                            Leave blank unless you know you need it. A stop sequence that
+                            appears inside a JSON response ends generation early, and the
+                            verdict is lost — findings come back untriaged rather than
+                            low-risk.
+                          </div>
                         </div>
                       </div>
                     </div>

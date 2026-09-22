@@ -104,6 +104,8 @@ class TriageEngine:
         use_compact = self._config.get("use_compact_prompt", False)
         stop_seqs = self._config.get("stop_sequences") or []
         json_mode = self._config.get("supports_json_mode", False)
+        # Sized to THIS model's window rather than to a constant.
+        _budget = self._input_budget_chars()
 
         # Resolve system prompt: strategy → override → default
         prompt_strategy = self._config.get("prompt_strategy", "recommended")
@@ -261,10 +263,14 @@ class TriageEngine:
                 line_start=finding.get("line_start", ""),
                 description=finding.get("description", ""),
                 language=code_context.get("language", ""),
-                code_snippet=self._truncate(code_context.get("code_snippet", ""), 2000),
-                file_context=self._truncate(code_context.get("file_context", ""), 4000),
-                related_context=self._truncate(repo_context.get("related_files_context", ""), 3000),
-                framework_context=self._truncate(repo_context.get("framework_context", ""), 1000),
+                code_snippet=self._truncate(
+                    code_context.get("code_snippet", ""), _budget["code_snippet"]),
+                file_context=self._truncate(
+                    code_context.get("file_context", ""), _budget["file_context"]),
+                related_context=self._truncate(
+                    repo_context.get("related_files_context", ""), _budget["related_context"]),
+                framework_context=self._truncate(
+                    repo_context.get("framework_context", ""), _budget["framework_context"]),
                 verification_context=verification_context,
                 pre_detected_signals=pre_detected_signals,
             )
@@ -321,14 +327,32 @@ class TriageEngine:
                     title=finding.get("title", ""),
                     file_path=finding.get("file_path", ""),
                     line_start=finding.get("line_start", ""),
-                    code_snippet_short=self._truncate(code_context.get("code_snippet", ""), 200),
+                    # A quarter of the snippet budget: the compact
+                    # prompt wants a hint, not the whole hunk.
+                    code_snippet_short=self._truncate(
+                        code_context.get("code_snippet", ""),
+                        max(120, _budget["code_snippet"] // 4),
+                    ),
                 )
+                # The retry asks for LESS OUTPUT (the compact schema),
+                # not for a smaller budget. It used to do the opposite —
+                # max_tokens=150 against a primary call of 4096 — so the
+                # path that exists to rescue a truncated response was
+                # more likely to truncate than the thing it was
+                # rescuing.
+                #
+                # stop_sequences=["\n\n"] is gone. This codebase has
+                # removed that exact footgun twice already (see
+                # PROVIDER_DEFAULTS["ollama"] and get_auto_config), both
+                # times documented as truncating modern models
+                # mid-response: pretty-printed JSON or any preamble hits
+                # a blank line almost immediately and generation stops
+                # with nothing usable.
                 retry_response = await self.provider.complete(
                     system_prompt=TRIAGE_SYSTEM_PROMPT_COMPACT,
                     user_prompt=fallback_prompt,
-                    max_tokens=150,
+                    max_tokens=self._config.get("max_tokens") or 4096,
                     temperature=0,
-                    stop_sequences=["\n\n"],
                     json_mode=json_mode,
                 )
                 retry_result = self._parse_response(retry_response)
@@ -512,3 +536,57 @@ class TriageEngine:
         if len(text) <= max_chars:
             return text
         return text[:max_chars] + "\n... [truncated]"
+
+    #: How the context sections share the available INPUT budget. Ratios,
+    #: not character counts: a character cap is wrong the moment the
+    #: tokenizer, the language or the model changes, and the old fixed
+    #: 2000/4000/3000/1000 split ignored the model's window entirely —
+    #: identical on a 4K local model and a 200K frontier one.
+    _SECTION_SHARE = {
+        "code_snippet": 0.30,
+        "file_context": 0.35,
+        "related_context": 0.25,
+        "framework_context": 0.10,
+    }
+
+    #: A ceiling on what is worth sending for ONE finding, independent
+    #: of how large the window is. Triaging a single secret is a local
+    #: question — the line, its file, and a little surrounding code. Past
+    #: this, extra context stops changing the verdict and only adds
+    #: latency and cost, so a 200K-window model should not be handed 200K
+    #: of a repository to decide whether one string is a credential.
+    #:
+    #: This is a COST decision, not a capability guess: the model could
+    #: take more, there is just no benefit. If a deployment ever needs to
+    #: change it, that is a sign the sections are badly proportioned
+    #: rather than that this number is wrong.
+    _MAX_USEFUL_INPUT_CHARS = 24_000
+
+    #: Chars per token. Deliberately conservative — under-estimating the
+    #: budget truncates a little early, over-estimating overflows the
+    #: request, and only one of those loses a verdict.
+    _CHARS_PER_TOKEN = 3.5
+
+    def _input_budget_chars(self) -> dict[str, int]:
+        """Per-section character budgets derived from the model's window.
+
+        Falls back to the previous fixed split when no window is
+        configured, so an unconfigured model behaves exactly as before
+        rather than getting an arbitrary new number.
+        """
+        window = self._config.get("context_window") or 0
+        reserved = self._config.get("max_tokens") or 0
+        if not window or window <= reserved:
+            return {"code_snippet": 2000, "file_context": 4000,
+                    "related_context": 3000, "framework_context": 1000}
+        # Everything not reserved for the response, less room for the
+        # system prompt, schema and the finding's own metadata.
+        usable_tokens = max(0, (window - reserved)) * 0.75
+        usable_chars = min(
+            int(usable_tokens * self._CHARS_PER_TOKEN),
+            self._MAX_USEFUL_INPUT_CHARS,
+        )
+        return {
+            name: max(200, int(usable_chars * share))
+            for name, share in self._SECTION_SHARE.items()
+        }

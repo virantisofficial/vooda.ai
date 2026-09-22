@@ -78,6 +78,13 @@ def classify_model_size(param_count: int | None, model_id: str = "") -> str:
     return "medium"
 
 
+#: Share of a model's context window reserved for its OWN response.
+#: Expressed as a ratio, not a token count, so it scales from a 4K local
+#: model to a 200K frontier one without anybody retuning a constant.
+#: Input budgets are derived from the remainder.
+OUTPUT_BUDGET_RATIO = 0.25
+
+
 # ── Provider Auto-Config ─────────────────────────────────────
 
 # Default temperature is 0 across the board. Secret-triage classification is
@@ -189,13 +196,23 @@ RULES:
 
 
 def get_auto_config(provider: str, model_id: str, model_size: str | None = None,
-                    prompt_strategy: str = "recommended") -> dict:
+                    prompt_strategy: str = "recommended",
+                    discovered_context_window: int | None = None,
+                    discovered_max_output: int | None = None) -> dict:
     """
     Generate recommended configuration for a model based on provider, model ID, and strategy.
 
     Returns dict with all fields needed for AIModelConfig:
     - temperature, max_tokens, context_window, stop_sequences
     - supports_json_mode, use_compact_prompt, system_prompt_override
+
+    When the provider reported the model's real context window and
+    output cap (OpenRouter's `context_length` / `top_provider`, Ollama's
+    `context_length`), those win over every default below. A provider
+    that knows the answer should not be second-guessed by a table, and
+    it saves the user looking it up: the per-provider default for
+    `custom` is a flat 8192 regardless of model, which is wrong for most
+    of what OpenRouter serves.
     """
     provider_cfg = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["custom"])
     size = model_size or classify_model_size(None, model_id)
@@ -232,5 +249,18 @@ def get_auto_config(provider: str, model_id: str, model_size: str | None = None,
     else:  # large
         config["use_compact_prompt"] = False
         # Keep provider defaults for max_tokens and context_window
+
+    # Provider-reported values override the table — they are facts about
+    # this exact model, not a class-level guess.
+    if discovered_context_window and discovered_context_window > 0:
+        config["context_window"] = int(discovered_context_window)
+        # Keep the output budget a sane fraction of a genuinely large
+        # window rather than carrying a small default forward.
+        config["max_tokens"] = min(
+            max(config["max_tokens"], 1024),
+            max(1024, int(discovered_context_window * OUTPUT_BUDGET_RATIO)),
+        )
+    if discovered_max_output and discovered_max_output > 0:
+        config["max_tokens"] = min(config["max_tokens"], int(discovered_max_output))
 
     return config

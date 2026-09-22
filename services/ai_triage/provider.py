@@ -171,13 +171,40 @@ class OpenAIProvider(AIProvider):
     IDLE_TIMEOUT_S = 60.0
     MIN_DEADLINE_S = 120.0
     MAX_DEADLINE_S = 900.0
-    DEADLINE_FLOOR_TPS = 15.0  # conservative decode floor used for the deadline
+    DEADLINE_FLOOR_TPS = 15.0  # decode floor used until this model has been measured
+
+    #: Observed decode rate per model, learned from completed calls.
+    #: AIResponse already carries output_tokens and latency_ms on EVERY
+    #: response — the throughput was being measured all along and used
+    #: for nothing, while the deadline assumed a flat 15 tok/s for a
+    #: CPU-bound local model and a frontier API alike.
+    _observed_tps: dict[str, float] = {}
+
+    @classmethod
+    def record_throughput(cls, model: str, output_tokens: int, latency_ms: float) -> None:
+        """Fold one completed call into the rolling estimate for a model."""
+        if not model or output_tokens < 20 or latency_ms <= 0:
+            return  # too small a sample to say anything about decode rate
+        tps = output_tokens / (latency_ms / 1000.0)
+        if tps <= 0:
+            return
+        prior = cls._observed_tps.get(model)
+        # Exponential moving average: adapts to a provider slowing down
+        # without letting one slow call dominate.
+        cls._observed_tps[model] = tps if prior is None else (prior * 0.7 + tps * 0.3)
     DEADLINE_SLACK_S = 60.0    # prompt processing + network slack
 
     @classmethod
-    def deadline_for(cls, max_tokens: int) -> float:
+    def deadline_for(cls, max_tokens: int, model: str | None = None) -> float:
         """Total-call deadline scaled to the token budget, clamped to sane bounds."""
-        est = (max_tokens or 4096) / cls.DEADLINE_FLOOR_TPS + cls.DEADLINE_SLACK_S
+        # Measured rate when we have one, never faster than the floor —
+        # a model that has been quick so far must still be allowed to be
+        # slow once without being cut off.
+        rate = cls.DEADLINE_FLOOR_TPS
+        observed = cls._observed_tps.get(model or "")
+        if observed:
+            rate = max(cls.DEADLINE_FLOOR_TPS, observed)
+        est = (max_tokens or 4096) / rate + cls.DEADLINE_SLACK_S
         return max(cls.MIN_DEADLINE_S, min(cls.MAX_DEADLINE_S, est))
 
     @staticmethod
@@ -279,7 +306,7 @@ class OpenAIProvider(AIProvider):
 
         payload = self._build_payload(system_prompt, user_prompt, max_tokens, temperature, stop_sequences, json_mode)
         effective_max = payload.get("max_tokens") or max_tokens
-        deadline = self.deadline_for(effective_max)
+        deadline = self.deadline_for(effective_max, self.model)
         payload["stream"] = True
         # Ask for usage accounting in the final chunk (OpenAI-compat standard).
         payload.setdefault("stream_options", {"include_usage": True})
@@ -321,11 +348,15 @@ class OpenAIProvider(AIProvider):
             )
 
         usage = acc["usage"] or {}
+        _latency_ms = (time.monotonic() - start) * 1000
+        self.record_throughput(
+            self.model, usage.get("completion_tokens", 0) or 0, _latency_ms
+        )
         return AIResponse(
             content=acc["content"], model=self.model,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
-            latency_ms=(time.monotonic() - start) * 1000,
+            latency_ms=_latency_ms,
             raw_response={
                 "finish_reason": acc["finish_reason"],
                 "reasoning_len": acc["reasoning_len"],

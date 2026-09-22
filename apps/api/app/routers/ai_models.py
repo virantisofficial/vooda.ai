@@ -468,12 +468,33 @@ class DiscoverModelsRequest(BaseModel):
     model_config_id: Optional[UUID] = None  # Reuse stored credentials for an existing config
 
 
+def _int_or_none(v) -> Optional[int]:
+    """Coerce a provider's value to int, or None.
+
+    Providers report these inconsistently — ints, numeric strings, or
+    things that are not lengths at all. A bad value must not fail the
+    whole discovery call; the user just falls back to the default.
+    """
+    if v is None:
+        return None
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 class DiscoveredModel(BaseModel):
     model_id: str
     name: str
     description: str = ""
+    #: Real context window as the PROVIDER reports it. When present this
+    #: beats any guess — it is the single value that most affects how
+    #: much context a triage prompt can carry, and asking a user to look
+    #: it up per model is work the provider can do for us.
     context_window: Optional[int] = None
     max_output: Optional[int] = None
+    #: e.g. "8B" — drives size classification, not the context window.
+    parameter_size: Optional[str] = None
 
 
 @router.post("/auto-config")
@@ -504,7 +525,12 @@ async def get_auto_configuration(
                 pass
 
     model_size = classify_model_size(param_count, model_id)
-    config = get_auto_config(provider, model_id, model_size, strategy)
+    config = get_auto_config(
+        provider, model_id, model_size, strategy,
+        # Passed through from discovery when the provider told us.
+        discovered_context_window=_int_or_none(body.get("context_window")),
+        discovered_max_output=_int_or_none(body.get("max_output")),
+    )
     config["model_size_class"] = model_size
 
     return {
@@ -669,16 +695,40 @@ async def _discover_openai(api_key: str, base_url: str | None = None) -> Discove
 
         data = r.json()
         models = []
-        # Filter to GPT and chat models
+        # OpenAI's own /models list mixes embeddings, TTS and moderation
+        # in with the chat models, so it needs filtering. An
+        # OpenAI-COMPATIBLE endpoint (OpenRouter, vLLM, LM Studio,
+        # LiteLLM) does not: its ids look like "qwen/qwen3-27b" or
+        # "anthropic/claude-...", none of which start with gpt-*, so the
+        # prefix filter returned an EMPTY list for every one of them and
+        # the user had to type the model id by hand.
         chat_prefixes = ("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")
+        is_openai_proper = "api.openai.com" in (base_url or "api.openai.com")
         for m in data.get("data", []):
             mid = m.get("id", "")
-            if any(mid.startswith(p) for p in chat_prefixes):
-                models.append(DiscoveredModel(
-                    model_id=mid,
-                    name=mid,
-                    description=f"Owned by {m.get('owned_by', 'openai')}",
-                ))
+            if not mid:
+                continue
+            if is_openai_proper and not any(mid.startswith(p) for p in chat_prefixes):
+                continue
+            # OpenRouter reports the real window as `context_length`, and
+            # the output cap under `top_provider`. Taking them here is
+            # what makes the budget correct without asking the user to
+            # look anything up.
+            top = m.get("top_provider") or {}
+            models.append(DiscoveredModel(
+                model_id=mid,
+                name=m.get("name") or mid,
+                description=(
+                    m.get("description")
+                    or f"Owned by {m.get('owned_by', 'provider')}"
+                )[:200],
+                context_window=_int_or_none(
+                    m.get("context_length") or m.get("context_window")
+                ),
+                max_output=_int_or_none(
+                    top.get("max_completion_tokens") or m.get("max_output_tokens")
+                ),
+            ))
 
         models.sort(key=lambda x: x.model_id, reverse=True)
 
@@ -760,7 +810,15 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                         model_id=name,
                         name=name.split(":")[0] if ":" in name else name,
                         description=f"Size: {m.get('size', 0) / 1e9:.1f}GB" if m.get("size") else "",
-                        context_window=m.get("details", {}).get("parameter_size"),
+                        # parameter_size is "3.8B" — the PARAMETER COUNT,
+                        # not the context window. Feeding it to an int
+                        # field raised ValidationError for every model
+                        # Ollama reported, so discovery returned an error
+                        # instead of a list.
+                        parameter_size=(m.get("details", {}) or {}).get("parameter_size"),
+                        context_window=_int_or_none(
+                            (m.get("details", {}) or {}).get("context_length")
+                        ),
                     ))
                 if models:
                     return DiscoverModelsResponse(
