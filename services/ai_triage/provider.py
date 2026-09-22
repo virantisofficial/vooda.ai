@@ -19,6 +19,34 @@ import structlog
 logger = structlog.get_logger()
 
 
+#: Why generation stopped, normalised across providers. Anthropic says
+#: stop_reason="max_tokens", Google says finishReason="MAX_TOKENS",
+#: OpenAI says finish_reason="length" — three names, three values, for
+#: one fact. Each adapter maps its own onto this so the engine never
+#: has to know which provider answered.
+STOP_COMPLETE = "complete"
+STOP_TRUNCATED = "truncated"
+STOP_FILTERED = "filtered"
+STOP_UNKNOWN = "unknown"
+
+_TRUNCATION_SIGNALS = {"max_tokens", "length", "MAX_TOKENS", "max_output_tokens"}
+_FILTER_SIGNALS = {"content_filter", "SAFETY", "RECITATION", "refusal"}
+
+
+def normalize_stop_reason(raw: str | None) -> str:
+    """Any provider's stop signal -> the shared vocabulary."""
+    if raw is None:
+        return STOP_UNKNOWN
+    v = str(raw).strip()
+    if v in _TRUNCATION_SIGNALS or v.lower() in {s.lower() for s in _TRUNCATION_SIGNALS}:
+        return STOP_TRUNCATED
+    if v in _FILTER_SIGNALS or v.lower() in {s.lower() for s in _FILTER_SIGNALS}:
+        return STOP_FILTERED
+    if not v:
+        return STOP_UNKNOWN
+    return STOP_COMPLETE
+
+
 @dataclass
 class AIResponse:
     content: str
@@ -28,6 +56,8 @@ class AIResponse:
     latency_ms: float = 0
     cost_estimate: float = 0.0
     raw_response: dict = field(default_factory=dict)
+    #: Normalised stop signal — see normalize_stop_reason.
+    stop_reason: str = STOP_UNKNOWN
 
 
 class AIProvider(ABC):
@@ -72,11 +102,29 @@ class ClaudeProvider(AIProvider):
 
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
+            # engine.py classifies an upstream failure by catching
+            # RuntimeError. Letting httpx.HTTPStatusError escape bypasses
+            # that handler, so a 429 becomes an unhandled exception
+            # rather than a typed, reported failure.
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"Anthropic API error {r.status_code}: "
+                    f"{(r.text or '')[:300]}"
+                )
             data = r.json()
 
         latency = (time.monotonic() - start) * 1000
-        content = data.get("content", [{}])[0].get("text", "")
+        # Anthropic returns a LIST of content blocks and the text one is
+        # not necessarily first — extended thinking emits a `thinking`
+        # block ahead of it. Indexing [0] yields "" there, which the
+        # engine reports as "AI model returned no content": the exact
+        # symptom that lost a private key to silent triage failure on
+        # the qwen path.
+        content = "".join(
+            b.get("text", "")
+            for b in (data.get("content") or [])
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
         usage = data.get("usage", {})
 
         return AIResponse(
@@ -85,6 +133,7 @@ class ClaudeProvider(AIProvider):
             output_tokens=usage.get("output_tokens", 0),
             latency_ms=latency,
             raw_response={"stop_reason": data.get("stop_reason")},
+            stop_reason=normalize_stop_reason(data.get("stop_reason")),
         )
 
 
@@ -282,6 +331,10 @@ class OpenAIProvider(AIProvider):
                 "reasoning_len": acc["reasoning_len"],
                 "streamed": True,
             },
+            # Captured since the streaming path was written, but read by
+            # nothing — truncation was inferred from trailing punctuation
+            # instead, which misses a response cut off mid-string.
+            stop_reason=normalize_stop_reason(acc["finish_reason"]),
         )
 
     async def _complete_blocking(self, payload: dict, headers: dict, start: float) -> AIResponse:
@@ -326,6 +379,8 @@ class OpenAIProvider(AIProvider):
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
             latency_ms=latency,
+            raw_response={"finish_reason": (choice or {}).get("finish_reason")},
+            stop_reason=normalize_stop_reason((choice or {}).get("finish_reason")),
         )
 
 
@@ -350,17 +405,33 @@ class GoogleProvider(AIProvider):
         }
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(url, json=payload)
-            r.raise_for_status()
+            # Same contract as every other adapter: the engine classifies
+            # upstream failures by catching RuntimeError.
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"Google API error {r.status_code}: {(r.text or '')[:300]}"
+                )
             data = r.json()
 
         latency = (time.monotonic() - start) * 1000
-        content = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        candidate = (data.get("candidates") or [{}])[0]
+        # Concatenate every text part rather than assuming one — Gemini
+        # may split a response across parts.
+        content = "".join(
+            part.get("text", "")
+            for part in ((candidate.get("content") or {}).get("parts") or [])
+            if isinstance(part, dict)
+        )
         usage = data.get("usageMetadata", {})
         return AIResponse(
             content=content, model=self.model,
             input_tokens=usage.get("promptTokenCount", 0),
             output_tokens=usage.get("candidatesTokenCount", 0),
             latency_ms=latency,
+            raw_response={"finishReason": candidate.get("finishReason")},
+            # finishReason was captured nowhere before, so truncation on
+            # Gemini was undetectable by construction.
+            stop_reason=normalize_stop_reason(candidate.get("finishReason")),
         )
 
 

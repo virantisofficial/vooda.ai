@@ -412,7 +412,23 @@ class TriageEngine:
         except json.JSONDecodeError as je:
             # Classify the failure so users/ops can distinguish between
             # an empty response, a truncated response, and a format error.
-            if not content or len(content.strip()) < 5:
+            # The provider TELLS us why it stopped; ask it instead of
+            # inferring from trailing punctuation. The old heuristic
+            # missed the commonest truncation shape — a response cut off
+            # mid-string ends on an ordinary letter — and reported it as
+            # "not valid JSON", sending the reader after the wrong cause.
+            stopped_at_limit = (
+                getattr(response, "stop_reason", None) == "truncated"
+            )
+            if stopped_at_limit:
+                failure_type = "truncated_response"
+                reason = (
+                    f"AI model hit its output limit — {response.output_tokens} "
+                    "completion tokens emitted before it was cut off. The "
+                    "verdict was never finished, so this finding is untriaged, "
+                    "not low-risk."
+                )
+            elif not content or len(content.strip()) < 5:
                 failure_type = "empty_response"
                 reason = "AI model returned no content (likely timeout or quota issue)."
             elif content.rstrip().endswith((".", ",", ":", "{", "[", "\"")):
