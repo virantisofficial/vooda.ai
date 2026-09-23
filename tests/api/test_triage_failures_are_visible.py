@@ -112,3 +112,33 @@ def test_triage_stats_locals_are_bound_even_when_triage_never_runs():
     window = src[init:stats]
     assert "failure_summary: dict[str, int] = {}" in window
     assert '_triage_model_label = ""' in window
+
+
+def test_a_deliberate_abstention_counts_as_triaged():
+    """NEEDS_REVIEW carrying a real confidence means the model read the
+    finding and declined to commit. That is triage working, and
+    excluding it understated the work done.
+
+    The confidence is what separates it from the default: NEEDS_REVIEW
+    with confidence 0 or NULL means nothing ever ran, and counting THAT
+    puts us straight back to reporting failures as successes.
+    """
+    src = WORKER.read_text(encoding="utf-8")
+    block = src[src.index("ai_classified_result = await db.execute"):]
+    block = block[: block.index(")\n\n")]
+    assert "NEEDS_REVIEW" in block, "abstentions must be counted"
+    assert "ai_confidence > 0" in block, (
+        "…but only when the model actually answered"
+    )
+    assert "isnot(None)" in block
+
+
+def test_the_count_query_does_not_depend_on_a_conditional_import():
+    """A statement bound to a name imported inside an unrelated branch
+    has already cost one debugging round today — the unsupported-validity
+    sweep looked correct and updated nothing."""
+    src = WORKER.read_text(encoding="utf-8")
+    block = src[src.index("# Imported locally on purpose"):]
+    block = block[: block.index("ai_classified_result")]
+    assert "from sqlalchemy import or_" in block
+    assert "import Classification as _ClsCount" in block

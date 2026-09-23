@@ -5754,10 +5754,34 @@ async def _run_scan_job(scan_job_id: str):
             # already triaged must report them here or the card falsely reads
             # "pending" / re-offers triage. (Consistent with how false_positives
             # above is a classification-based count, not a this-run count.)
+            # Findings the model actually ruled on. A verdict counts, and
+            # so does a deliberate abstention: NEEDS_REVIEW carrying a real
+            # confidence means the model read the finding and declined to
+            # commit, which is triage working, not triage failing.
+            #
+            # The confidence is what separates the two. NEEDS_REVIEW with
+            # confidence 0 or NULL is the DEFAULT — nothing ever ran — and
+            # counting that would put us straight back to reporting
+            # failures as successes.
+            # Imported locally on purpose: both `Cls` and the sqlalchemy
+            # helpers are otherwise bound inside CONDITIONAL blocks
+            # earlier in this function, and a statement that silently
+            # depends on whether an unrelated branch ran has already
+            # cost one debugging round today.
+            from sqlalchemy import or_ as _cls_or, and_ as _cls_and
+            from apps.api.app.models.finding import Classification as _ClsCount
+
             ai_classified_result = await db.execute(
                 select(sa_func.count(NormalizedFinding.id)).where(
                     NormalizedFinding.scan_job_id == job.id,
-                    NormalizedFinding.classification.in_(ANY_VERDICT),
+                    _cls_or(
+                        NormalizedFinding.classification.in_(ANY_VERDICT),
+                        _cls_and(
+                            NormalizedFinding.classification == _ClsCount.NEEDS_REVIEW,
+                            NormalizedFinding.ai_confidence.isnot(None),
+                            NormalizedFinding.ai_confidence > 0,
+                        ),
+                    ),
                 )
             )
 
