@@ -19,8 +19,13 @@ class FindingListItem(BaseModel):
     scanner_name: str
     file_path: str
     line_start: Optional[int]
-    confidence: float
-    ai_confidence: Optional[float]
+    # Nullable in the database, so nullable here. A required float made
+    # the whole findings list return 500 when any single row had no
+    # scanner confidence — one unset value taking out the endpoint
+    # rather than arriving as a missing field. `ai_confidence` beside it
+    # was already Optional for the same reason.
+    confidence: Optional[float] = None
+    ai_confidence: Optional[float] = None
     code_snippet: Optional[str] = None
     assigned_to: Optional[UUID] = None
     # Canonical credential validity, from the CHECK-constrained
