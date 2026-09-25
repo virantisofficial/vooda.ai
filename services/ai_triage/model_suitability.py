@@ -24,18 +24,31 @@ CANDIDATE = "candidate"
 OTHER_MODALITY = "other_modality"
 CANNOT_SERVE = "cannot_serve"
 
-#: Words naming a non-text output. Checked against the description, the
-#: display name and the id — some providers state nothing but an id, so
-#: "tts-1" carries its only description in the name itself.
+#: Words naming a purpose that is not text triage — either a non-text
+#: output, or a job that is not generation at all. Checked against the
+#: description, the display name and the id, because some providers
+#: state nothing but an id: "tts-1" and "nomic-embed-text" carry their
+#: only description in the name itself.
+#:
+#: These are function words, never product names. "embed" and "rerank"
+#: describe what a model does and hold for a vendor nobody has heard
+#: of; "whisper" and "dall-e" identify one company's products and would
+#: be a maintenance list. Models named only that way reach the probe,
+#: which is the backstop for exactly this.
 #:
 #: One list, because two were measured against 521 live models and made
 #: no difference: a phrase list ("image generation", "text-to-speech")
 #: caught nothing these words missed, and an input-side list meant to
 #: stop "understands images" demoting a vision model prevented zero
 #: false positives — the declared-modality check below already does it.
-_MODALITY_WORDS = {
+_NON_TRIAGE_WORDS = {
+    # non-text output
     "tts", "transcribe", "transcription", "speech", "music",
-    "image", "images", "audio", "video", "embedding", "embeddings",
+    "image", "images", "audio", "video", "diffusion",
+    # not generation at all — encoders and scorers, which self-hosted
+    # catalogues list right beside the chat models
+    "embed", "embedding", "embeddings", "rerank", "reranker",
+    "reranking", "moderation",
 }
 
 
@@ -95,7 +108,7 @@ def classify(
 
     # 3. Nothing structured to go on — fall back to what it is called.
     words = set(re.split(r"[^a-z0-9]+", f"{description} {display_name} {identifier}".lower()))
-    hit = words & _MODALITY_WORDS
+    hit = words & _NON_TRIAGE_WORDS
     if hit:
         return Suitability(OTHER_MODALITY, f"Described as {sorted(hit)[0]}",
                            declared_config=declared_config)
