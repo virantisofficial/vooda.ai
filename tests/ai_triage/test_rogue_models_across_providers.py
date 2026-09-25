@@ -27,7 +27,9 @@ USABLE = [
     ("meta-llama/Llama-3.3-70B-Instruct", {}),
     ("mistralai/mistral-large", {}), ("deepseek/deepseek-r1", {}),
     # A vision-language model still answers in text.
-    ("llava:13b", {}),
+    # Reports an encoder (clip) beside a generator (llama). It answers
+    # in text, so the encoder in that list must not disqualify it.
+    ("llava:13b", {"architecture_families": ["llama", "clip"]}),
     ("qwen/qwen2.5-vl-72b-instruct", {"output_modalities": ["text"],
      "description": "recognizes common objects: flowers, birds, fish and insects"}),
 ]
@@ -39,6 +41,11 @@ ROGUE = [
     ("nomic-embed-text:latest", {}), ("mxbai-embed-large:latest", {}),
     ("stable-diffusion:latest", {}),
     ("BAAI/bge-reranker-v2-m3", {}),
+    # Named only as a model, caught by the architecture the runtime
+    # reports. An encoder cannot answer a prompt whatever it is called.
+    ("bge-m3:latest", {"architecture_families": ["bert"]}),
+    ("all-minilm:latest", {"architecture_families": ["bert"]}),
+    ("nomic-embed-text:latest", {"architecture_families": ["nomic-bert"]}),
     ("lyria-3.5", {"description": "Music Generation model"}),
     ("gemini-3.5-transcribe", {"display_name": "Gemini 3.5 Transcribe"}),
     ("veo-3.1-generate-preview", {"methods": ["predictLongRunning"],
@@ -51,14 +58,14 @@ ROGUE = [
 #: a product name — and catching them would mean maintaining a list of
 #: one vendor's brands, which goes stale and does nothing for the next
 #: provider. They reach the probe, which rejects them in one call.
-SLIPS_THROUGH_TO_THE_PROBE = ["dall-e-3", "whisper-1", "sora-2",
-                              "bge-m3:latest", "all-minilm:latest"]
+SLIPS_THROUGH_TO_THE_PROBE = ["dall-e-3", "whisper-1", "sora-2"]
 
 
 def _classify(mid, extra):
     return classify(
         identifier=mid,
         methods=extra.get("methods"),
+        architecture_families=extra.get("architecture_families"),
         required_method=extra.get("required_method"),
         output_modalities=extra.get("output_modalities"),
         description=extra.get("description", ""),

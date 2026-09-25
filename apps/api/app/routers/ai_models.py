@@ -1075,7 +1075,14 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                             (m.get("details", {}) or {}).get("context_length")
                         ),
                     ), identifier=name,
-                        # Ollama reports size and family, never modality.
+                        # Ollama names the architecture, which is the
+                        # only structural signal a self-hosted catalogue
+                        # offers — an encoder cannot answer a prompt,
+                        # whatever the model is called.
+                        architecture_families=(
+                            (m.get("details", {}) or {}).get("families")
+                            or [(m.get("details", {}) or {}).get("family")]
+                        ),
                         description=name))
                 if models:
                     return DiscoverModelsResponse(

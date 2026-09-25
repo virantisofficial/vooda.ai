@@ -52,6 +52,23 @@ _NON_TRIAGE_WORDS = {
 }
 
 
+#: Architecture markers for encoder-only models. An encoder produces
+#: vectors, not text, so it cannot answer a triage prompt at all —
+#: structural, the same kind of fact as a missing generation method,
+#: not an inference from a name.
+#:
+#: Substring-matched, so this one marker covers bert, nomic-bert,
+#: distilbert and roberta. Architectures are named once and outlive
+#: model releases by years, which is what makes this safe to act on
+#: where a product name is not.
+#:
+#: Deliberately just this. A multimodal model reports several families
+#: — llava reports llama alongside clip — and disqualifying on any
+#: encoder in the list would hide a model that generates text perfectly
+#: well. A test holds that case.
+_ENCODER_ARCHITECTURES = ("bert",)
+
+
 @dataclass
 class Suitability:
     tier: str
@@ -73,6 +90,7 @@ def classify(
     methods: list[str] | None = None,
     required_method: str | None = None,
     output_modalities: list[str] | None = None,
+    architecture_families: list[str] | None = None,
     supported_parameters: list[str] | None = None,
     description: str = "",
     display_name: str = "",
@@ -100,13 +118,23 @@ def classify(
         # RECOGNISE. Whether it triages WELL is the probe's call.
         return Suitability(CANDIDATE, declared_config=declared_config)
 
-    # 2. Can it serve the call Vooda makes? Exact membership: a
+    # 2. Is it an encoder? Self-hosted catalogues list embedding models
+    #    beside the chat models, and their ids do not always say so —
+    #    "bge-m3" and "all-minilm" name a model, not a job. The runtime
+    #    reports the architecture, and an encoder cannot generate.
+    if architecture_families:
+        fams = " ".join(str(f).lower() for f in architecture_families)
+        if any(marker in fams for marker in _ENCODER_ARCHITECTURES):
+            return Suitability(CANNOT_SERVE, "Produces embeddings, not text",
+                               may_exclude=True, declared_config=declared_config)
+
+    # 3. Can it serve the call Vooda makes? Exact membership: a
     #    substring test also matches bidiGenerateContent.
     if required_method and methods is not None and required_method not in set(methods):
         return Suitability(CANNOT_SERVE, "Does not support the request Vooda makes",
                            may_exclude=True, declared_config=declared_config)
 
-    # 3. Nothing structured to go on — fall back to what it is called.
+    # 4. Nothing structured to go on — fall back to what it is called.
     words = set(re.split(r"[^a-z0-9]+", f"{description} {display_name} {identifier}".lower()))
     hit = words & _NON_TRIAGE_WORDS
     if hit:
