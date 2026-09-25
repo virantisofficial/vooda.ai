@@ -470,7 +470,13 @@ export const getAIEngineSettings = () => api.get("/ai-models/engine-settings");
 export const updateAIEngineSettings = (data: Record<string, any>) => api.put("/ai-models/engine-settings", data);
 export const discoverModels = (data: { provider: string; api_key?: string; endpoint_url?: string }) =>
   api.post("/ai-models/discover-models", data);
-export const getAutoConfig = (data: { provider: string; model_id: string; prompt_strategy?: string; parameter_size?: string }) =>
+export const getAutoConfig = (data: {
+  provider: string; model_id: string; prompt_strategy?: string; parameter_size?: string;
+  // What the PROVIDER reported. Without these the backend falls back to
+  // a generic default, so a model's real window is discovered and then
+  // thrown away one call later.
+  context_window?: number | null; max_output?: number | null;
+}) =>
   api.post("/ai-models/auto-config", data);
 
 // Readiness probe — asks a model to triage one finding and grades the

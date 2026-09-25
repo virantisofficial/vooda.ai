@@ -973,19 +973,34 @@ async def _discover_openai(api_key: str, base_url: str | None = None) -> Discove
 async def _discover_google(api_key: str) -> DiscoverModelsResponse:
     import httpx
 
+    base = "https://generativelanguage.googleapis.com/v1beta/models"
+
     async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
-        )
+        # Follow the pages. This endpoint returns 50 per page and hands
+        # back a nextPageToken; asking for one page and ignoring the
+        # token silently truncated the catalogue at 50 of 61. Which 11
+        # vanished was decided by the provider's ordering, so as new
+        # models ship, real triage candidates fall off the end and the
+        # user never learns the list was cut short.
+        all_raw: list[dict] = []
+        token = None
+        for _ in range(20):  # bounded: a token loop must not hang discovery
+            url = f"{base}?key={api_key}&pageSize=200" + (f"&pageToken={token}" if token else "")
+            r = await client.get(url)
 
-        if r.status_code == 400 or r.status_code == 403:
-            return DiscoverModelsResponse(status="error", message="Invalid API key", provider="google")
-        if r.status_code != 200:
-            return DiscoverModelsResponse(status="error", message=f"API returned {r.status_code}", provider="google")
+            if r.status_code == 400 or r.status_code == 403:
+                return DiscoverModelsResponse(status="error", message="Invalid API key", provider="google")
+            if r.status_code != 200:
+                return DiscoverModelsResponse(status="error", message=f"API returned {r.status_code}", provider="google")
 
-        data = r.json()
+            data = r.json()
+            all_raw.extend(data.get("models", []))
+            token = data.get("nextPageToken")
+            if not token:
+                break
+
         models = []
-        for m in data.get("models", []):
+        for m in all_raw:
             name = m.get("name", "").replace("models/", "")
             # Exact membership, not `"generateContent" in str(list)`.
             # That substring test passes for bidiGenerateContent and

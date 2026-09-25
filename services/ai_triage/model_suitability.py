@@ -89,6 +89,9 @@ class Suitability:
     reason: str = ""
     #: Settings the provider stated outright, safe to apply.
     declared_config: dict = field(default_factory=dict)
+    #: Words the provider used about this model. Kept so a later pass
+    #: can tell a real description from one that echoes the name.
+    description_tokens: set = field(default_factory=set)
 
     @property
     def may_exclude(self) -> bool:
@@ -196,4 +199,28 @@ def classify(
         )
 
     return Suitability(CANDIDATE, NONE if not declared_config else DECLARED,
-                       "", declared_config)
+                       "", declared_config,
+                       _tokens(f"{description} {display_name}"))
+
+
+# Family inference was tried here and removed.
+#
+# One catalogue describes `lyria-3.5` as "Music Generation model" and
+# its siblings as nothing more than "Lyria 3 Pro Preview", so the
+# labelled one is grouped and the rest sit among the triage candidates.
+# The obvious fix — let a labelled member speak for its family — needs
+# a way to tell a description that says something from one that merely
+# echoes the name, otherwise the unlabelled siblings vote for
+# themselves and every family vetoes its own correction.
+#
+# That test turned out to be another guess. "Aria 3 30s model Preview"
+# adds words to the name while saying nothing about modality, and
+# separating those cases meant tuning a heuristic against the examples
+# in front of me. Stacking a second fuzzy rule on the weakest signal
+# already in use, to save a single probe call, is a bad trade: the
+# probe is authoritative, it already marks these unusable, and the
+# readiness filter then hides them.
+#
+# Left undone on purpose. If this is revisited, the thing to look for
+# is a provider that states modality in a structured field — several
+# already do — not a cleverer way to read prose.

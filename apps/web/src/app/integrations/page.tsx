@@ -744,7 +744,17 @@ function AIModelsFullSection() {
     if (!modelId) return;
     try {
       const paramSize = selectedModelParam || sizeOverride || undefined;
-      const r = await getAutoConfig({ provider, model_id: modelId, prompt_strategy: strategy, parameter_size: paramSize });
+      // Hand back what discovery learned from the provider. These were
+      // being collected and then dropped, so every model fell through
+      // to a generic default window — a 262K model was budgeted as if
+      // it had 1M, which is the prompt sizing being wrong by 4x on the
+      // one number that decides how much context a triage can carry.
+      const discovered = discoveredModels.find((m) => m.model_id === modelId);
+      const r = await getAutoConfig({
+        provider, model_id: modelId, prompt_strategy: strategy, parameter_size: paramSize,
+        context_window: discovered?.context_window ?? null,
+        max_output: discovered?.max_output ?? null,
+      });
       const cfg = r.data?.config;
       if (cfg) {
         setForm((f) => ({
