@@ -146,3 +146,26 @@ def test_only_missing_or_forbidden_models_are_called_unusable():
     assert _definitive_failure("Google API error 404: model not found") is not None
     assert _definitive_failure("401 Unauthorized") is not None
     assert _definitive_failure("403 permission denied") is not None
+
+
+def test_a_fix_is_never_offered_for_a_setting_already_applied():
+    """Seen live: JSON mode was on, the model wrapped its answer
+    anyway, and the remedy still read "Turning on JSON mode…" — a Fix
+    button that changes nothing and then reports success. Some models
+    accept the flag and ignore it."""
+    already_on = _verdict_for("ok_salvaged", {}, False, json_mode_on=True)
+    assert already_on.state == NEEDS_SETUP
+    assert already_on.suggested_config == {}, "nothing to apply"
+    assert "ignores" in already_on.remedy
+
+    was_off = _verdict_for("ok_salvaged", {}, False, json_mode_on=False)
+    assert was_off.suggested_config == {"supports_json_mode": True}
+
+
+def test_every_offered_fix_actually_changes_something():
+    """A suggested_config that matches the current setting is not a
+    fix. Each one here must differ from the state it was probed in."""
+    for on in (True, False):
+        res = _verdict_for("ok_salvaged", {}, False, json_mode_on=on)
+        if res.suggested_config:
+            assert res.suggested_config.get("supports_json_mode") != on

@@ -524,6 +524,16 @@ function AIModelsFullSection() {
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
 
   /** One model card. Shared so both groups look identical. */
+  /** What a suggested fix would actually change, given the current
+   *  form. A suggestion matching what is already set is not a fix, and
+   *  a button that changes nothing and then reports success is the
+   *  same false confidence this screen exists to remove. */
+  const pendingFix = (v?: ProbeVerdict): Record<string, any> => {
+    const cfg = v?.suggested_config || {};
+    return Object.fromEntries(
+      Object.entries(cfg).filter(([k, val]) => (form as any)[k] !== val));
+  };
+
   /** Settings the provider stated outright, applied on selection.
    *  Only ever fills in what the provider declared — it does not
    *  override a value the user typed. */
@@ -694,7 +704,11 @@ function AIModelsFullSection() {
 
   /** Apply what the probe proved works. */
   const applyProbeFix = async (v: ProbeVerdict) => {
-    const cfg = v.suggested_config || {};
+    // Writes to the form, not to the saved configuration — the user
+    // still presses Update Provider. Saying only "Setting applied"
+    // left that ambiguous on a screen whose whole point is not
+    // overstating what has happened.
+    const cfg = pendingFix(v);
     setForm((f) => ({ ...f, ...cfg }));
     setProbeFixApplied(v.model_id);
     // Re-verify with the change in place. The button claims the setting
@@ -1306,12 +1320,14 @@ function AIModelsFullSection() {
                             </button>
                           )}
                           {probeFixApplied === form.model_id && (
-                            <span className="ml-1.5 text-[11px] text-emerald-400">Setting applied.</span>
+                            <span className="ml-1.5 text-[11px] text-emerald-400">
+                              Applied below — save with Update Provider.
+                            </span>
                           )}
                         </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
-                        {selectedVerdict && Object.keys(selectedVerdict.suggested_config || {}).length > 0 && (
+                        {selectedVerdict && Object.keys(pendingFix(selectedVerdict)).length > 0 && (
                           <button type="button" onClick={() => applyProbeFix(selectedVerdict)}
                             className="text-[11px] px-2.5 py-1 rounded-md border bg-amber-500/10 border-amber-500/25 text-amber-400 hover:bg-amber-500/15 transition-colors">
                             Fix

@@ -168,7 +168,8 @@ def grade_reply(content: str, stop_reason: str, output_tokens: int,
 
 
 def _verdict_for(outcome: str, ev: dict, retried_ok: bool,
-                 retry_at: int = _RETRY_FLOOR) -> ProbeResult:
+                 retry_at: int = _RETRY_FLOOR,
+                 json_mode_on: bool = False) -> ProbeResult:
     """Translate an outcome into something a customer can act on."""
     if outcome == "ok":
         return ProbeResult("", READY, "Ready to triage.", "", {}, ev)
@@ -182,6 +183,18 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool,
             {}, ev)
 
     if outcome == "ok_salvaged":
+        if json_mode_on:
+            # JSON mode was already on and the model wrapped its answer
+            # anyway — so it does not honour the setting, and telling
+            # anyone to switch on what is already switched on produces
+            # a Fix button that changes nothing and then reports
+            # success. Some models accept the JSON flag and ignore it.
+            return ProbeResult(
+                "", NEEDS_SETUP,
+                "Works, but wraps its answer in extra text.",
+                "Vooda reads it correctly. This model ignores the JSON-mode setting, "
+                "so every reply costs a few extra tokens.",
+                {}, ev)
         return ProbeResult(
             "", NEEDS_SETUP,
             "Works, but wraps its answer in extra text.",
@@ -294,7 +307,7 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
                                    "Try again in a moment.", {}, ev, total, calls)
             ev["retry_error"] = str(e)[:300]
 
-    res = _verdict_for(outcome, ev, retried_ok, escalated)
+    res = _verdict_for(outcome, ev, retried_ok, escalated, supports_json_mode)
     res.model_id = model_id
     res.latency_ms = (time.monotonic() - t0) * 1000
     res.calls_used = calls
