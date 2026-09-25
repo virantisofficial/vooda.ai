@@ -95,6 +95,25 @@ _CREDENTIAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bsk_test_[A-Za-z0-9]{24,}\b"), "<stripe-test-key>"),
     (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{30,}\b"), "<anthropic-key>"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b"), "<jwt>"),
+    # Credentials passed in a URL query string.
+    #
+    # Every pattern above matches a credential by its SHAPE, so a key
+    # in a format nobody anticipated goes straight to disk. Google's
+    # Generative Language API takes the key as ?key=..., httpx logs
+    # request URLs at INFO, and 66 lines of one session carried a live
+    # key in clear text into the container log file. Nobody wrote a
+    # bug; the credential simply had a shape no rule described.
+    #
+    # This matches on the PARAMETER NAME instead, so it holds for any
+    # provider that puts a secret in a URL and for key formats that do
+    # not exist yet. The rest of the URL survives, because a log line
+    # that no longer says which endpoint was called has been made
+    # useless rather than safe.
+    (re.compile(
+        r"(?i)([?&](?:key|api[_-]?key|apikey|token|access[_-]?token|auth|"
+        r"password|passwd|secret|client[_-]?secret|signature|sig)=)"
+        r"[^&\s\"'<>]+"
+     ), r"\1<redacted>"),
 ]
 
 # Field names whose VALUE should always be redacted regardless of content.
