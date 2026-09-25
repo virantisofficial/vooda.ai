@@ -1276,33 +1276,39 @@ function AIModelsFullSection() {
                   </div>
                 )}
 
-                {/* Verdict for the selected model. Full width under the
-                    grid so the cards keep a uniform height and nothing
-                    reflows as answers arrive. */}
+                {/* The selected model's verdict, sized to what it has
+                    to say. It carries four things — the verdict, the
+                    remedy, the button that applies the remedy, and the
+                    evidence behind it — but only the first is always
+                    present. As a fixed panel with a divider it spent
+                    the same height announcing "try again in a moment"
+                    as it did explaining a fix, so it now states itself
+                    on one line and grows only when asked. */}
                 {form.model_id && (
-                  <div className={`mt-2.5 rounded-lg border p-3 ${readinessPanelTone(selectedVerdict?.state)}`}>
-                    <div className="flex items-start justify-between gap-3">
+                  <div className={`mt-2.5 rounded-lg border px-3 py-2 ${readinessPanelTone(selectedVerdict?.state)}`}>
+                    <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        {selectedVerdict ? (
-                          <>
-                            <p className={`text-xs ${
-                              selectedVerdict.state === READY ? "text-emerald-400"
-                              : selectedVerdict.state === NEEDS_SETUP ? "text-amber-400"
-                              : selectedVerdict.state === UNUSABLE ? "text-rose-400" : "text-slate-400"}`}>
-                              {selectedVerdict.headline}
-                            </p>
-                            {selectedVerdict.remedy && (
-                              <p className="text-[11px] text-slate-500 mt-1">{selectedVerdict.remedy}</p>
-                            )}
-                          </>
-                        ) : (
-                          <p className="text-xs text-slate-500">
-                            Not checked yet — check to confirm this model can triage.
-                          </p>
-                        )}
-                        {probeFixApplied === form.model_id && (
-                          <p className="text-[11px] text-emerald-400 mt-1.5">Setting applied.</p>
-                        )}
+                        <p className="text-xs leading-relaxed">
+                          <span className={
+                            selectedVerdict?.state === READY ? "text-emerald-400"
+                            : selectedVerdict?.state === NEEDS_SETUP ? "text-amber-400"
+                            : selectedVerdict?.state === UNUSABLE ? "text-rose-400" : "text-slate-400"}>
+                            {selectedVerdict ? selectedVerdict.headline : "Not checked yet."}
+                          </span>
+                          <span className="text-slate-500">
+                            {" "}
+                            {selectedVerdict ? selectedVerdict.remedy : "Check to confirm this model can triage."}
+                          </span>
+                          {selectedVerdict && needsExplanation(selectedVerdict) && (
+                            <button type="button" onClick={() => setShowProbeDetail((v) => !v)}
+                              className="ml-1.5 text-[10px] text-slate-600 hover:text-slate-400 transition-colors underline underline-offset-2">
+                              {showProbeDetail ? "Hide details" : "Details"}
+                            </button>
+                          )}
+                          {probeFixApplied === form.model_id && (
+                            <span className="ml-1.5 text-[11px] text-emerald-400">Setting applied.</span>
+                          )}
+                        </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         {selectedVerdict && Object.keys(selectedVerdict.suggested_config || {}).length > 0 && (
@@ -1319,21 +1325,10 @@ function AIModelsFullSection() {
                       </div>
                     </div>
 
-                    {/* Evidence, folded away. A settings screen is not a
-                        debugger, but an enterprise buyer gets to see
-                        what the verdict was based on. */}
-                    {selectedVerdict && needsExplanation(selectedVerdict) && (
-                      <div className="mt-2 pt-2 border-t border-white/[0.06]">
-                        <button type="button" onClick={() => setShowProbeDetail((v) => !v)}
-                          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors">
-                          {showProbeDetail ? "Hide details" : "Details"}
-                        </button>
-                        {showProbeDetail && (
-                          <pre className="mt-1.5 text-[10px] text-slate-500 font-mono bg-black/20 rounded p-2 overflow-x-auto max-h-40">
+                    {showProbeDetail && selectedVerdict && (
+                      <pre className="mt-2 text-[10px] text-slate-500 font-mono bg-black/20 rounded p-2 overflow-x-auto max-h-40">
 {JSON.stringify(selectedVerdict.detail, null, 2)}
-                          </pre>
-                        )}
-                      </div>
+                      </pre>
                     )}
                   </div>
                 )}
