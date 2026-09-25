@@ -555,7 +555,16 @@ function AIModelsFullSection() {
     if (!modelId) return;
     setProbingModel(modelId);
     try {
-      const payload: any = { provider: form.provider, model_ids: [modelId] };
+      const payload: any = {
+        provider: form.provider,
+        model_ids: [modelId],
+        // Verify against the settings this model will actually run
+        // with. Probing at a different budget tests a request Vooda
+        // never makes, and it is how the Fix button's change stayed
+        // invisible to the re-check that was meant to confirm it.
+        max_tokens: form.max_tokens,
+        supports_json_mode: form.supports_json_mode,
+      };
       if (editingId) payload.model_config_id = editingId;
       else if (form.api_key) payload.api_key = form.api_key;
       if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
@@ -608,7 +617,10 @@ function AIModelsFullSection() {
     setProbeFixApplied(v.model_id);
     // Re-verify with the change in place. The button claims the setting
     // fixes it, so prove it again rather than leaving a stale warning
-    // sitting under a model that now works.
+    // sitting under a model that now works. The verdict above reports
+    // the outcome — this notice only says the setting was applied,
+    // because saying more before the check returns would be the same
+    // premature success this whole screen exists to stop.
     await probeOne(v.model_id, { silent: true });
     setTimeout(() => setProbeFixApplied(null), 4000);
   };
@@ -1190,7 +1202,7 @@ function AIModelsFullSection() {
                           </p>
                         )}
                         {probeFixApplied === form.model_id && (
-                          <p className="text-[11px] text-emerald-400 mt-1.5">Setting applied and re-checked.</p>
+                          <p className="text-[11px] text-emerald-400 mt-1.5">Setting applied.</p>
                         )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">

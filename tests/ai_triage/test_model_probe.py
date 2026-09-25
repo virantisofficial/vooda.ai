@@ -36,10 +36,26 @@ def test_the_exact_reply_that_used_to_report_success():
 
 
 def test_starved_model_that_recovers_is_fixable_not_broken():
-    res = _verdict_for("empty_truncated", {}, retried_ok=True)
+    res = _verdict_for("empty_truncated", {}, retried_ok=True, retry_at=2000)
     assert res.state == NEEDS_SETUP
-    assert res.suggested_config == {"max_tokens": mp._RETRY_MAX_TOKENS}
+    assert res.suggested_config == {"max_tokens": 2000}
     assert "2000" in res.remedy
+
+
+def test_the_remedy_never_tells_a_user_to_lower_their_budget():
+    """A flat retry of 2000 would be a REDUCTION on the 4096 default,
+    so the fix would have read as 'set this smaller' on a model that
+    needed more room."""
+    for configured in (300, 1024, 4096, 8192):
+        assert mp.retry_budget(configured) >= configured
+
+
+def test_retry_budget_scales_but_stays_bounded():
+    assert mp.retry_budget(300) == 2000, "floor applies to small budgets"
+    assert mp.retry_budget(4096) == mp._RETRY_CEILING, "scales up to the cap"
+    # Past the cap the answer is "keep what you have", never a smaller
+    # number — a budget that big is not what is holding the model back.
+    assert mp.retry_budget(100_000) == 100_000
 
 
 def test_prose_wrapped_answer_counts_as_working():
@@ -111,7 +127,7 @@ def test_a_fixable_state_always_carries_a_remedy():
     for o in ["ok_slow", "ok_salvaged", "bad_vocabulary"]:
         res = _verdict_for(o, {"latency_ms": 1000}, False)
         assert res.remedy, o
-    fixed = _verdict_for("empty_truncated", {}, True)
+    fixed = _verdict_for("empty_truncated", {}, True, 2000)
     assert fixed.remedy and fixed.suggested_config
 
 

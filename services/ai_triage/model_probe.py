@@ -39,10 +39,31 @@ _ACCEPTED_VERDICTS = {
     "likely_true_positive", "likely_false_positive",
 }
 
-#: Retried budget when the first attempt is starved. Reasoning models
-#: spend the budget thinking before any visible text: measured, a model
-#: returning 0 visible tokens at 300 returned clean JSON at 2000.
-_RETRY_MAX_TOKENS = 2000
+#: Floor for the second attempt when the first is starved. Reasoning
+#: models spend the budget thinking before any visible text: measured,
+#: gemini-3.5-flash returned 0 visible tokens at 300 and clean JSON in
+#: 64 at 2000.
+_RETRY_FLOOR = 2000
+#: Never escalate past this. A model needing more than this to answer a
+#: one-line verdict is not a model to run over thousands of findings.
+_RETRY_CEILING = 8000
+
+
+def retry_budget(current: int) -> int:
+    """How much room to offer on the second attempt.
+
+    Scaled from what was actually tried rather than fixed, because the
+    probe now runs at the budget the tenant has configured — and triage
+    calls with that same number. A flat 2000 would have been a
+    REDUCTION for anyone on the 4096 default, which would have made the
+    retry look like a failure and condemned a working model.
+    """
+    if current >= _RETRY_CEILING:
+        # Already more room than any one-line verdict needs. Offering
+        # less would be a reduction dressed up as a fix, and the caller
+        # skips the retry when this is not an increase.
+        return current
+    return min(_RETRY_CEILING, max(_RETRY_FLOOR, current * 4))
 
 #: Above this, a per-finding cost makes a large scan impractical. A
 #: 2,000-finding scan at 10s/finding is over five hours.
@@ -146,7 +167,8 @@ def grade_reply(content: str, stop_reason: str, output_tokens: int,
     return "ok", parsed, ev
 
 
-def _verdict_for(outcome: str, ev: dict, retried_ok: bool) -> ProbeResult:
+def _verdict_for(outcome: str, ev: dict, retried_ok: bool,
+                 retry_at: int = _RETRY_FLOOR) -> ProbeResult:
     """Translate an outcome into something a customer can act on."""
     if outcome == "ok":
         return ProbeResult("", READY, "Ready to triage.", "", {}, ev)
@@ -171,8 +193,8 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool) -> ProbeResult:
             return ProbeResult(
                 "", NEEDS_SETUP,
                 "This model thinks before answering and used its whole reply budget.",
-                f"Raise the output limit to {_RETRY_MAX_TOKENS}. Verified working at that setting.",
-                {"max_tokens": _RETRY_MAX_TOKENS}, ev)
+                f"Raise the output limit to {retry_at}. Verified working at that setting.",
+                {"max_tokens": retry_at}, ev)
         return ProbeResult(
             "", UNUSABLE,
             "Returned no usable answer, even with a larger reply budget.",
@@ -190,8 +212,8 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool) -> ProbeResult:
         return ProbeResult(
             "", NEEDS_SETUP,
             "Needed a larger reply budget to answer completely.",
-            f"Raise the output limit to {_RETRY_MAX_TOKENS}. Verified working at that setting.",
-            {"max_tokens": _RETRY_MAX_TOKENS}, ev)
+            f"Raise the output limit to {retry_at}. Verified working at that setting.",
+            {"max_tokens": retry_at}, ev)
     return ProbeResult(
         "", UNUSABLE,
         "Did not return an answer Vooda can read.",
@@ -200,7 +222,7 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool) -> ProbeResult:
 
 async def probe_model(provider_name: str, api_key: str, model_id: str,
                       endpoint_url: str | None = None,
-                      max_tokens: int = 300,
+                      max_tokens: int = 4096,
                       supports_json_mode: bool = True,
                       extra_payload: dict | None = None) -> ProbeResult:
     """One real triage request. A second only when the first is starved.
@@ -255,14 +277,15 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
     # Starved on the first pass — find out whether more room fixes it,
     # rather than guessing on the customer's behalf.
     retried_ok = False
+    escalated = retry_budget(max_tokens)
     if outcome in ("empty_truncated", "truncated_partial", "empty", "unparseable") \
-            and max_tokens < _RETRY_MAX_TOKENS:
+            and escalated > max_tokens:
         try:
-            r2 = await attempt(_RETRY_MAX_TOKENS)
+            r2 = await attempt(escalated)
             outcome2, _p2, ev2 = grade_reply(r2.content, r2.stop_reason,
                                              r2.output_tokens, r2.latency_ms)
             retried_ok = outcome2 in ("ok", "ok_slow", "ok_salvaged")
-            ev["retry"] = {"max_tokens": _RETRY_MAX_TOKENS, "outcome": outcome2, **ev2}
+            ev["retry"] = {"max_tokens": escalated, "outcome": outcome2, **ev2}
         except Exception as e:
             if _looks_transient(str(e)):
                 total = (time.monotonic() - t0) * 1000
@@ -271,7 +294,7 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
                                    "Try again in a moment.", {}, ev, total, calls)
             ev["retry_error"] = str(e)[:300]
 
-    res = _verdict_for(outcome, ev, retried_ok)
+    res = _verdict_for(outcome, ev, retried_ok, escalated)
     res.model_id = model_id
     res.latency_ms = (time.monotonic() - t0) * 1000
     res.calls_used = calls

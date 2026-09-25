@@ -56,15 +56,26 @@ def test_the_starved_model_is_retried_and_becomes_fixable(monkeypatch):
     """Reasoning burns the budget at 300 and answers fine at 2000."""
     _install(monkeypatch, lambda budget:
              (GOOD, "complete", 40) if budget >= 2000 else ("", "truncated", 0))
-    res = run(probe_model("google", "k", "m"))
+    res = run(probe_model("google", "k", "m", max_tokens=300))
     assert res.state == NEEDS_SETUP
-    assert res.suggested_config == {"max_tokens": mp._RETRY_MAX_TOKENS}
+    assert res.suggested_config == {"max_tokens": 2000}
     assert FakeProvider.calls == [300, 2000]
+
+
+def test_a_tenant_on_the_default_budget_is_escalated_upward(monkeypatch):
+    """The real default is 4096, not 300 — the escalation has to be
+    larger than that or the retry proves nothing."""
+    _install(monkeypatch, lambda budget:
+             (GOOD, "complete", 40) if budget > 4096 else ("", "truncated", 0))
+    res = run(probe_model("google", "k", "m", max_tokens=4096))
+    assert res.state == NEEDS_SETUP
+    assert FakeProvider.calls[0] == 4096
+    assert FakeProvider.calls[1] > 4096
 
 
 def test_a_model_that_fails_at_any_budget_is_unusable(monkeypatch):
     _install(monkeypatch, lambda budget: ("", "truncated", 0))
-    res = run(probe_model("google", "k", "m"))
+    res = run(probe_model("google", "k", "m", max_tokens=300))
     assert res.state == UNUSABLE
     assert FakeProvider.calls == [300, 2000], "must actually try harder before condemning"
 
@@ -85,7 +96,7 @@ def test_a_missing_model_is_condemned_without_a_retry(monkeypatch):
     _install(monkeypatch, lambda budget: RuntimeError("Google API error 404: not found"))
     res = run(probe_model("google", "k", "m"))
     assert res.state == UNUSABLE
-    assert FakeProvider.calls == [300], "no point retrying a model that does not exist"
+    assert len(FakeProvider.calls) == 1, "no point retrying a model that does not exist"
 
 
 def test_overload_during_the_retry_does_not_become_unusable(monkeypatch):
@@ -94,7 +105,7 @@ def test_overload_during_the_retry_does_not_become_unusable(monkeypatch):
             return RuntimeError("503 overloaded")
         return ("", "truncated", 0)
     _install(monkeypatch, script)
-    res = run(probe_model("google", "k", "m"))
+    res = run(probe_model("google", "k", "m", max_tokens=300))
     assert res.state == UNVERIFIED
 
 

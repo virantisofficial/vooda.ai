@@ -310,6 +310,167 @@ async def update_engine_settings(
     return {"status": "ok", **body.model_dump()}
 
 
+# NOTE: these routes MUST stay above `GET /{model_id}`.
+#
+# FastAPI matches in definition order, so with the catch-all first,
+# GET /ai-models/probe-results was parsed as model_id="probe-results",
+# failed UUID validation and returned 422. Nothing errored loudly —
+# the screen simply never loaded a cached verdict, so every badge was
+# missing and the caching this feature depends on did nothing.
+
+# ── Model readiness probe ─────────────────────────────
+#
+# Discovery answers "what models exist". This answers the only question
+# a customer actually has: "will this one do the job?" They are separate
+# calls because listing is free and unlimited, while asking a model to
+# triage costs a request — and doing that for every model each time the
+# screen opens would bill the customer for opening a settings page.
+
+
+class ProbeRequest(StrictModel):
+    provider: str
+    #: One model, or several for "Verify all". Kept as a list so the
+    #: batch path is the same code as the single path.
+    model_ids: list[str]
+    api_key: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    model_config_id: Optional[UUID] = None
+    supports_json_mode: bool = True
+    #: The budget triage will actually use. engine.py calls with the
+    #: tenant's configured max_tokens, so probing at anything else tests
+    #: a request Vooda never makes — and probing low would fail models
+    #: that work in production.
+    max_tokens: int = 4096
+
+
+class ProbeVerdict(BaseModel):
+    model_id: str
+    state: str
+    headline: str = ""
+    remedy: str = ""
+    suggested_config: dict = {}
+    detail: dict = {}
+    latency_ms: float = 0
+    probed_at: Optional[str] = None
+
+
+class ProbeResponse(BaseModel):
+    status: str
+    message: str = ""
+    results: list[ProbeVerdict] = []
+
+
+def _probe_to_verdict(r, probed_at: str) -> ProbeVerdict:
+    return ProbeVerdict(
+        model_id=r.model_id, state=r.state, headline=r.headline,
+        remedy=r.remedy, suggested_config=r.suggested_config or {},
+        detail=r.detail or {}, latency_ms=round(r.latency_ms, 1),
+        probed_at=probed_at,
+    )
+
+
+async def _store_probe(db: AsyncSession, tenant_id, provider: str, r, probed_at: str):
+    """Upsert by (tenant, provider, model) — one current answer per model."""
+    existing = (await db.execute(
+        select(AIModelProbeResult).where(
+            AIModelProbeResult.tenant_id == tenant_id,
+            AIModelProbeResult.provider == provider,
+            AIModelProbeResult.model_id == r.model_id,
+        )
+    )).scalar_one_or_none()
+    row = existing or AIModelProbeResult(
+        tenant_id=tenant_id, provider=provider, model_id=r.model_id)
+    row.state = r.state
+    row.headline = (r.headline or "")[:500]
+    row.remedy = (r.remedy or "")[:500]
+    row.suggested_config = r.suggested_config or {}
+    row.detail = r.detail or {}
+    row.latency_ms = round(r.latency_ms, 1)
+    row.probed_at = probed_at
+    if existing is None:
+        db.add(row)
+
+
+@router.post("/probe", response_model=ProbeResponse)
+async def probe_models(
+    body: ProbeRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Ask each model to triage one finding, and grade the answer.
+
+    Sequential on purpose. Running the batch concurrently is faster and
+    trips free-tier rate limits, which come back as 429 and would be
+    read as "this model is broken" — turning a throughput choice into a
+    wrong verdict the customer then sees in the filter.
+    """
+    from datetime import datetime, timezone
+    from services.ai_triage.model_probe import probe_model
+
+    provider = body.provider
+    api_key = body.api_key
+    endpoint_url = body.endpoint_url
+    extra_payload = None
+
+    if body.model_config_id:
+        cfg = (await db.execute(
+            select(AIModelConfig).where(
+                AIModelConfig.id == body.model_config_id,
+                AIModelConfig.tenant_id == user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if not cfg:
+            raise HTTPException(status_code=404, detail="Model config not found")
+        provider = cfg.provider
+        api_key = cfg.api_key_encrypted
+        endpoint_url = cfg.endpoint_url
+        extra_payload = cfg.provider_config or None
+
+    local_providers = {"ollama", "lm_studio", "vllm", "localai", "custom"}
+    if not api_key and provider not in local_providers:
+        return ProbeResponse(status="error", message="API key is required to verify a model")
+    if not body.model_ids:
+        return ProbeResponse(status="error", message="No models to verify")
+
+    results: list[ProbeVerdict] = []
+    for model_id in body.model_ids[:50]:
+        r = await probe_model(
+            provider, api_key, model_id, endpoint_url,
+            max_tokens=body.max_tokens,
+            supports_json_mode=body.supports_json_mode,
+            extra_payload=extra_payload,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        await _store_probe(db, user.tenant_id, provider, r, now)
+        results.append(_probe_to_verdict(r, now))
+
+    await db.flush()
+    return ProbeResponse(status="success", results=results)
+
+
+@router.get("/probe-results", response_model=ProbeResponse)
+async def get_probe_results(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Verdicts already on record, so badges render without a call."""
+    rows = (await db.execute(
+        select(AIModelProbeResult).where(
+            AIModelProbeResult.tenant_id == user.tenant_id,
+            AIModelProbeResult.provider == provider,
+        )
+    )).scalars().all()
+    return ProbeResponse(status="success", results=[
+        ProbeVerdict(
+            model_id=r.model_id, state=r.state, headline=r.headline or "",
+            remedy=r.remedy or "", suggested_config=r.suggested_config or {},
+            detail=r.detail or {}, latency_ms=r.latency_ms or 0,
+            probed_at=r.probed_at,
+        ) for r in rows
+    ])
+
+
 @router.get("/{model_id}", response_model=AIModelResponse)
 async def get_model(
     model_id: UUID,
@@ -956,152 +1117,3 @@ async def get_task_routing(
 
 
 # Engine settings moved before /{model_id} routes to avoid route conflict
-
-
-# ── Model readiness probe ─────────────────────────────
-#
-# Discovery answers "what models exist". This answers the only question
-# a customer actually has: "will this one do the job?" They are separate
-# calls because listing is free and unlimited, while asking a model to
-# triage costs a request — and doing that for every model each time the
-# screen opens would bill the customer for opening a settings page.
-
-
-class ProbeRequest(StrictModel):
-    provider: str
-    #: One model, or several for "Verify all". Kept as a list so the
-    #: batch path is the same code as the single path.
-    model_ids: list[str]
-    api_key: Optional[str] = None
-    endpoint_url: Optional[str] = None
-    model_config_id: Optional[UUID] = None
-    supports_json_mode: bool = True
-    max_tokens: int = 300
-
-
-class ProbeVerdict(BaseModel):
-    model_id: str
-    state: str
-    headline: str = ""
-    remedy: str = ""
-    suggested_config: dict = {}
-    detail: dict = {}
-    latency_ms: float = 0
-    probed_at: Optional[str] = None
-
-
-class ProbeResponse(BaseModel):
-    status: str
-    message: str = ""
-    results: list[ProbeVerdict] = []
-
-
-def _probe_to_verdict(r, probed_at: str) -> ProbeVerdict:
-    return ProbeVerdict(
-        model_id=r.model_id, state=r.state, headline=r.headline,
-        remedy=r.remedy, suggested_config=r.suggested_config or {},
-        detail=r.detail or {}, latency_ms=round(r.latency_ms, 1),
-        probed_at=probed_at,
-    )
-
-
-async def _store_probe(db: AsyncSession, tenant_id, provider: str, r, probed_at: str):
-    """Upsert by (tenant, provider, model) — one current answer per model."""
-    existing = (await db.execute(
-        select(AIModelProbeResult).where(
-            AIModelProbeResult.tenant_id == tenant_id,
-            AIModelProbeResult.provider == provider,
-            AIModelProbeResult.model_id == r.model_id,
-        )
-    )).scalar_one_or_none()
-    row = existing or AIModelProbeResult(
-        tenant_id=tenant_id, provider=provider, model_id=r.model_id)
-    row.state = r.state
-    row.headline = (r.headline or "")[:500]
-    row.remedy = (r.remedy or "")[:500]
-    row.suggested_config = r.suggested_config or {}
-    row.detail = r.detail or {}
-    row.latency_ms = round(r.latency_ms, 1)
-    row.probed_at = probed_at
-    if existing is None:
-        db.add(row)
-
-
-@router.post("/probe", response_model=ProbeResponse)
-async def probe_models(
-    body: ProbeRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Ask each model to triage one finding, and grade the answer.
-
-    Sequential on purpose. Running the batch concurrently is faster and
-    trips free-tier rate limits, which come back as 429 and would be
-    read as "this model is broken" — turning a throughput choice into a
-    wrong verdict the customer then sees in the filter.
-    """
-    from datetime import datetime, timezone
-    from services.ai_triage.model_probe import probe_model
-
-    provider = body.provider
-    api_key = body.api_key
-    endpoint_url = body.endpoint_url
-    extra_payload = None
-
-    if body.model_config_id:
-        cfg = (await db.execute(
-            select(AIModelConfig).where(
-                AIModelConfig.id == body.model_config_id,
-                AIModelConfig.tenant_id == user.tenant_id,
-            )
-        )).scalar_one_or_none()
-        if not cfg:
-            raise HTTPException(status_code=404, detail="Model config not found")
-        provider = cfg.provider
-        api_key = cfg.api_key_encrypted
-        endpoint_url = cfg.endpoint_url
-        extra_payload = cfg.provider_config or None
-
-    local_providers = {"ollama", "lm_studio", "vllm", "localai", "custom"}
-    if not api_key and provider not in local_providers:
-        return ProbeResponse(status="error", message="API key is required to verify a model")
-    if not body.model_ids:
-        return ProbeResponse(status="error", message="No models to verify")
-
-    results: list[ProbeVerdict] = []
-    for model_id in body.model_ids[:50]:
-        r = await probe_model(
-            provider, api_key, model_id, endpoint_url,
-            max_tokens=body.max_tokens,
-            supports_json_mode=body.supports_json_mode,
-            extra_payload=extra_payload,
-        )
-        now = datetime.now(timezone.utc).isoformat()
-        await _store_probe(db, user.tenant_id, provider, r, now)
-        results.append(_probe_to_verdict(r, now))
-
-    await db.flush()
-    return ProbeResponse(status="success", results=results)
-
-
-@router.get("/probe-results", response_model=ProbeResponse)
-async def get_probe_results(
-    provider: str,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Verdicts already on record, so badges render without a call."""
-    rows = (await db.execute(
-        select(AIModelProbeResult).where(
-            AIModelProbeResult.tenant_id == user.tenant_id,
-            AIModelProbeResult.provider == provider,
-        )
-    )).scalars().all()
-    return ProbeResponse(status="success", results=[
-        ProbeVerdict(
-            model_id=r.model_id, state=r.state, headline=r.headline or "",
-            remedy=r.remedy or "", suggested_config=r.suggested_config or {},
-            detail=r.detail or {}, latency_ms=r.latency_ms or 0,
-            probed_at=r.probed_at,
-        ) for r in rows
-    ])
