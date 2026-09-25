@@ -172,7 +172,7 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool,
                  json_mode_on: bool = False) -> ProbeResult:
     """Translate an outcome into something a customer can act on."""
     if outcome == "ok":
-        return ProbeResult("", READY, "Ready to triage.", "", {}, ev)
+        return ProbeResult("", READY, "Ready to Triage.", "", {}, ev)
 
     if outcome == "ok_slow":
         secs = ev.get("latency_ms", 0) / 1000

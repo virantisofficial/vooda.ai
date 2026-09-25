@@ -1035,7 +1035,7 @@ function AIModelsFullSection() {
                         Local
                       </span>
                     ) : (
-                      <span className="text-xs text-yellow-400">Key needed</span>
+                      <span className="text-xs text-yellow-400">Key Needed</span>
                     )}
                     {/* Actions menu */}
                     <div className="relative">
@@ -1147,7 +1147,7 @@ function AIModelsFullSection() {
                     <button onClick={() => handleDiscoverModels()} disabled={!canDiscover || discovering}
                       className="btn-secondary shrink-0 flex items-center gap-2 whitespace-nowrap">
                       {discovering ? (
-                        <><div className="w-3.5 h-3.5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin" />Connecting...</>
+                        <><div className="w-3.5 h-3.5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin" />Connecting…</>
                       ) : keyValidated ? (
                         <><svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Connected</>
                       ) : (
@@ -1201,9 +1201,9 @@ function AIModelsFullSection() {
                   <button onClick={() => handleDiscoverModels({ modelConfigId: editingId, preserveSelection: true })}
                     className="btn-secondary text-xs flex items-center gap-1.5">
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                    Retry with stored key
+                    Retry with Stored Key
                   </button>
-                  <span className="text-[10px] text-slate-600">or enter a new API key above</span>
+                  <span className="text-[10px] text-slate-600">Or enter a new API key above</span>
                 </div>
               )}
             </div>
@@ -1232,7 +1232,7 @@ function AIModelsFullSection() {
                     ) : (
                       <>
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                        Check all {candidateModels.length}
+                        Check All {candidateModels.length}
                       </>
                     )}
                   </button>
@@ -1253,8 +1253,8 @@ function AIModelsFullSection() {
                     a verdict. */}
                 <p className="text-[10px] text-slate-600 mb-2">
                   Checking submits one sample finding and validates the model&apos;s response — a single short request
-                  per model. <span className="text-slate-500">Not checked</span> means no request has been made.
-                  <span className="text-slate-500"> Couldn&apos;t check</span> means the provider was unavailable, which
+                  per model. <span className="text-slate-500">Not Checked</span> means no request has been made.
+                  <span className="text-slate-500"> Couldn&apos;t Check</span> means the provider was unavailable, which
                   is usually temporary — those are worth checking again.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
@@ -1315,7 +1315,7 @@ function AIModelsFullSection() {
                             selectedVerdict?.state === READY ? "text-emerald-400"
                             : selectedVerdict?.state === NEEDS_SETUP ? "text-amber-400"
                             : selectedVerdict?.state === UNUSABLE ? "text-rose-400" : "text-slate-400"}>
-                            {selectedVerdict ? selectedVerdict.headline : "Not checked yet."}
+                            {selectedVerdict ? selectedVerdict.headline : "Not Checked Yet."}
                           </span>
                           <span className="text-slate-500">
                             {" "}
@@ -1324,7 +1324,7 @@ function AIModelsFullSection() {
                           {selectedVerdict && needsExplanation(selectedVerdict) && (
                             <button type="button" onClick={() => setShowProbeDetail((v) => !v)}
                               className="ml-1.5 text-[10px] text-slate-600 hover:text-slate-400 transition-colors underline underline-offset-2">
-                              {showProbeDetail ? "Hide details" : "Details"}
+                              {showProbeDetail ? "Hide Details" : "Details"}
                             </button>
                           )}
                           {probeFixApplied === form.model_id && (
@@ -1344,7 +1344,7 @@ function AIModelsFullSection() {
                         <button type="button" onClick={() => probeOne(form.model_id)}
                           disabled={probingModel === form.model_id || !!verifyingAll}
                           className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
-                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Check again" : "Check"}
+                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Check Again" : "Check"}
                         </button>
                       </div>
                     </div>
@@ -1431,7 +1431,7 @@ function AIModelsFullSection() {
                   <svg className={`w-3 h-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  Advanced settings
+                  Advanced Settings
                 </button>
 
                 {showAdvanced && (

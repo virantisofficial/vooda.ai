@@ -41,10 +41,10 @@ export interface ProbeVerdict {
 export function readinessLabel(state?: string): string {
   switch (state) {
     case READY: return "Ready";
-    case NEEDS_SETUP: return "Needs setup";
-    case UNVERIFIED: return "Couldn't check";
-    case UNUSABLE: return "Won't work";
-    default: return "Not checked";
+    case NEEDS_SETUP: return "Needs Setup";
+    case UNVERIFIED: return "Couldn't Check";
+    case UNUSABLE: return "Won't Work";
+    default: return "Not Checked";
   }
 }
 
