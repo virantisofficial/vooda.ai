@@ -493,12 +493,22 @@ function AIModelsFullSection() {
   // Now there is one question — can this model triage — and one place
   // for everything that cannot, each card saying why.
   const verifiedCount = Object.keys(probeResults).length;
+  const capitalise = (t: string) => t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
 
   const unsuitableReason = (m: any): string => {
+    // The provider's own answer first. A model that does not list the
+    // call Vooda makes cannot serve it — that is definite, while a
+    // probe of the same model reports whatever the API said when asked
+    // anyway, which came back as "isn't available on your plan" for a
+    // model the provider had just listed. Contradictory, and the vaguer
+    // of the two.
+    if (m.suitability === "cannot_serve" && m.suitability_reason) {
+      return capitalise(m.suitability_reason);
+    }
     const verdict = probeResults[m.model_id];
     if (verdict?.state === UNUSABLE) return verdict.headline || "Won't work";
-    if (m.suitability_reason) return m.suitability_reason;
-    return "not suitable for triage";
+    if (m.suitability_reason) return capitalise(m.suitability_reason);
+    return "Not suitable for triage";
   };
   const isUnsuitable = (m: any) =>
     m.suitability_may_exclude
@@ -581,7 +591,14 @@ function AIModelsFullSection() {
         // before the customer has finished reading the list.
         loadCachedProbes(form.provider);
         if (!opts?.preserveSelection) {
-          const firstModel = data.models[0];
+          // First model that can actually triage, not first in the list.
+          // Rows come back sorted by id, so whichever name happens to
+          // sort first was being selected — which put a video model in
+          // the form, red-ringed as the current choice, while sitting
+          // in the section for models that cannot be used.
+          const firstModel =
+            data.models.find((m: any) => m.suitability === "candidate")
+            || data.models[0];
           setForm((f) => ({ ...f, model_id: firstModel.model_id, name: f.name || firstModel.model_id }));
           setSelectedModelParam(firstModel.parameter_size || null);
           applyAutoConfig(form.provider, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
@@ -1209,9 +1226,12 @@ function AIModelsFullSection() {
                   {candidateModels.length} of {discoveredModels.length} models from this provider can do text triage.
                   {unsuitableModels.length > 0 && " The rest are listed below."}
                 </p>
+                {/* Say what the badge means. A customer should not have
+                    to infer "Not checked" from the button beside it. */}
                 <p className="text-[10px] text-slate-600 mb-2">
-                  Checking sends one sample finding to a model and reads the answer — a single short request each.
-                  {verifiedCount === 0 && " Models show as Not checked until then."}
+                  Checking sends one sample finding to a model and reads the answer — one short request each.
+                  Until a model is checked it is marked <span className="text-slate-500">Not checked</span>, which says
+                  nothing about it either way.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                   {candidateModels.map(renderModelCard)}
@@ -1234,7 +1254,7 @@ function AIModelsFullSection() {
                         Can&apos;t be used for triage ({unsuitableModels.length})
                       </span>
                       <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
-                        {selectedIsUnsuitable ? "includes your current choice" : "image, speech, music, unsupported"}
+                        {selectedIsUnsuitable ? "Includes your current choice" : "Image, speech, music, unsupported"}
                       </span>
                     </button>
                     {(showOtherModality || selectedIsUnsuitable) && (
@@ -1275,7 +1295,7 @@ function AIModelsFullSection() {
                           </>
                         ) : (
                           <p className="text-xs text-slate-500">
-                            Not checked yet — verify to confirm this model can triage.
+                            Not checked yet — check to confirm this model can triage.
                           </p>
                         )}
                         {probeFixApplied === form.model_id && (
@@ -1292,7 +1312,7 @@ function AIModelsFullSection() {
                         <button type="button" onClick={() => probeOne(form.model_id)}
                           disabled={probingModel === form.model_id || !!verifyingAll}
                           className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
-                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Re-check" : "Verify"}
+                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Check again" : "Check"}
                         </button>
                       </div>
                     </div>

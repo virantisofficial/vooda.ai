@@ -78,7 +78,7 @@ def classify(
         outs = {str(m).lower() for m in output_modalities}
         if "text" not in outs:
             return Suitability(OTHER_MODALITY,
-                               f"produces {', '.join(sorted(outs))}, not text",
+                               f"Produces {', '.join(sorted(outs))}, not text",
                                may_exclude=True)
         # It emits text, which is all triage needs — and that is a
         # stated fact, so the guess below does not get to argue with it.
@@ -90,14 +90,14 @@ def classify(
     # 2. Can it serve the call Vooda makes? Exact membership: a
     #    substring test also matches bidiGenerateContent.
     if required_method and methods is not None and required_method not in set(methods):
-        return Suitability(CANNOT_SERVE, "does not support the request Vooda makes",
+        return Suitability(CANNOT_SERVE, "Does not support the request Vooda makes",
                            may_exclude=True, declared_config=declared_config)
 
     # 3. Nothing structured to go on — fall back to what it is called.
     words = set(re.split(r"[^a-z0-9]+", f"{description} {display_name} {identifier}".lower()))
     hit = words & _MODALITY_WORDS
     if hit:
-        return Suitability(OTHER_MODALITY, f"described as {sorted(hit)[0]}",
+        return Suitability(OTHER_MODALITY, f"Described as {sorted(hit)[0]}",
                            declared_config=declared_config)
 
     return Suitability(CANDIDATE, declared_config=declared_config)
