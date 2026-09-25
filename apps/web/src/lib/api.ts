@@ -473,6 +473,19 @@ export const discoverModels = (data: { provider: string; api_key?: string; endpo
 export const getAutoConfig = (data: { provider: string; model_id: string; prompt_strategy?: string; parameter_size?: string }) =>
   api.post("/ai-models/auto-config", data);
 
+// Readiness probe — asks a model to triage one finding and grades the
+// answer. Separate from discovery because listing models is free and
+// unlimited, while this costs a request per model.
+export const probeModels = (data: {
+  provider: string; model_ids: string[]; api_key?: string;
+  endpoint_url?: string; model_config_id?: string;
+  supports_json_mode?: boolean; max_tokens?: number;
+}) => api.post("/ai-models/probe", data);
+
+// Verdicts already on record, so badges render without spending a call.
+export const getProbeResults = (provider: string) =>
+  api.get("/ai-models/probe-results", { params: { provider } });
+
 // Governance API clients (policies, NHI, agents, supply-chain, quantum,
 // federation, migrations, universal governance, gates) removed 2026-05-16 —
 // product surfaces deleted alongside the scanner-core refocus.

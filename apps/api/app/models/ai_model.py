@@ -42,3 +42,38 @@ class AIModelConfig(Base, UUIDMixin, TimestampMixin, TenantMixin):
 
     # Provider-specific config (region, deployment name, etc.)
     provider_config = Column(JSONB, default=dict)
+
+
+class AIModelProbeResult(Base, UUIDMixin, TimestampMixin, TenantMixin):
+    """The last time Vooda asked this model to actually triage something.
+
+    Cached so the provider screen can show a badge per model the moment
+    it loads. Probing on load was the obvious design and the wrong one:
+    it bills the customer for opening a settings page, trips free-tier
+    rate limits, and — worst — brands a briefly overloaded model as
+    broken and then hides it behind the filter.
+
+    Keyed by (tenant, provider, model_id) rather than by config id,
+    because the interesting question is asked about models the customer
+    has NOT saved yet.
+    """
+    __tablename__ = "ai_model_probe_results"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "provider", "model_id",
+                         name="uq_ai_model_probe_tenant_provider_model"),
+    )
+
+    provider = Column(String(50), nullable=False)
+    model_id = Column(String(255), nullable=False)
+
+    #: ready | needs_setup | unverified | unusable — see model_probe.py,
+    #: which owns this vocabulary.
+    state = Column(String(20), nullable=False)
+    headline = Column(String(500), nullable=False, default="")
+    remedy = Column(String(500), nullable=False, default="")
+    #: Applied verbatim by the Fix button.
+    suggested_config = Column(JSONB, default=dict)
+    #: Token counts and stop reasons — shown only behind "Details".
+    detail = Column(JSONB, default=dict)
+    latency_ms = Column(Float, default=0.0)
+    probed_at = Column(String(50), nullable=True)

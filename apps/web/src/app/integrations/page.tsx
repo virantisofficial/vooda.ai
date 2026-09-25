@@ -12,10 +12,16 @@ import api, {
   getIntegrations, deleteIntegration, updateIntegration,
   getAIModels, createAIModel, updateAIModel, deleteAIModel, testAIModel, getAITaskRouting,
   getAIEngineSettings, updateAIEngineSettings, discoverModels, getAutoConfig,
+  probeModels, getProbeResults,
   getNotificationRules, updateNotificationRules,
   getProviderSchema, testIntegrationConnection, createIntegration, getBusinessUnits, getRepositories,
 } from "@/lib/api";
 import SearchableSelect from "@/components/ui/SearchableSelect";
+import {
+  READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE,
+  readinessLabel, readinessTone, readinessPanelTone,
+  passesReadyFilter, needsExplanation, type ProbeVerdict,
+} from "@/lib/modelReadiness";
 import { useToast } from "@/components/ui/Toast";
 
 // ═══════════════════════════════════════════════════════════════
@@ -416,6 +422,15 @@ function AIModelsFullSection() {
   // Model discovery state
   const [discoveredModels, setDiscoveredModels] = useState<any[]>([]);
   const [discovering, setDiscovering] = useState(false);
+  // Readiness verdicts, keyed by model_id. Loaded from cache on open so
+  // badges appear instantly; probing on load would bill the customer
+  // for opening a settings page and trip free-tier rate limits.
+  const [probeResults, setProbeResults] = useState<Record<string, ProbeVerdict>>({});
+  const [probingModel, setProbingModel] = useState<string | null>(null);
+  const [verifyingAll, setVerifyingAll] = useState<{ done: number; total: number } | null>(null);
+  const [onlyReady, setOnlyReady] = useState(true);
+  const [showProbeDetail, setShowProbeDetail] = useState(false);
+  const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
   const [discoverStatus, setDiscoverStatus] = useState<{ status: string; message: string } | null>(null);
   const [keyValidated, setKeyValidated] = useState(false);
   // Track the original model_id when entering edit mode. If the user swaps to
@@ -465,6 +480,18 @@ function AIModelsFullSection() {
 
   const providerFor = (p: string) => AI_PROVIDERS.find((pr) => pr.value === p);
 
+  // The filter never hides the model the customer has already selected.
+  // Watching your own choice vanish because a verdict came back is
+  // disorienting, and the panel under the grid is where that verdict
+  // gets explained.
+  const verifiedCount = Object.keys(probeResults).length;
+  const visibleModels = (!onlyReady || verifiedCount === 0)
+    ? discoveredModels
+    : discoveredModels.filter(
+        (m) => m.model_id === form.model_id || passesReadyFilter(probeResults[m.model_id]));
+  const hiddenModelCount = discoveredModels.length - visibleModels.length;
+  const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
+
   const handleDiscoverModels = async (opts?: { modelConfigId?: string; preserveSelection?: boolean }) => {
     const prov = providerFor(form.provider);
     const needsKey = prov?.requiresKey ?? true;
@@ -488,6 +515,9 @@ function AIModelsFullSection() {
       if (data.status === "success" && data.models?.length > 0) {
         setDiscoveredModels(data.models);
         setKeyValidated(true);
+        // Verdicts already on record — free, and the badges are there
+        // before the customer has finished reading the list.
+        loadCachedProbes(form.provider);
         if (!opts?.preserveSelection) {
           const firstModel = data.models[0];
           setForm((f) => ({ ...f, model_id: firstModel.model_id, name: f.name || firstModel.model_id }));
@@ -502,6 +532,87 @@ function AIModelsFullSection() {
     }
   };
 
+  // ── Model readiness ─────────────────────────────────
+  //
+  // Discovery tells us which models exist. Whether one can actually
+  // triage is a different question, and the only way to know is to ask
+  // it — so this is deliberately never automatic.
+
+  const loadCachedProbes = async (provider: string) => {
+    try {
+      const r = await getProbeResults(provider);
+      const byId: Record<string, ProbeVerdict> = {};
+      for (const v of r.data?.results || []) byId[v.model_id] = v;
+      setProbeResults(byId);
+    } catch {
+      // A missing cache is not an error worth interrupting anyone for;
+      // every model simply shows "Not checked" until verified.
+      setProbeResults({});
+    }
+  };
+
+  const probeOne = async (modelId: string, opts?: { silent?: boolean }) => {
+    if (!modelId) return;
+    setProbingModel(modelId);
+    try {
+      const payload: any = { provider: form.provider, model_ids: [modelId] };
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+
+      const r = await probeModels(payload);
+      const v: ProbeVerdict | undefined = r.data?.results?.[0];
+      if (v) setProbeResults((prev) => ({ ...prev, [v.model_id]: v }));
+      return v;
+    } catch (e: any) {
+      // Report it as a verdict rather than an alert: an unreachable
+      // check is itself information about the model, and it belongs on
+      // the card with everything else we know.
+      if (!opts?.silent) {
+        setProbeResults((prev) => ({
+          ...prev,
+          [modelId]: {
+            model_id: modelId, state: UNVERIFIED,
+            headline: "Couldn't check this model.",
+            remedy: e.response?.data?.message || "Try again in a moment.",
+            suggested_config: {}, detail: {}, latency_ms: 0,
+          } as ProbeVerdict,
+        }));
+      }
+    } finally {
+      setProbingModel(null);
+    }
+  };
+
+  const verifyAll = async () => {
+    const ids = discoveredModels.map((m) => m.model_id).filter(Boolean);
+    if (ids.length === 0) return;
+    setVerifyingAll({ done: 0, total: ids.length });
+    try {
+      // One model per request rather than one request for all of them,
+      // so the grid fills in as answers arrive and the run can be read
+      // as progress instead of a spinner that might be stuck.
+      for (let i = 0; i < ids.length; i++) {
+        await probeOne(ids[i], { silent: true });
+        setVerifyingAll({ done: i + 1, total: ids.length });
+      }
+    } finally {
+      setVerifyingAll(null);
+    }
+  };
+
+  /** Apply what the probe proved works. */
+  const applyProbeFix = async (v: ProbeVerdict) => {
+    const cfg = v.suggested_config || {};
+    setForm((f) => ({ ...f, ...cfg }));
+    setProbeFixApplied(v.model_id);
+    // Re-verify with the change in place. The button claims the setting
+    // fixes it, so prove it again rather than leaving a stale warning
+    // sitting under a model that now works.
+    await probeOne(v.model_id, { silent: true });
+    setTimeout(() => setProbeFixApplied(null), 4000);
+  };
+
   const resetForm = () => {
     // Tasks default to triage (the only keyword the worker dispatches
     // on).
@@ -509,6 +620,8 @@ function AIModelsFullSection() {
     setDiscoveredModels([]);
     setDiscoverStatus(null);
     setKeyValidated(false);
+    setProbeResults({});
+    setShowProbeDetail(false);
     setEditingId(null);
     setShowAdvanced(false);
     setSelectedModelParam(null);
@@ -982,9 +1095,47 @@ function AIModelsFullSection() {
           {(keyValidated || editingId) && discoveredModels.length > 0 && (
             <div className="space-y-4 mb-5">
               <div>
-                <label className="text-xs text-slate-500 mb-1.5 block">Select Model ({discoveredModels.length} available)</label>
+                {/* Header: label left, controls right — one row so the
+                    grid below starts from a clean, even baseline. */}
+                <div className="flex items-center justify-between gap-3 mb-1.5 min-h-[28px]">
+                  <label className="text-xs text-slate-500">
+                    Select Model ({visibleModels.length}{hiddenModelCount > 0 ? ` of ${discoveredModels.length}` : ""} available)
+                  </label>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {verifiedCount > 0 && (
+                      <button type="button" onClick={() => setOnlyReady((v) => !v)}
+                        className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
+                          onlyReady
+                            ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
+                            : "bg-white/[0.02] border-white/[0.06] text-slate-500 hover:border-white/[0.12]"
+                        }`}>
+                        {onlyReady ? "Hiding unusable" : "Showing all"}
+                      </button>
+                    )}
+                    <button type="button" onClick={verifyAll} disabled={!!verifyingAll}
+                      className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-50">
+                      {verifyingAll ? (
+                        <>
+                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin" />
+                          {verifyingAll.done}/{verifyingAll.total}
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                          Verify all
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+                {/* One line of guidance, so nobody has to guess what
+                    verifying does or fear an accidental bill. */}
+                <p className="text-[10px] text-slate-600 mb-2">
+                  Verifying asks a model to triage one sample finding — one short request each.
+                  {hiddenModelCount > 0 && ` ${hiddenModelCount} model${hiddenModelCount === 1 ? "" : "s"} hidden.`}
+                </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {discoveredModels.map((m) => (
+                  {visibleModels.map((m) => (
                     <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); }}
                       className={`text-left p-3 rounded-lg border transition-all ${
                         form.model_id === m.model_id
@@ -993,7 +1144,14 @@ function AIModelsFullSection() {
                       }`}>
                       <div className="flex items-center gap-2">
                         <span className={`w-2 h-2 rounded-full shrink-0 ${form.model_id === m.model_id ? "bg-red-400" : "bg-slate-600"}`} />
-                        <span className="text-sm font-medium text-slate-200 truncate">{m.name || m.model_id}</span>
+                        <span className="text-sm font-medium text-slate-200 truncate flex-1">{m.name || m.model_id}</span>
+                        {probingModel === m.model_id ? (
+                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin shrink-0" />
+                        ) : probeResults[m.model_id] ? (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id].state)}`}>
+                            {readinessLabel(probeResults[m.model_id].state)}
+                          </span>
+                        ) : null}
                       </div>
                       <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
                       {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}
@@ -1006,6 +1164,68 @@ function AIModelsFullSection() {
                     </button>
                   ))}
                 </div>
+
+                {/* Verdict for the selected model. Full width under the
+                    grid so the cards keep a uniform height and nothing
+                    reflows as answers arrive. */}
+                {form.model_id && (
+                  <div className={`mt-2.5 rounded-lg border p-3 ${readinessPanelTone(selectedVerdict?.state)}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        {selectedVerdict ? (
+                          <>
+                            <p className={`text-xs ${
+                              selectedVerdict.state === READY ? "text-emerald-400"
+                              : selectedVerdict.state === NEEDS_SETUP ? "text-amber-400"
+                              : selectedVerdict.state === UNUSABLE ? "text-rose-400" : "text-slate-400"}`}>
+                              {selectedVerdict.headline}
+                            </p>
+                            {selectedVerdict.remedy && (
+                              <p className="text-[11px] text-slate-500 mt-1">{selectedVerdict.remedy}</p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-xs text-slate-500">
+                            Not checked yet — verify to confirm this model can triage.
+                          </p>
+                        )}
+                        {probeFixApplied === form.model_id && (
+                          <p className="text-[11px] text-emerald-400 mt-1.5">Setting applied and re-checked.</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {selectedVerdict && Object.keys(selectedVerdict.suggested_config || {}).length > 0 && (
+                          <button type="button" onClick={() => applyProbeFix(selectedVerdict)}
+                            className="text-[11px] px-2.5 py-1 rounded-md border bg-amber-500/10 border-amber-500/25 text-amber-400 hover:bg-amber-500/15 transition-colors">
+                            Fix
+                          </button>
+                        )}
+                        <button type="button" onClick={() => probeOne(form.model_id)}
+                          disabled={probingModel === form.model_id || !!verifyingAll}
+                          className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
+                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Re-check" : "Verify"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Evidence, folded away. A settings screen is not a
+                        debugger, but an enterprise buyer gets to see
+                        what the verdict was based on. */}
+                    {selectedVerdict && needsExplanation(selectedVerdict) && (
+                      <div className="mt-2 pt-2 border-t border-white/[0.06]">
+                        <button type="button" onClick={() => setShowProbeDetail((v) => !v)}
+                          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors">
+                          {showProbeDetail ? "Hide details" : "Details"}
+                        </button>
+                        {showProbeDetail && (
+                          <pre className="mt-1.5 text-[10px] text-slate-500 font-mono bg-black/20 rounded p-2 overflow-x-auto max-h-40">
+{JSON.stringify(selectedVerdict.detail, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
             </div>
