@@ -28,6 +28,39 @@ from apps.api.app.core.validity import normalize as _validity
 logger = structlog.get_logger()
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Pull a JSON object out of a reply that wrapped it in prose.
+
+    Two shapes, in order of confidence:
+      1. a fenced ```json block anywhere in the text
+      2. the outermost {...} span
+
+    Returns None when nothing parses, so the caller reports a real
+    failure rather than inventing a verdict.
+    """
+    import re as _re
+
+    fenced = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
+    if fenced:
+        candidate = fenced.group(1)
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 class TriageEngine:
     def __init__(self, provider: AIProvider, model_config: dict | None = None):
         self.provider = provider
@@ -434,6 +467,7 @@ class TriageEngine:
     def _parse_response(self, response: AIResponse) -> dict:
         """Parse AI response into structured result, with retry-safe fallback."""
         content = response.content.strip()
+        salvaged = None
 
         # Strip markdown code fences if present
         if content.startswith("```"):
@@ -442,6 +476,26 @@ class TriageEngine:
 
         try:
             result = json.loads(content)
+        except json.JSONDecodeError:
+            # The model answered correctly and wrapped it in chatter.
+            # Observed on gemini-3.5-flash: 'Here is the JSON requested:'
+            # followed by a fenced block — the fence check above only
+            # fires when the fence is the FIRST thing, so a single line
+            # of preamble threw away a perfectly good verdict.
+            #
+            # Tried only AFTER a strict parse fails, so a well-behaved
+            # model is never second-guessed, and recorded when used: a
+            # model that needs salvaging every time is a model to
+            # replace, and that should be visible rather than hidden.
+            recovered = _extract_json_object(content)
+            if recovered is not None:
+                salvaged = "wrapped_in_prose"
+                content = recovered
+
+        try:
+            result = json.loads(content)
+            if salvaged:
+                result.setdefault("_salvage", salvaged)
         except json.JSONDecodeError as je:
             # Classify the failure so users/ops can distinguish between
             # an empty response, a truncated response, and a format error.
