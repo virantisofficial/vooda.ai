@@ -779,7 +779,14 @@ async def discover_available_models(
         stored = result.scalar_one_or_none()
         if not stored:
             return DiscoverModelsResponse(status="error", message="Model configuration not found", provider=provider)
-        provider = (provider or stored.provider or "").lower()
+        # The stored provider wins. A caller that names a config is
+        # asking about THAT config, so its provider is a fact rather
+        # than a suggestion — and the caller's copy can be stale. The
+        # UI read it from form state one render too early and sent
+        # "anthropic" for a Google config on every edit, which queried
+        # Anthropic with a Google key and reported "Invalid API key"
+        # about a key that was fine.
+        provider = (stored.provider or provider or "").lower()
         if not api_key:
             api_key = stored.api_key_encrypted or ""
         if not endpoint_url:

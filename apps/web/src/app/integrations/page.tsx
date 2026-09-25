@@ -578,8 +578,15 @@ function AIModelsFullSection() {
   );
 
 
-  const handleDiscoverModels = async (opts?: { modelConfigId?: string; preserveSelection?: boolean }) => {
-    const prov = providerFor(form.provider);
+  const handleDiscoverModels = async (opts?: {
+    modelConfigId?: string; preserveSelection?: boolean; provider?: string;
+  }) => {
+    // Takes the provider explicitly when the caller knows it. setForm
+    // is applied on the next render, so a caller that sets the
+    // provider and discovers in the same handler reads the PREVIOUS
+    // one — which is how opening a Google config queried Anthropic.
+    const providerId = opts?.provider || form.provider;
+    const prov = providerFor(providerId);
     const needsKey = prov?.requiresKey ?? true;
     const usingStoredKey = !!opts?.modelConfigId;
     if (!usingStoredKey) {
@@ -591,7 +598,7 @@ function AIModelsFullSection() {
     setDiscoveredModels([]);
     setKeyValidated(false);
     try {
-      const payload: any = { provider: form.provider };
+      const payload: any = { provider: providerId };
       if (form.api_key) payload.api_key = form.api_key;
       if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
       if (opts?.modelConfigId) payload.model_config_id = opts.modelConfigId;
@@ -603,7 +610,7 @@ function AIModelsFullSection() {
         setKeyValidated(true);
         // Verdicts already on record — free, and the badges are there
         // before the customer has finished reading the list.
-        loadCachedProbes(form.provider);
+        loadCachedProbes(providerId);
         if (!opts?.preserveSelection) {
           // First model that can actually triage, not first in the list.
           // Rows come back sorted by id, so whichever name happens to
@@ -615,7 +622,7 @@ function AIModelsFullSection() {
             || data.models[0];
           setForm((f) => ({ ...f, model_id: firstModel.model_id, name: f.name || firstModel.model_id }));
           setSelectedModelParam(firstModel.parameter_size || null);
-          applyAutoConfig(form.provider, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
+          applyAutoConfig(providerId, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
         }
       }
     } catch (e: any) {
@@ -774,7 +781,7 @@ function AIModelsFullSection() {
     // Auto-load available models using stored credentials so the user can switch
     // without re-entering their API key.
     if (model.api_key_set || !providerFor(model.provider)?.requiresKey) {
-      handleDiscoverModels({ modelConfigId: model.id, preserveSelection: true });
+      handleDiscoverModels({ modelConfigId: model.id, preserveSelection: true, provider: model.provider });
     }
     // Scroll to form
     setTimeout(() => document.getElementById("ai-model-form")?.scrollIntoView({ behavior: "smooth" }), 100);
