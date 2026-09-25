@@ -556,11 +556,15 @@ function AIModelsFullSection() {
                         <span className="text-sm font-medium text-slate-200 truncate flex-1">{m.name || m.model_id}</span>
                         {probingModel === m.model_id ? (
                           <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin shrink-0" />
-                        ) : probeResults[m.model_id] ? (
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id].state)}`}>
-                            {readinessLabel(probeResults[m.model_id].state)}
+                        ) : (
+                          /* Every card carries a status. Leaving the
+                             never-checked ones blank meant the only
+                             cards saying "Not checked" were the ones
+                             Vooda had checked and failed to reach. */
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id]?.state)}`}>
+                            {readinessLabel(probeResults[m.model_id]?.state)}
                           </span>
-                        ) : null}
+                        )}
                       </div>
                       <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
                       {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}

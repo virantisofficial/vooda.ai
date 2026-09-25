@@ -29,12 +29,20 @@ export interface ProbeVerdict {
   probed_at?: string | null;
 }
 
-/** Short word for the badge. Never a token count — that lives in Details. */
+/** Short word for the badge. Never a token count — that lives in Details.
+ *
+ * UNVERIFIED reads "Couldn't check", not "Not checked". It means Vooda
+ * asked and the provider gave nothing usable back — almost always a
+ * 503 — which is a different fact from never having asked. The two
+ * were sharing a label while never-checked models showed no badge at
+ * all, so the badge said the opposite of what had happened: every card
+ * reading "Not checked" was one Vooda had tried and failed to reach.
+ */
 export function readinessLabel(state?: string): string {
   switch (state) {
     case READY: return "Ready";
     case NEEDS_SETUP: return "Needs setup";
-    case UNVERIFIED: return "Not checked";
+    case UNVERIFIED: return "Couldn't check";
     case UNUSABLE: return "Won't work";
     default: return "Not checked";
   }
