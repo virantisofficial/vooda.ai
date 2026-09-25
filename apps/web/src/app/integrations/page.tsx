@@ -1203,7 +1203,7 @@ function AIModelsFullSection() {
                     the right. A single row, so the grid below starts
                     from an even baseline. */}
                 <div className="flex items-center justify-between gap-3 mb-1 min-h-[28px]">
-                  <label className="text-sm text-slate-300">Choose a model for AI triage</label>
+                  <label className="text-sm text-slate-300">Choose a Model for AI Triage</label>
                   <button type="button" onClick={verifyAll} disabled={!!verifyingAll}
                     className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0 disabled:opacity-50">
                     {verifyingAll ? (
@@ -1222,16 +1222,18 @@ function AIModelsFullSection() {
                 {/* Two short sentences: what you are looking at, then
                     what the button will do. These used to be one line
                     with three unrelated counts run together. */}
+                {/* Inventory first, then the action. Both state what
+                    they cost and what they mean — an evaluator should
+                    not have to infer either from the controls. */}
                 <p className="text-[11px] text-slate-500 mb-0.5">
-                  {candidateModels.length} of {discoveredModels.length} models from this provider can do text triage.
-                  {unsuitableModels.length > 0 && " The rest are listed below."}
+                  {candidateModels.length} of {discoveredModels.length} models from this provider support
+                  text-based triage.
+                  {unsuitableModels.length > 0 && ` The remaining ${unsuitableModels.length} are listed below with the reason each was excluded.`}
                 </p>
-                {/* Say what the badge means. A customer should not have
-                    to infer "Not checked" from the button beside it. */}
                 <p className="text-[10px] text-slate-600 mb-2">
-                  Checking sends one sample finding to a model and reads the answer — one short request each.
-                  Until a model is checked it is marked <span className="text-slate-500">Not checked</span>, which says
-                  nothing about it either way.
+                  Checking submits one sample finding and validates the model&apos;s response — a single short request
+                  per model. Models not yet checked are marked <span className="text-slate-500">Not checked</span>,
+                  which records the absence of a result rather than a problem with the model.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                   {candidateModels.map(renderModelCard)}
@@ -1251,7 +1253,7 @@ function AIModelsFullSection() {
                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
-                        Can&apos;t be used for triage ({unsuitableModels.length})
+                        Can&apos;t Be Used for Triage ({unsuitableModels.length})
                       </span>
                       <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
                         {selectedIsUnsuitable ? "Includes your current choice" : "Image, speech, music, unsupported"}
