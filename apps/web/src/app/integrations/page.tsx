@@ -526,7 +526,7 @@ function AIModelsFullSection() {
 
   const renderModelCard = (m: any) => (
                     <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); applyDeclaredConfig(m); }}
-                      className={`text-left p-3 rounded-lg border transition-all ${
+                      className={`w-full text-left p-3 rounded-lg border transition-all ${
                         form.model_id === m.model_id
                           ? "border-red-500/30 bg-red-500/5"
                           : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.02]"
@@ -1226,15 +1226,15 @@ function AIModelsFullSection() {
                   <div className="mt-2.5">
                     <button type="button" onClick={() => setShowOtherModality((v) => !v)}
                       className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
-                      <span className="flex items-center gap-2 text-xs text-slate-400">
+                      <span className="flex items-center gap-2 text-xs text-slate-400 whitespace-nowrap">
                         <svg className={`w-3 h-3 transition-transform ${(showOtherModality || selectedIsUnsuitable) ? "rotate-90" : ""}`}
                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                         Can&apos;t be used for triage ({unsuitableModels.length})
                       </span>
-                      <span className="text-[10px] text-slate-600 shrink-0">
-                        {selectedIsUnsuitable ? "includes your current choice" : "image, speech, music and unsupported models"}
+                      <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
+                        {selectedIsUnsuitable ? "includes your current choice" : "image, speech, music, unsupported"}
                       </span>
                     </button>
                     {(showOtherModality || selectedIsUnsuitable) && (
