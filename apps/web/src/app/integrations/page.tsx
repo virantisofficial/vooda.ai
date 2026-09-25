@@ -20,7 +20,7 @@ import SearchableSelect from "@/components/ui/SearchableSelect";
 import {
   READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE,
   readinessLabel, readinessTone, readinessPanelTone,
-  passesReadyFilter, needsExplanation, type ProbeVerdict,
+  needsExplanation, type ProbeVerdict,
 } from "@/lib/modelReadiness";
 import { useToast } from "@/components/ui/Toast";
 
@@ -428,7 +428,6 @@ function AIModelsFullSection() {
   const [probeResults, setProbeResults] = useState<Record<string, ProbeVerdict>>({});
   const [probingModel, setProbingModel] = useState<string | null>(null);
   const [verifyingAll, setVerifyingAll] = useState<{ done: number; total: number } | null>(null);
-  const [onlyReady, setOnlyReady] = useState(true);
   const [showProbeDetail, setShowProbeDetail] = useState(false);
   const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
   const [showOtherModality, setShowOtherModality] = useState(false);
@@ -481,31 +480,37 @@ function AIModelsFullSection() {
 
   const providerFor = (p: string) => AI_PROVIDERS.find((pr) => pr.value === p);
 
-  // Three groups, by how much we actually know.
+  // One list of models that can triage, and one collapsed section
+  // holding everything set aside — whatever the reason.
   //
-  // `may_exclude` is set only when the PROVIDER declared it — a model
-  // whose method list does not include the call Vooda makes cannot
-  // serve that call, so listing it would be noise with nothing to
-  // recover. Everything softer is grouped, not dropped: a model the
-  // provider merely DESCRIBES as producing images sits in a section
-  // the user can open, because a description can be wrong and a
-  // vanished model cannot be argued with.
+  // There used to be two mechanisms: a "hiding unusable" toggle for
+  // models the probe rejected, and a separate group for models the
+  // provider describes as producing images or speech. Two controls,
+  // two counts and two ways for the same model to disappear, which
+  // read as a jumble and left an unusable model sitting among the
+  // candidates whenever it happened to be the selected one.
   //
-  // The selected model is never filtered out of view. Watching your own
-  // choice disappear because a verdict arrived is disorienting, and the
-  // panel below the grid is where that verdict gets explained.
+  // Now there is one question — can this model triage — and one place
+  // for everything that cannot, each card saying why.
   const verifiedCount = Object.keys(probeResults).length;
-  const servableModels = discoveredModels.filter(
-    (m) => !m.suitability_may_exclude || m.model_id === form.model_id);
-  const unservableCount = discoveredModels.length - servableModels.length;
 
-  const otherModalityModels = servableModels.filter(
-    (m) => m.suitability === "other_modality" && m.model_id !== form.model_id);
-  const candidateModels = servableModels
-    .filter((m) => !otherModalityModels.includes(m))
-    .filter((m) => !onlyReady || verifiedCount === 0
-      || m.model_id === form.model_id || passesReadyFilter(probeResults[m.model_id]));
-  const hiddenModelCount = servableModels.length - otherModalityModels.length - candidateModels.length;
+  const unsuitableReason = (m: any): string => {
+    const verdict = probeResults[m.model_id];
+    if (verdict?.state === UNUSABLE) return verdict.headline || "Won't work";
+    if (m.suitability_reason) return m.suitability_reason;
+    return "not suitable for triage";
+  };
+  const isUnsuitable = (m: any) =>
+    m.suitability_may_exclude
+    || m.suitability === "other_modality"
+    || probeResults[m.model_id]?.state === UNUSABLE;
+
+  const candidateModels = discoveredModels.filter((m) => !isUnsuitable(m));
+  const unsuitableModels = discoveredModels.filter(isUnsuitable);
+  // If their own selection ended up in here, open the section so they
+  // can see it rather than wondering where it went.
+  const selectedIsUnsuitable = unsuitableModels.some((m) => m.model_id === form.model_id);
+
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
 
   /** One model card. Shared so both groups look identical. */
@@ -1177,73 +1182,73 @@ function AIModelsFullSection() {
           {(keyValidated || editingId) && discoveredModels.length > 0 && (
             <div className="space-y-4 mb-5">
               <div>
-                {/* Header: label left, controls right — one row so the
-                    grid below starts from a clean, even baseline. */}
-                <div className="flex items-center justify-between gap-3 mb-1.5 min-h-[28px]">
-                  <label className="text-xs text-slate-500">
-                    Select Model ({candidateModels.length} for triage)
-                  </label>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {verifiedCount > 0 && (
-                      <button type="button" onClick={() => setOnlyReady((v) => !v)}
-                        className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors ${
-                          onlyReady
-                            ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400"
-                            : "bg-white/[0.02] border-white/[0.06] text-slate-500 hover:border-white/[0.12]"
-                        }`}>
-                        {onlyReady ? "Hiding unusable" : "Showing all"}
-                      </button>
+                {/* Header: what to do on the left, the one action on
+                    the right. A single row, so the grid below starts
+                    from an even baseline. */}
+                <div className="flex items-center justify-between gap-3 mb-1 min-h-[28px]">
+                  <label className="text-sm text-slate-300">Choose a model for AI triage</label>
+                  <button type="button" onClick={verifyAll} disabled={!!verifyingAll}
+                    className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0 disabled:opacity-50">
+                    {verifyingAll ? (
+                      <>
+                        <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin" />
+                        Checking {verifyingAll.done} of {verifyingAll.total}
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        Check all {candidateModels.length}
+                      </>
                     )}
-                    <button type="button" onClick={verifyAll} disabled={!!verifyingAll}
-                      className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 disabled:opacity-50">
-                      {verifyingAll ? (
-                        <>
-                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin" />
-                          {verifyingAll.done}/{verifyingAll.total}
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                          Verify all
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  </button>
                 </div>
-                {/* One line of guidance, so nobody has to guess what
-                    verifying does or fear an accidental bill. */}
-                {/* Say what was set aside and why. A count the user can
-                    see is the difference between a curated list and a
-                    list that quietly lost something. */}
+                {/* Two short sentences: what you are looking at, then
+                    what the button will do. These used to be one line
+                    with three unrelated counts run together. */}
+                <p className="text-[11px] text-slate-500 mb-0.5">
+                  {candidateModels.length} of {discoveredModels.length} models from this provider can do text triage.
+                  {unsuitableModels.length > 0 && " The rest are listed below."}
+                </p>
                 <p className="text-[10px] text-slate-600 mb-2">
-                  Verifying asks a model to triage one sample finding — one short request each.
-                  {unservableCount > 0 && ` ${unservableCount} not compatible with Vooda.`}
-                  {hiddenModelCount > 0 && ` ${hiddenModelCount} hidden by the filter.`}
+                  Checking sends one sample finding to a model and reads the answer — a single short request each.
+                  {verifiedCount === 0 && " Models show as Not checked until then."}
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                   {candidateModels.map(renderModelCard)}
                 </div>
 
-                {/* Other model types — present, labelled, one click
-                    away. These are grouped on the provider's own
-                    description, which is the weakest signal we use, so
-                    they are never hidden outright. */}
-                {otherModalityModels.length > 0 && (
+                {/* Everything set aside, in one place, each card
+                    saying why. Collapsed, never removed: a provider's
+                    description can be wrong, and a model the customer's
+                    organisation has standardised on must be reachable
+                    rather than silently absent. */}
+                {unsuitableModels.length > 0 && (
                   <div className="mt-2.5">
                     <button type="button" onClick={() => setShowOtherModality((v) => !v)}
                       className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
-                      <span className="flex items-center gap-2 text-xs text-slate-500">
-                        <svg className={`w-3 h-3 transition-transform ${showOtherModality ? "rotate-90" : ""}`}
+                      <span className="flex items-center gap-2 text-xs text-slate-400">
+                        <svg className={`w-3 h-3 transition-transform ${(showOtherModality || selectedIsUnsuitable) ? "rotate-90" : ""}`}
                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
-                        Other model types ({otherModalityModels.length})
+                        Can&apos;t be used for triage ({unsuitableModels.length})
                       </span>
-                      <span className="text-[10px] text-slate-600 shrink-0">image, speech, music</span>
+                      <span className="text-[10px] text-slate-600 shrink-0">
+                        {selectedIsUnsuitable ? "includes your current choice" : "image, speech, music and unsupported models"}
+                      </span>
                     </button>
-                    {showOtherModality && (
+                    {(showOtherModality || selectedIsUnsuitable) && (
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
-                        {otherModalityModels.map(renderModelCard)}
+                        {unsuitableModels.map((m) => (
+                          <div key={m.model_id} className="relative">
+                            {renderModelCard(m)}
+                            {/* The reason, on the card. Answers "what is
+                                in here?" without anyone having to ask. */}
+                            <p className="text-[9px] text-slate-600 mt-0.5 ml-3 truncate">
+                              {unsuitableReason(m)}
+                            </p>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

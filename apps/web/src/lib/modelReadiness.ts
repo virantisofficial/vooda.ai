@@ -64,26 +64,10 @@ export function readinessPanelTone(state?: string): string {
   }
 }
 
-/**
- * Whether the default filter keeps this model.
- *
- * "Not checked" passes. An unprobed model is the normal state on first
- * load, and a model the provider was too busy to verify is not a model
- * we have anything against — hiding either would leave the customer
- * staring at an empty list and conclude Vooda does not support their
- * provider.
- */
-export function passesReadyFilter(v?: ProbeVerdict): boolean {
-  if (!v) return true;
-  // Only a model that cannot work is hidden.
-  //
-  // "Needs setup" means it answered correctly once Vooda gave it room,
-  // and the Fix button applies the exact setting that was verified —
-  // so it is a working model, one click from ready. Hiding it would
-  // hide the fix along with it, and a customer whose organisation has
-  // standardised on that model would conclude Vooda cannot use it.
-  return v.state !== UNUSABLE;
-}
+/* passesReadyFilter was removed with the "hiding unusable" toggle.
+ * One question — can this model triage — is now answered in one place,
+ * and everything that cannot goes into a single collapsed section. Two
+ * controls and two counts for the same outcome read as a jumble. */
 
 /** A verdict worth explaining under the grid. */
 export function needsExplanation(v?: ProbeVerdict): boolean {
