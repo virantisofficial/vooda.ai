@@ -599,6 +599,12 @@ function AIModelsFullSection() {
     setKeyValidated(false);
     try {
       const payload: any = { provider: providerId };
+      // Send what the operator typed, even before a config exists to
+      // store it on — otherwise the retry repeats the same failure.
+      try {
+        const pc = JSON.parse(form.provider_config_json?.trim() || "{}");
+        if (pc && Object.keys(pc).length > 0) payload.provider_config = pc;
+      } catch { /* the save path reports invalid JSON; do not block discovery */ }
       if (form.api_key) payload.api_key = form.api_key;
       if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
       if (opts?.modelConfigId) payload.model_config_id = opts.modelConfigId;
@@ -1181,6 +1187,44 @@ function AIModelsFullSection() {
                 <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               )}
               {discoverStatus.message}
+            </div>
+          )}
+
+          {/* Provider Config, reachable when validation FAILED.
+              It normally lives in Advanced Settings, which only renders
+              once a key has validated — but some providers cannot
+              validate without a value from here. An organisation-level
+              Anthropic key is refused on every request, listing
+              included, until it names a workspace, so the field that
+              fixes the error was only reachable after the error stopped
+              happening. */}
+          {discoverStatus?.status === "error" && !keyValidated && (
+            <div className="mb-5 p-4 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+              <label className="text-xs text-slate-400 mb-1 block">Provider Config</label>
+              <p className="text-[10px] text-slate-600 mb-2">
+                Settings some providers require before they will answer at all — an Anthropic
+                organisation-level key needs <span className="font-mono">{"{\"workspace_id\": \"wrkspc_…\"}"}</span>.
+                Leave empty if the message above does not ask for one.
+              </p>
+              <textarea value={form.provider_config_json}
+                onChange={(e) => { setForm((f) => ({ ...f, provider_config_json: e.target.value })); setProviderConfigError(null); }}
+                placeholder={"{}"}
+                className="input-dark h-20 resize-y font-mono text-xs w-full" />
+              {providerConfigError && <p className="text-[10px] text-red-400 mt-1">{providerConfigError}</p>}
+              <button type="button" className="btn-secondary text-xs mt-2"
+                onClick={() => {
+                  try {
+                    JSON.parse(form.provider_config_json.trim() || "{}");
+                    setProviderConfigError(null);
+                  } catch (err: any) {
+                    setProviderConfigError(`Invalid JSON: ${err.message}`); return;
+                  }
+                  handleDiscoverModels(editingId
+                    ? { modelConfigId: editingId, preserveSelection: true, provider: form.provider }
+                    : { provider: form.provider });
+                }}>
+                Retry with This Config
+              </button>
             </div>
           )}
 

@@ -9,6 +9,7 @@ Includes task-based routing to select the correct model per task.
 
 import json
 import asyncio
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -126,6 +127,28 @@ class AIProvider(ABC):
         ...
 
 
+#: A provider naming a parameter it will not accept, e.g.
+#: "`temperature` is deprecated for this model."
+_REJECTED_PARAM = re.compile(
+    r"[`\"']?([a-z_]{3,30})[`\"']?\s+is\s+(?:deprecated|not supported|unsupported|invalid)",
+    re.I,
+)
+
+
+def rejected_parameter(error_body: str) -> str | None:
+    """Which request parameter did the provider refuse?
+
+    Models outlive the payloads written for them. claude-opus-5-5
+    rejects `temperature` outright — a 400, not a warning — so a field
+    Vooda had always sent made the whole model unusable overnight.
+    Dropping the named field and retrying costs one request and keeps
+    working against a provider that changes under us, which a fixed
+    payload cannot.
+    """
+    m = _REJECTED_PARAM.search(error_body or "")
+    return m.group(1) if m else None
+
+
 class ClaudeProvider(AIProvider):
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
                  json_strategy: str = JSON_PREFILL,
@@ -177,7 +200,38 @@ class ClaudeProvider(AIProvider):
             payload["stop_sequences"] = stop_sequences
 
         async with httpx.AsyncClient(timeout=60) as client:
+            # Adapt to what the provider says it will not accept, and
+            # ask again — bounded, and only while it keeps naming
+            # something new. Models outlive the payloads written for
+            # them: claude-opus-5-5 rejects `temperature` AND assistant
+            # prefill, one after the other, so a single retry fixed the
+            # first refusal and then failed on the second.
             r = await client.post(url, json=payload, headers=headers)
+            for _ in range(3):
+                if r.status_code != 400:
+                    break
+                adapted = False
+
+                bad = rejected_parameter(r.text)
+                if bad and bad in payload:
+                    payload.pop(bad)
+                    adapted = True
+
+                # Prefill is how this adapter asks for JSON — seed the
+                # reply with "{" so the model continues from it. Newer
+                # models refuse an assistant turn at the end. Without it
+                # the prompt still asks for JSON and the engine salvages
+                # an answer wrapped in prose, so dropping it costs
+                # tokens rather than the whole model.
+                if prefilled and "prefill" in r.text.lower():
+                    if payload["messages"] and payload["messages"][-1]["role"] == "assistant":
+                        payload["messages"].pop()
+                    prefilled = False
+                    adapted = True
+
+                if not adapted:
+                    break
+                r = await client.post(url, json=payload, headers=headers)
             # engine.py classifies an upstream failure by catching
             # RuntimeError. Letting httpx.HTTPStatusError escape bypasses
             # that handler, so a 429 becomes an unhandled exception
