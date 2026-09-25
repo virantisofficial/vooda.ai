@@ -1248,10 +1248,14 @@ function AIModelsFullSection() {
                   text-based triage.
                   {unsuitableModels.length > 0 && ` The remaining ${unsuitableModels.length} are listed below with the reason each was excluded.`}
                 </p>
+                {/* Both unmeasured badges get explained, because the
+                    one that needs an action is the one that reads like
+                    a verdict. */}
                 <p className="text-[10px] text-slate-600 mb-2">
                   Checking submits one sample finding and validates the model&apos;s response — a single short request
-                  per model. Models not yet checked are marked <span className="text-slate-500">Not checked</span>,
-                  which records the absence of a result rather than a problem with the model.
+                  per model. <span className="text-slate-500">Not checked</span> means no request has been made.
+                  <span className="text-slate-500"> Couldn&apos;t check</span> means the provider was unavailable, which
+                  is usually temporary — those are worth checking again.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                   {candidateModels.map(renderModelCard)}
