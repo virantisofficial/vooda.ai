@@ -659,6 +659,11 @@ class DiscoverModelsRequest(BaseModel):
     api_key: Optional[str] = None  # Optional for self-hosted/local models (Ollama, vLLM, LM Studio)
     endpoint_url: Optional[str] = None
     model_config_id: Optional[UUID] = None  # Reuse stored credentials for an existing config
+    #: Provider-specific settings, sent before a config exists to save.
+    #: Anthropic's workspace id lives here and an organisation-level key
+    #: is refused on every request without it, so listing models needs
+    #: it just as much as triaging does.
+    provider_config: Optional[dict] = None
 
 
 def _int_or_none(v) -> Optional[int]:
@@ -812,9 +817,16 @@ async def discover_available_models(
             provider=provider,
         )
 
+    # Provider-specific settings the operator saved — Anthropic's
+    # workspace id lives here, and an org-level key is refused on every
+    # request without it.
+    extra_cfg = (body.provider_config or {}) if getattr(body, "provider_config", None) else {}
+    if body.model_config_id and stored is not None:
+        extra_cfg = {**(stored.provider_config or {}), **extra_cfg}
+
     try:
         if provider in ("anthropic", "claude"):
-            return await _discover_anthropic(api_key)
+            return await _discover_anthropic(api_key, workspace_id=extra_cfg.get("workspace_id"))
         elif provider == "openai":
             return await _discover_openai(api_key)
         elif provider == "azure_openai":
@@ -847,23 +859,33 @@ def _apply_suitability(model: "DiscoveredModel", **meta) -> "DiscoveredModel":
     return model
 
 
-async def _discover_anthropic(api_key: str) -> DiscoverModelsResponse:
+async def _discover_anthropic(api_key: str, workspace_id: str | None = None) -> DiscoverModelsResponse:
     import httpx
 
+    # An organisation-level key must name a workspace on every request.
+    # The provider already sent this header; discovery did not, so a
+    # perfectly good org key failed here while triage would have worked.
+    headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    if workspace_id:
+        headers["anthropic-workspace-id"] = workspace_id
+
     async with httpx.AsyncClient(timeout=15) as client:
-        # Validate key with a minimal request
-        r = await client.get(
-            "https://api.anthropic.com/v1/models",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-        )
+        r = await client.get("https://api.anthropic.com/v1/models", headers=headers)
 
         if r.status_code == 401:
             return DiscoverModelsResponse(status="error", message="Invalid API key", provider="anthropic")
         if r.status_code == 403:
             return DiscoverModelsResponse(status="error", message="API key does not have permission to list models", provider="anthropic")
+        if r.status_code == 400 and "workspace" in r.text.lower():
+            # Say what to do. The provider's own message is accurate but
+            # does not mention where the id goes in Vooda.
+            return DiscoverModelsResponse(
+                status="error",
+                message=("This is an organisation-level key, so Anthropic needs a workspace id "
+                         "on every request. Add {\"workspace_id\": \"wrkspc_...\"} under "
+                         "Provider Config in Advanced Settings, or use a workspace-scoped key."),
+                provider="anthropic",
+            )
 
         if r.status_code == 200:
             data = r.json()
@@ -891,17 +913,23 @@ async def _discover_anthropic(api_key: str) -> DiscoverModelsResponse:
                 models=models,
             )
 
-        # Fallback: key works but can't list — return known models
+        # No hardcoded model list here any more.
+        #
+        # This used to answer any other status with "API key validated.
+        # Showing known models" and four Claude ids written into the
+        # source. Measured against a real org-level key it reported
+        # success on a 400, offered four models, and every one of them
+        # would have failed at triage — the provider had refused the
+        # request outright. A list of one vendor's model names also
+        # goes stale on their next release.
+        #
+        # The screen already handles not being able to list: it offers
+        # a Model ID field and says so. An honest error reaches that
+        # path; a fabricated success does not.
         return DiscoverModelsResponse(
-            status="success",
-            message="API key validated. Showing known models (model listing not available).",
+            status="error",
+            message=f"Could not list models (provider returned {r.status_code}).",
             provider="anthropic",
-            models=[
-                DiscoveredModel(model_id="claude-sonnet-4-20250514", name="Claude Sonnet 4", description="Best balance of speed and intelligence"),
-                DiscoveredModel(model_id="claude-opus-4-20250514", name="Claude Opus 4", description="Highest intelligence"),
-                DiscoveredModel(model_id="claude-3-5-haiku-20241022", name="Claude 3.5 Haiku", description="Fastest and most compact"),
-                DiscoveredModel(model_id="claude-3-5-sonnet-20241022", name="Claude 3.5 Sonnet", description="Previous generation balanced model"),
-            ],
         )
 
 
