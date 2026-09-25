@@ -17,15 +17,26 @@ GEN = "generateContent"
 
 # ── The genericity guarantee ────────────────────────────
 
-def test_identical_metadata_classifies_identically_whatever_it_is_called():
-    """The claim "it does not look at names" is the kind that quietly
-    stops being true, so it is asserted rather than trusted."""
-    meta = dict(methods=[GEN], required_method=GEN,
-                description="Music Generation model")
-    verdicts = {classify(**meta).tier for _ in range(3)}
-    assert verdicts == {OTHER_MODALITY}
-    # classify() takes no id at all — nothing to differ on.
-    assert "model_id" not in classify.__annotations__
+def test_the_identifier_is_read_as_text_never_looked_up():
+    """The id is one more place a provider might name a modality —
+    OpenAI states nothing else — but it is never a lookup key. Names
+    carrying no modality word must not change the answer at all."""
+    base = dict(methods=[GEN], required_method=GEN, description="general purpose instruct model")
+    for name in ("gpt-4o", "claude-x", "llama-9", "acme-internal-7b", ""):
+        assert classify(identifier=name, **base).tier == CANDIDATE, name
+
+
+def test_an_identifier_can_group_but_never_hide():
+    """The safety limit that makes reading ids acceptable at all."""
+    s = classify(identifier="tts-1-hd", methods=[GEN], required_method=GEN)
+    assert (s.tier, s.confidence) == (OTHER_MODALITY, SUGGESTED)
+    assert s.may_exclude is False
+
+
+def test_an_identifier_never_overrules_a_declared_field():
+    s = classify(identifier="some-image-model", output_modalities=["text"],
+                 methods=[GEN], required_method=GEN)
+    assert s.tier == CANDIDATE
 
 
 def test_an_invented_future_model_is_classified_on_its_metadata():

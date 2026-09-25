@@ -431,6 +431,7 @@ function AIModelsFullSection() {
   const [onlyReady, setOnlyReady] = useState(true);
   const [showProbeDetail, setShowProbeDetail] = useState(false);
   const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
+  const [showOtherModality, setShowOtherModality] = useState(false);
   const [discoverStatus, setDiscoverStatus] = useState<{ status: string; message: string } | null>(null);
   const [keyValidated, setKeyValidated] = useState(false);
   // Track the original model_id when entering edit mode. If the user swaps to
@@ -480,17 +481,73 @@ function AIModelsFullSection() {
 
   const providerFor = (p: string) => AI_PROVIDERS.find((pr) => pr.value === p);
 
-  // The filter never hides the model the customer has already selected.
-  // Watching your own choice vanish because a verdict came back is
-  // disorienting, and the panel under the grid is where that verdict
-  // gets explained.
+  // Three groups, by how much we actually know.
+  //
+  // `may_exclude` is set only when the PROVIDER declared it — a model
+  // whose method list does not include the call Vooda makes cannot
+  // serve that call, so listing it would be noise with nothing to
+  // recover. Everything softer is grouped, not dropped: a model the
+  // provider merely DESCRIBES as producing images sits in a section
+  // the user can open, because a description can be wrong and a
+  // vanished model cannot be argued with.
+  //
+  // The selected model is never filtered out of view. Watching your own
+  // choice disappear because a verdict arrived is disorienting, and the
+  // panel below the grid is where that verdict gets explained.
   const verifiedCount = Object.keys(probeResults).length;
-  const visibleModels = (!onlyReady || verifiedCount === 0)
-    ? discoveredModels
-    : discoveredModels.filter(
-        (m) => m.model_id === form.model_id || passesReadyFilter(probeResults[m.model_id]));
-  const hiddenModelCount = discoveredModels.length - visibleModels.length;
+  const servableModels = discoveredModels.filter(
+    (m) => !m.suitability_may_exclude || m.model_id === form.model_id);
+  const unservableCount = discoveredModels.length - servableModels.length;
+
+  const otherModalityModels = servableModels.filter(
+    (m) => m.suitability === "other_modality" && m.model_id !== form.model_id);
+  const candidateModels = servableModels
+    .filter((m) => !otherModalityModels.includes(m))
+    .filter((m) => !onlyReady || verifiedCount === 0
+      || m.model_id === form.model_id || passesReadyFilter(probeResults[m.model_id]));
+  const hiddenModelCount = servableModels.length - otherModalityModels.length - candidateModels.length;
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
+
+  /** One model card. Shared so both groups look identical. */
+  /** Settings the provider stated outright, applied on selection.
+   *  Only ever fills in what the provider declared — it does not
+   *  override a value the user typed. */
+  const applyDeclaredConfig = (m: any) => {
+    const declared = m?.declared_config;
+    if (declared && Object.keys(declared).length > 0) {
+      setForm((f) => ({ ...f, ...declared }));
+    }
+  };
+
+  const renderModelCard = (m: any) => (
+                    <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); applyDeclaredConfig(m); }}
+                      className={`text-left p-3 rounded-lg border transition-all ${
+                        form.model_id === m.model_id
+                          ? "border-red-500/30 bg-red-500/5"
+                          : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.02]"
+                      }`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${form.model_id === m.model_id ? "bg-red-400" : "bg-slate-600"}`} />
+                        <span className="text-sm font-medium text-slate-200 truncate flex-1">{m.name || m.model_id}</span>
+                        {probingModel === m.model_id ? (
+                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin shrink-0" />
+                        ) : probeResults[m.model_id] ? (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id].state)}`}>
+                            {readinessLabel(probeResults[m.model_id].state)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
+                      {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}
+                      {(m.context_window || m.max_output) && (
+                        <div className="flex gap-2 mt-1.5 text-[9px] text-slate-600">
+                          {m.context_window && <span>{(m.context_window / 1000).toFixed(0)}K context</span>}
+                          {m.max_output && <span>{(m.max_output / 1000).toFixed(0)}K output</span>}
+                        </div>
+                      )}
+                    </button>
+  );
+
 
   const handleDiscoverModels = async (opts?: { modelConfigId?: string; preserveSelection?: boolean }) => {
     const prov = providerFor(form.provider);
@@ -594,7 +651,10 @@ function AIModelsFullSection() {
   };
 
   const verifyAll = async () => {
-    const ids = discoveredModels.map((m) => m.model_id).filter(Boolean);
+    // Candidates only. Probing a music model costs a request and
+    // proves what the provider already told us — one returned 429
+    // quota exceeded during testing.
+    const ids = candidateModels.map((m) => m.model_id).filter(Boolean);
     if (ids.length === 0) return;
     setVerifyingAll({ done: 0, total: ids.length });
     try {
@@ -1067,13 +1127,13 @@ function AIModelsFullSection() {
             </div>
           )}
 
-          {/* Auto-recompute notice — shown when user swaps model_id in edit mode */}
-          {defaultsRecomputedFor && editingId && (
-            <div className="flex items-center gap-2 p-3 rounded-lg mb-5 text-xs bg-cyan-500/5 border border-cyan-500/15 text-cyan-400">
-              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-              <span>Defaults recomputed for <span className="font-mono">{defaultsRecomputedFor}</span> — fine-tune parameters refreshed.</span>
-            </div>
-          )}
+          {/* The "Defaults recomputed" banner used to sit here.
+              It announced that settings had changed without saying WHAT
+              changed, in a full-width panel with a tick — which meant a
+              guess derived from a model's name outranked the probe
+              verdict beside it, and read as an endorsement even for a
+              music model. The values now appear next to the fields they
+              belong to. */}
 
           {/* Step 2: Model Selection (appears after validation) */}
           {(keyValidated || editingId) && discoveredModels.length === 0 && !discovering && (
@@ -1111,7 +1171,7 @@ function AIModelsFullSection() {
                     grid below starts from a clean, even baseline. */}
                 <div className="flex items-center justify-between gap-3 mb-1.5 min-h-[28px]">
                   <label className="text-xs text-slate-500">
-                    Select Model ({visibleModels.length}{hiddenModelCount > 0 ? ` of ${discoveredModels.length}` : ""} available)
+                    Select Model ({candidateModels.length} for triage)
                   </label>
                   <div className="flex items-center gap-2 shrink-0">
                     {verifiedCount > 0 && (
@@ -1142,40 +1202,42 @@ function AIModelsFullSection() {
                 </div>
                 {/* One line of guidance, so nobody has to guess what
                     verifying does or fear an accidental bill. */}
+                {/* Say what was set aside and why. A count the user can
+                    see is the difference between a curated list and a
+                    list that quietly lost something. */}
                 <p className="text-[10px] text-slate-600 mb-2">
                   Verifying asks a model to triage one sample finding — one short request each.
-                  {hiddenModelCount > 0 && ` ${hiddenModelCount} model${hiddenModelCount === 1 ? "" : "s"} hidden.`}
+                  {unservableCount > 0 && ` ${unservableCount} not compatible with Vooda.`}
+                  {hiddenModelCount > 0 && ` ${hiddenModelCount} hidden by the filter.`}
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {visibleModels.map((m) => (
-                    <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); }}
-                      className={`text-left p-3 rounded-lg border transition-all ${
-                        form.model_id === m.model_id
-                          ? "border-red-500/30 bg-red-500/5"
-                          : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.02]"
-                      }`}>
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${form.model_id === m.model_id ? "bg-red-400" : "bg-slate-600"}`} />
-                        <span className="text-sm font-medium text-slate-200 truncate flex-1">{m.name || m.model_id}</span>
-                        {probingModel === m.model_id ? (
-                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin shrink-0" />
-                        ) : probeResults[m.model_id] ? (
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id].state)}`}>
-                            {readinessLabel(probeResults[m.model_id].state)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
-                      {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}
-                      {(m.context_window || m.max_output) && (
-                        <div className="flex gap-2 mt-1.5 text-[9px] text-slate-600">
-                          {m.context_window && <span>{(m.context_window / 1000).toFixed(0)}K context</span>}
-                          {m.max_output && <span>{(m.max_output / 1000).toFixed(0)}K output</span>}
-                        </div>
-                      )}
-                    </button>
-                  ))}
+                  {candidateModels.map(renderModelCard)}
                 </div>
+
+                {/* Other model types — present, labelled, one click
+                    away. These are grouped on the provider's own
+                    description, which is the weakest signal we use, so
+                    they are never hidden outright. */}
+                {otherModalityModels.length > 0 && (
+                  <div className="mt-2.5">
+                    <button type="button" onClick={() => setShowOtherModality((v) => !v)}
+                      className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
+                      <span className="flex items-center gap-2 text-xs text-slate-500">
+                        <svg className={`w-3 h-3 transition-transform ${showOtherModality ? "rotate-90" : ""}`}
+                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        Other model types ({otherModalityModels.length})
+                      </span>
+                      <span className="text-[10px] text-slate-600 shrink-0">image, speech, music</span>
+                    </button>
+                    {showOtherModality && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
+                        {otherModalityModels.map(renderModelCard)}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Verdict for the selected model. Full width under the
                     grid so the cards keep a uniform height and nothing
@@ -1289,6 +1351,21 @@ function AIModelsFullSection() {
                     placeholder="You are a security scanner false positive analyzer. Rules:&#10;1. Output ONLY valid JSON.&#10;2. Classify as likely_true_positive, likely_false_positive, or needs_review.&#10;3. Be concise."
                     className="input-dark h-28 resize-y font-mono text-xs w-full" />
                 </div>
+              )}
+
+              {/* What was configured for you, stated as values.
+                  This replaces a banner that said settings had been
+                  "refreshed" without saying to what — a notice about
+                  invisible changes to fields hidden one click below. */}
+              {(keyValidated || editingId) && form.model_id && (
+                <p className="text-[10px] text-slate-600 -mt-2">
+                  {[
+                    form.context_window ? `${(form.context_window / 1000).toFixed(0)}K context` : null,
+                    form.max_tokens ? `${form.max_tokens} output` : null,
+                    form.supports_json_mode ? "JSON mode on" : null,
+                  ].filter(Boolean).join(" · ")}
+                  <span className="text-slate-700"> — set automatically</span>
+                </p>
               )}
 
               {/* ── Advanced settings (collapsed by default) ── */}

@@ -125,6 +125,7 @@ def _prose_suggests_other_modality(description: str, display_name: str) -> str |
 
 def classify(
     *,
+    identifier: str = "",
     methods: list[str] | None = None,
     required_method: str | None = None,
     output_modalities: list[str] | None = None,
@@ -134,10 +135,18 @@ def classify(
 ) -> Suitability:
     """Classify one discovered model from provider metadata alone.
 
-    Deliberately takes no model id. Two models with identical metadata
-    must classify identically however they are named — a test asserts
-    exactly that, because "it does not look at names" is the kind of
-    claim that quietly stops being true.
+    `identifier` is the model id, and it is read as TEXT — one more
+    place a provider might name a modality — never as a lookup key.
+    Some providers state nothing else: OpenAI's /v1/models returns an id
+    and an owner, so "tts-1" and "text-embedding-3-small" carry their
+    only description in the id itself.
+
+    That keeps it generic. The vocabulary is about modalities, not
+    vendors, so an id nobody has seen before still classifies, and an
+    unrecognised one stays a candidate. And because an id is only text,
+    it lands in the SUGGESTED tier: it can sort a model into a group the
+    user can open, never hide it, and never overrule a declared field.
+    Tests assert both limits.
     """
     declared_config: dict = {}
 
@@ -179,7 +188,7 @@ def classify(
     # field, and whether a text-emitting model triages WELL is the
     # probe's call, not a keyword's.
     hint = None if emits_text_by_declaration else _prose_suggests_other_modality(
-        description, display_name)
+        description, f"{display_name} {identifier}")
     if hint:
         return Suitability(
             OTHER_MODALITY, SUGGESTED,

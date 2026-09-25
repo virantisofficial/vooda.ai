@@ -688,6 +688,16 @@ class DiscoveredModel(BaseModel):
     max_output: Optional[int] = None
     #: e.g. "8B" — drives size classification, not the context window.
     parameter_size: Optional[str] = None
+    #: candidate | other_modality | cannot_serve — see model_suitability,
+    #: which owns this vocabulary. Rows are never dropped on it; the UI
+    #: decides what to show, so any grouping stays reversible.
+    suitability: str = "candidate"
+    suitability_reason: str = ""
+    #: True only when the provider DECLARED it, so hiding is safe.
+    suitability_may_exclude: bool = False
+    #: Settings the provider stated outright (e.g. JSON-mode support),
+    #: so the user is not asked to reason about a checkbox.
+    declared_config: dict = {}
 
 
 @router.post("/auto-config")
@@ -814,6 +824,22 @@ async def discover_available_models(
         return DiscoverModelsResponse(status="error", message=f"Failed to discover models: {str(e)[:200]}", provider=provider)
 
 
+def _apply_suitability(model: "DiscoveredModel", **meta) -> "DiscoveredModel":
+    """Attach a suitability verdict without ever dropping the row.
+
+    Discovery returns everything the provider listed. What the customer
+    sees by default is a UI decision, which keeps a wrong guess
+    recoverable — the point of separating these at all.
+    """
+    from services.ai_triage.model_suitability import classify
+    s = classify(**meta)
+    model.suitability = s.tier
+    model.suitability_reason = s.reason
+    model.suitability_may_exclude = s.may_exclude
+    model.declared_config = s.declared_config
+    return model
+
+
 async def _discover_anthropic(api_key: str) -> DiscoverModelsResponse:
     import httpx
 
@@ -888,27 +914,30 @@ async def _discover_openai(api_key: str, base_url: str | None = None) -> Discove
 
         data = r.json()
         models = []
-        # OpenAI's own /models list mixes embeddings, TTS and moderation
-        # in with the chat models, so it needs filtering. An
-        # OpenAI-COMPATIBLE endpoint (OpenRouter, vLLM, LM Studio,
-        # LiteLLM) does not: its ids look like "qwen/qwen3-27b" or
-        # "anthropic/claude-...", none of which start with gpt-*, so the
-        # prefix filter returned an EMPTY list for every one of them and
-        # the user had to type the model id by hand.
-        chat_prefixes = ("gpt-4", "gpt-3.5", "o1", "o3", "chatgpt")
-        is_openai_proper = "api.openai.com" in (base_url or "api.openai.com")
+        # This list mixes embeddings, TTS and moderation in with the
+        # chat models, so it needs sorting out — but not by an allowlist
+        # of name prefixes. That was ("gpt-4", "gpt-3.5", "o1", "o3",
+        # "chatgpt"), and its own comment recorded the failure: an
+        # OpenAI-COMPATIBLE endpoint serves ids like "qwen/qwen3-27b",
+        # none of which start with gpt-*, so the filter returned an
+        # EMPTY list for every one of them and the user typed the model
+        # id by hand. A new OpenAI family would have broken it the same
+        # way.
+        #
+        # The classifier reads whatever the endpoint offers instead.
+        # Where that is only an id, the id is read as text — so "tts-1"
+        # groups on "tts" — and grouping never hides a row.
         for m in data.get("data", []):
             mid = m.get("id", "")
             if not mid:
-                continue
-            if is_openai_proper and not any(mid.startswith(p) for p in chat_prefixes):
                 continue
             # OpenRouter reports the real window as `context_length`, and
             # the output cap under `top_provider`. Taking them here is
             # what makes the budget correct without asking the user to
             # look anything up.
             top = m.get("top_provider") or {}
-            models.append(DiscoveredModel(
+            arch = m.get("architecture") or {}
+            models.append(_apply_suitability(DiscoveredModel(
                 model_id=mid,
                 name=m.get("name") or mid,
                 description=(
@@ -921,6 +950,14 @@ async def _discover_openai(api_key: str, base_url: str | None = None) -> Discove
                 max_output=_int_or_none(
                     top.get("max_completion_tokens") or m.get("max_output_tokens")
                 ),
+            ),
+                identifier=mid,
+                # OpenRouter states both; plain OpenAI states neither,
+                # and the classifier simply has less to go on.
+                output_modalities=arch.get("output_modalities"),
+                supported_parameters=m.get("supported_parameters"),
+                description=m.get("description", ""),
+                display_name=m.get("name", ""),
             ))
 
         models.sort(key=lambda x: x.model_id, reverse=True)
@@ -950,14 +987,24 @@ async def _discover_google(api_key: str) -> DiscoverModelsResponse:
         models = []
         for m in data.get("models", []):
             name = m.get("name", "").replace("models/", "")
-            if "generateContent" in str(m.get("supportedGenerationMethods", [])):
-                models.append(DiscoveredModel(
+            # Exact membership, not `"generateContent" in str(list)`.
+            # That substring test passes for bidiGenerateContent and
+            # batchGenerateContent too — it only ever worked because of
+            # how those happen to be capitalised.
+            models.append(_apply_suitability(
+                DiscoveredModel(
                     model_id=name,
                     name=m.get("displayName", name),
                     description=m.get("description", "")[:100],
                     context_window=m.get("inputTokenLimit"),
                     max_output=m.get("outputTokenLimit"),
-                ))
+                ),
+                identifier=name,
+                methods=m.get("supportedGenerationMethods"),
+                required_method="generateContent",
+                description=m.get("description", ""),
+                display_name=m.get("displayName", ""),
+            ))
 
         models.sort(key=lambda x: x.model_id, reverse=True)
 
@@ -999,7 +1046,7 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                 models = []
                 for m in data.get("models", []):
                     name = m.get("name", "")
-                    models.append(DiscoveredModel(
+                    models.append(_apply_suitability(DiscoveredModel(
                         model_id=name,
                         name=name.split(":")[0] if ":" in name else name,
                         description=f"Size: {m.get('size', 0) / 1e9:.1f}GB" if m.get("size") else "",
@@ -1012,7 +1059,9 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                         context_window=_int_or_none(
                             (m.get("details", {}) or {}).get("context_length")
                         ),
-                    ))
+                    ), identifier=name,
+                        # Ollama reports size and family, never modality.
+                        description=name))
                 if models:
                     return DiscoverModelsResponse(
                         status="success",
@@ -1031,11 +1080,11 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                 models = []
                 for m in data.get("data", []):
                     mid = m.get("id", "")
-                    models.append(DiscoveredModel(
+                    models.append(_apply_suitability(DiscoveredModel(
                         model_id=mid,
                         name=mid,
                         description=f"Owned by {m.get('owned_by', 'local')}",
-                    ))
+                    ), identifier=mid, description=m.get("description", "")))
                 if models:
                     return DiscoverModelsResponse(
                         status="success",
