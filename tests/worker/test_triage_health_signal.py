@@ -66,8 +66,14 @@ def _db_with_primary(last_error=None):
     model_res.scalars = MagicMock(
         return_value=MagicMock(first=MagicMock(return_value=primary))
     )
+    # Every active member is notified now, not one arbitrary row. The
+    # old lookup took `.limit(1)` with no ordering and delivered to
+    # whichever user the database returned first — measured, a dormant
+    # test account, while the person watching the screen saw nothing.
     user_res = MagicMock()
-    user_res.scalar_one_or_none = MagicMock(return_value=uuid.uuid4())
+    user_res.scalars = MagicMock(
+        return_value=MagicMock(all=MagicMock(return_value=[uuid.uuid4(), uuid.uuid4()]))
+    )
     db.execute = AsyncMock(side_effect=[model_res, user_res])
     db.flush = AsyncMock()
     db.add = MagicMock()
@@ -104,7 +110,9 @@ async def test_real_failures_still_badge_with_their_type():
     assert primary.last_error is not None
     assert "failure_type=invalid_json" in primary.last_error
     assert "2/2" in primary.last_error
-    db.add.assert_called_once()          # bell notification
+    # One per active member, so a notification reaches whoever is
+    # actually looking rather than a single arbitrary account.
+    assert db.add.call_count == 2, "every active member should be notified"
 
 
 @pytest.mark.asyncio

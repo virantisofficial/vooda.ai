@@ -997,6 +997,24 @@ function AIModelsFullSection() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium text-slate-200">{model.name}</span>
                       {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500">Disabled</span>}
+                      {/* Two failure shapes, two labels. The badge
+                          matched only "triage_parse_failure:", so when
+                          the backend began recording total failure
+                          under its own prefix the card showed nothing
+                          at all — the worst case stayed invisible on
+                          the very screen meant to report it. A model
+                          that answered badly and a model that answered
+                          nothing also need different words: one is a
+                          parsing problem, the other is not reachable. */}
+                      {model.last_error && String(model.last_error).startsWith("triage_failed:") && (
+                        <span
+                          title={String(model.last_error).replace(/^triage_failed:\s*/, "")}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/25 flex items-center gap-1 cursor-help"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                          Triage failed
+                        </span>
+                      )}
                       {model.last_error && String(model.last_error).startsWith("triage_parse_failure:") && (
                         <span
                           title={String(model.last_error).replace(/^triage_parse_failure:\s*/, "")}

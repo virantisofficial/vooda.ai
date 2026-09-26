@@ -596,11 +596,25 @@ async def _emit_triage_health_signal(
     )
     model_cfg.last_error = err_msg[:500]
 
-    user_q = await db.execute(
-        _select(User.id).where(User.tenant_id == tenant_id).limit(1)
+    # Every active member of the tenant, not one arbitrary row.
+    #
+    # This selected `.limit(1)` with no ordering, so the notification
+    # went to whichever user the database happened to return first —
+    # measured, a dormant test account — while the person actually
+    # watching the screen saw nothing. The row existed, the bell stayed
+    # quiet, and a model that had stopped triaging looked fine.
+    #
+    # There is no role column to prefer an admin by, so it goes to
+    # everyone who could act on it. A model that cannot triage affects
+    # every finding in the tenant.
+    user_rows = await db.execute(
+        _select(User.id).where(
+            User.tenant_id == tenant_id,
+            User.is_active == True,  # noqa: E712
+        )
     )
-    user_id = user_q.scalar_one_or_none()
-    if user_id is None:
+    user_ids = [r for r in user_rows.scalars().all()]
+    if not user_ids:
         await db.flush()
         return
 
@@ -613,7 +627,20 @@ async def _emit_triage_health_signal(
         title = f"AI triage failing on {model_cfg.name}"
         body = f"{failed} of {triaged} findings: {short_summary}. {full_body}"
 
-    notif = Notification(
+    for _uid in user_ids:
+        db.add(_build_triage_notification(
+            tenant_id, _uid, model_cfg, title, body,
+            scan_job_id, triaged, classified, parse_failure_rate,
+            dominant_type, failure_summary,
+        ))
+    await db.flush()
+
+
+def _build_triage_notification(tenant_id, user_id, model_cfg, title, body,
+                               scan_job_id, triaged, classified,
+                               parse_failure_rate, dominant_type, failure_summary):
+    from apps.api.app.models.notification import Notification
+    return Notification(
         tenant_id=tenant_id,
         user_id=user_id,
         title=title,
@@ -632,8 +659,6 @@ async def _emit_triage_health_signal(
             "failure_summary": failure_summary or {},
         },
     )
-    db.add(notif)
-    await db.flush()
 
 
 async def _get_db_session():
