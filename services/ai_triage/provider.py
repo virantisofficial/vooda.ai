@@ -150,7 +150,7 @@ def rejected_parameter(error_body: str) -> str | None:
 
 
 class ClaudeProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
+    def __init__(self, api_key: str, model: str,
                  json_strategy: str = JSON_PREFILL,
                  workspace_id: str | None = None):
         self._api_key = api_key
@@ -276,7 +276,7 @@ class OpenAIProvider(AIProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o",
+        model: str,
         base_url: Optional[str] = None,
         timeout: int = 120,
         extra_payload: Optional[dict] = None,
@@ -560,7 +560,7 @@ class OpenAIProvider(AIProvider):
 
 
 class GoogleProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash",
+    def __init__(self, api_key: str, model: str,
                  json_strategy: str = JSON_MIME):
         self.api_key = api_key
         self.model = model
@@ -636,24 +636,40 @@ def create_provider(
     """
     strategy = resolve_json_strategy(provider_name, supports_json_mode)
 
+    # No default model name.
+    #
+    # These used to fall back to a literal per provider —
+    # claude-sonnet-4-20250514, gpt-4o, gemini-2.0-flash, phi3.5 — which
+    # is a maintenance list that ages silently. Two of those four are
+    # already behind: the live Anthropic catalogue lists Sonnet 5 and
+    # Opus 5.5, and Gemini 2.x now returns 404 on a current key. A
+    # config with no model is a configuration error, and substituting a
+    # name Vooda invented turns it into a confusing API failure much
+    # later instead.
+    if not model:
+        raise ValueError(
+            f"No model configured for provider '{provider_name}'. "
+            "Select one on the AI Provider screen."
+        )
+
     if provider_name in ("claude", "anthropic"):
         return ClaudeProvider(
-            api_key=api_key, model=model or "claude-sonnet-4-20250514",
+            api_key=api_key, model=model,
             json_strategy=strategy,
             workspace_id=(extra_payload or {}).get("workspace_id"),
         )
     elif provider_name == "openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key, model=model, extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "azure_openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key, model=model, base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "google":
-        return GoogleProvider(api_key=api_key, model=model or "gemini-2.0-flash", json_strategy=strategy)
+        return GoogleProvider(api_key=api_key, model=model, json_strategy=strategy)
     elif provider_name == "ollama":
         # Ollama uses OpenAI-compatible API at /v1/chat/completions — no API key needed
-        return OpenAIProvider(api_key=api_key or "ollama", model=model or "phi3.5", base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key or "ollama", model=model, base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name in ("custom", "aws_bedrock", "lm_studio", "vllm", "localai", "huggingface_tgi"):
         # Custom / self-hosted endpoints use OpenAI-compatible API
-        return OpenAIProvider(api_key=api_key or "none", model=model or "default", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key or "none", model=model, base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     else:
         raise ValueError(f"Unknown AI provider: {provider_name}")
 

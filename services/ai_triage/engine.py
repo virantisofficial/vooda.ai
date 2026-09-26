@@ -520,10 +520,17 @@ class TriageEngine:
                 reason = "AI model returned no content (likely timeout or quota issue)."
             elif content.rstrip().endswith((".", ",", ":", "{", "[", "\"")):
                 failure_type = "truncated_response"
+                # No vendor recommendations here. Naming three families
+                # as reliable was a guess that aged badly — measured
+                # live, one of them wraps every answer in markdown
+                # fences and rejects the prefill this code used to ask
+                # for JSON with. Vooda can now measure the model the
+                # customer actually has, so it points at that instead
+                # of advertising someone else's.
                 reason = (f"AI model truncated output mid-JSON — {type(response).__name__} "
                           f"emitted {response.output_tokens} completion tokens before stopping. "
-                          "Consider switching to a model with more reliable structured output "
-                          "(Claude, Gemini, Llama) or increasing max_tokens.")
+                          "Raise max_tokens, or run Check on the AI Provider screen to see "
+                          "what this model does with a sample finding.")
             else:
                 failure_type = "invalid_json"
                 reason = f"AI response was not valid JSON: {je.msg}"
