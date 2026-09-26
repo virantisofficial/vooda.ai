@@ -936,7 +936,11 @@ async def _discover_anthropic(api_key: str, workspace_id: str | None = None) -> 
 async def _discover_openai(api_key: str, base_url: str | None = None) -> DiscoverModelsResponse:
     import httpx
 
-    url = (base_url.rstrip("/") if base_url else "https://api.openai.com") + "/v1/models"
+    # Same rule the completion path uses. An operator pastes the base
+    # URL their provider documents, which includes /v1, and appending
+    # another one 404s on a perfectly correct endpoint.
+    from services.ai_triage.provider import openai_compatible_root
+    url = openai_compatible_root(base_url) + "/v1/models"
     headers = {"Authorization": f"Bearer {api_key}"}
 
     async with httpx.AsyncClient(timeout=15) as client:

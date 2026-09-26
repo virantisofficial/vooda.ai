@@ -135,6 +135,25 @@ _REJECTED_PARAM = re.compile(
 )
 
 
+def openai_compatible_root(base_url: str | None) -> str:
+    """The server root, with any trailing /v1 removed.
+
+    Every OpenAI-compatible provider documents its base URL WITH the
+    version segment — OpenRouter, vLLM, LM Studio and LiteLLM all say
+    ".../v1" — so that is what an operator pastes. Appending "/v1/..."
+    to it produced ".../v1/v1/models", a 404 on a URL copied straight
+    from the provider's own documentation.
+
+    The completion path already allowed for this and discovery did not,
+    so the same endpoint listed nothing and then answered requests
+    perfectly. One rule for both.
+    """
+    base = (base_url or "https://api.openai.com").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")].rstrip("/")
+    return base
+
+
 def rejected_parameter(error_body: str) -> str | None:
     """Which request parameter did the provider refuse?
 
@@ -432,10 +451,7 @@ class OpenAIProvider(AIProvider):
         return payload
 
     def _chat_url(self) -> str:
-        url = f"{self._base_url}/v1/chat/completions"
-        if self._base_url.endswith("/v1") or "/v1/" in self._base_url:
-            url = f"{self._base_url}/chat/completions" if self._base_url.endswith("/v1") else f"{self._base_url}chat/completions"
-        return url
+        return f"{openai_compatible_root(self._base_url)}/v1/chat/completions"
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096, temperature: float = 0.1, stop_sequences: list[str] | None = None, json_mode: bool = False) -> AIResponse:
         """Stream the completion (SSE) with idle-timeout semantics.
