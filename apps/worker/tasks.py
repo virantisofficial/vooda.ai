@@ -248,7 +248,18 @@ _FAILURE_TYPE_COPY = {
             "timeout, or revoked API key). Check API key validity and rate "
             "limits on the primary model."
         ),
+    },    # The model answered nothing at all — an unreachable endpoint, a
+    # rejected request, or a circuit breaker that stopped trying. The
+    # findings are untriaged, which is not the same as low risk, and
+    # the fix is the customer's to make.
+    "no_response": {
+        "summary": "the model returned no answer",
+        "body": ("Vooda could not get a verdict from this model — it may be "
+                 "unreachable, the model name may be wrong, or the provider may "
+                 "have rejected the request. Check it on the AI Provider screen, "
+                 "then re-run AI analysis on the scan."),
     },
+
 }
 _DEFAULT_FAILURE_COPY = {
     "summary": "triage classifications failing",
@@ -546,9 +557,24 @@ async def _emit_triage_health_signal(
     if not model_cfg:
         return
 
-    if triaged == 0 or parse_failure_rate < _TRIAGE_PARSE_FAILURE_THRESHOLD:
+    failed_calls = sum((failure_summary or {}).values())
+
+    # Zero successes with failures recorded is the WORST case, not a
+    # healthy one. The old guard read `triaged == 0` as nothing to
+    # report and returned early — so a model that answered nothing at
+    # all raised no notification, left no badge, and cleared any
+    # existing warning, while a model that answered badly half the time
+    # raised one. Measured: three findings, three 400s, no notification,
+    # last_error still empty, three secrets left in NEEDS_REVIEW with
+    # nothing on screen to say why.
+    total_failure = failed_calls > 0 and triaged == 0
+    if total_failure:
+        parse_failure_rate = 1.0
+
+    if not total_failure and (triaged == 0 or parse_failure_rate < _TRIAGE_PARSE_FAILURE_THRESHOLD):
         # Healthy run — clear any stale "triage_parse_failure:" warning.
-        if model_cfg.last_error and model_cfg.last_error.startswith("triage_parse_failure:"):
+        if model_cfg.last_error and model_cfg.last_error.startswith(
+                ("triage_parse_failure:", "triage_failed:")):
             model_cfg.last_error = None
             await db.flush()
         return
@@ -557,11 +583,14 @@ async def _emit_triage_health_signal(
     # engine recorded in `failure_summary`. `classified` stays in the
     # notification metadata for context, but must not define failure —
     # a verdict held for human review is triage working, not breaking.
-    failed = sum((failure_summary or {}).values()) or (triaged - classified)
+    failed = failed_calls or (triaged - classified)
     dominant_type, short_summary, full_body = _pick_failure_copy(failure_summary)
 
     # Compact one-liner for the provider-card badge (hovering shows this).
     err_msg = (
+        f"triage_failed: all {failed} findings — {short_summary} "
+        f"(failure_type={dominant_type})."
+        if total_failure else
         f"triage_parse_failure: {failed}/{triaged} findings — {short_summary} "
         f"(failure_type={dominant_type})."
     )
@@ -575,11 +604,20 @@ async def _emit_triage_health_signal(
         await db.flush()
         return
 
+    if total_failure:
+        title = f"AI triage could not run on {model_cfg.name}"
+        body = (f"Every call failed for {failed} finding"
+                f"{'' if failed == 1 else 's'}, so they are untriaged rather "
+                f"than low risk: {short_summary}. {full_body}")
+    else:
+        title = f"AI triage failing on {model_cfg.name}"
+        body = f"{failed} of {triaged} findings: {short_summary}. {full_body}"
+
     notif = Notification(
         tenant_id=tenant_id,
         user_id=user_id,
-        title=f"AI triage failing on {model_cfg.name}",
-        body=f"{failed} of {triaged} findings: {short_summary}. {full_body}",
+        title=title,
+        body=body,
         notification_type="triage_health",
         resource_type="ai_model",
         resource_id=str(model_cfg.id),
@@ -1399,6 +1437,28 @@ async def _run_ai_triage_retro(scan_job_id: str):
             _stats["false_positives"] = fp_after
             _stats["true_positives"] = tp_after
             job.stats = _stats
+
+            # Same health signal the full scan raises. Re-running triage
+            # is exactly when a customer is watching for whether the
+            # model works, and this path recorded the failures into
+            # stats and then told nobody: no notification, no badge on
+            # the provider card, findings back at needs-review with
+            # nothing on screen to say why.
+            try:
+                _classified = fp_after + tp_after
+                _failed = sum((failure_summary or {}).values())
+                await _emit_triage_health_signal(
+                    db=db,
+                    tenant_id=job.tenant_id,
+                    scan_job_id=job.id,
+                    triaged=triaged,
+                    classified=_classified,
+                    parse_failure_rate=(_failed / triaged if triaged > 0 else 0.0),
+                    failure_summary=failure_summary,
+                )
+            except Exception as _sig_err:
+                logger.warning("triage_health_signal_failed",
+                               scan_job_id=str(scan_job_id), error=str(_sig_err)[:200])
             job.status = ScanStatus.COMPLETED
             try:
                 job.heartbeat_at = datetime.now(timezone.utc)
@@ -7450,6 +7510,22 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 )
             except Exception as cache_err:
                 logger.warning("cache_store_failed", finding_id=str(finding.id), error=str(cache_err)[:100])
+
+    # A finding submitted for triage that came back with no usable
+    # result is a failure, whatever the cause.
+    #
+    # The per-result counting above only sees entries the engine
+    # returned a payload for. When the circuit breaker opens it
+    # abandons the remaining calls and returns nothing for them, so
+    # three findings, three 400s and an open breaker recorded an empty
+    # failure_summary — and the health signal read that as a clean run.
+    # Counting the shortfall catches any path that produces no result,
+    # not just this one.
+    _unaccounted = len(finding_map) - triaged - sum(failure_summary.values())
+    if _unaccounted > 0:
+        failure_summary["no_response"] = (
+            failure_summary.get("no_response", 0) + _unaccounted
+        )
 
     await db.commit()
     if below_threshold_count:
