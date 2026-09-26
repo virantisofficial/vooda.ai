@@ -431,6 +431,9 @@ function AIModelsFullSection() {
   const [showProbeDetail, setShowProbeDetail] = useState(false);
   const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
   const [showOtherModality, setShowOtherModality] = useState(false);
+  // A ref, not state: the loop reads it between requests and must see
+  // the current value, not the one captured when the run began.
+  const verifyAllCancelled = useRef(false);
   const [discoverStatus, setDiscoverStatus] = useState<{ status: string; message: string } | null>(null);
   const [keyValidated, setKeyValidated] = useState(false);
   // Track the original model_id when entering edit mode. If the user swaps to
@@ -705,19 +708,29 @@ function AIModelsFullSection() {
     // quota exceeded during testing.
     const ids = candidateModels.map((m) => m.model_id).filter(Boolean);
     if (ids.length === 0) return;
+    verifyAllCancelled.current = false;
     setVerifyingAll({ done: 0, total: ids.length });
     try {
       // One model per request rather than one request for all of them,
       // so the grid fills in as answers arrive and the run can be read
       // as progress instead of a spinner that might be stuck.
+      // Interruptible. A provider offering 458 models takes about
+      // twenty minutes at roughly two seconds each, and a run that long
+      // with no way out is one a customer starts once and never again.
+      // Every answer already received is kept.
       for (let i = 0; i < ids.length; i++) {
+        if (verifyAllCancelled.current) break;
         await probeOne(ids[i], { silent: true });
         setVerifyingAll({ done: i + 1, total: ids.length });
       }
     } finally {
       setVerifyingAll(null);
+      verifyAllCancelled.current = false;
     }
   };
+
+  /** Rough wall-clock for a full run, from measured probe latency. */
+  const estimatedCheckMinutes = Math.round((candidateModels.length * 2.5) / 60);
 
   /** Apply what the probe proved works. */
   const applyProbeFix = async (v: ProbeVerdict) => {
@@ -1273,12 +1286,13 @@ function AIModelsFullSection() {
                     from an even baseline. */}
                 <div className="flex items-center justify-between gap-3 mb-1 min-h-[28px]">
                   <label className="text-sm text-slate-300">Choose a Model for AI Triage</label>
-                  <button type="button" onClick={verifyAll} disabled={!!verifyingAll}
-                    className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0 disabled:opacity-50">
+                  <button type="button"
+                    onClick={() => { if (verifyingAll) { verifyAllCancelled.current = true; } else { verifyAll(); } }}
+                    className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0">
                     {verifyingAll ? (
                       <>
                         <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin" />
-                        Checking {verifyingAll.done} of {verifyingAll.total}
+                        Stop ({verifyingAll.done} of {verifyingAll.total})
                       </>
                     ) : (
                       <>
@@ -1304,7 +1318,8 @@ function AIModelsFullSection() {
                     a verdict. */}
                 <p className="text-[10px] text-slate-600 mb-2">
                   Checking submits one sample finding and validates the model&apos;s response — a single short request
-                  per model. <span className="text-slate-500">Not Checked</span> means no request has been made.
+                  per model{estimatedCheckMinutes >= 2 ? `, roughly ${estimatedCheckMinutes} minutes for all ${candidateModels.length}` : ""}.
+                  {estimatedCheckMinutes >= 2 && " You can stop part way and keep the answers already received."} <span className="text-slate-500">Not Checked</span> means no request has been made.
                   <span className="text-slate-500"> Couldn&apos;t Check</span> means the provider was unavailable, which
                   is usually temporary — those are worth checking again.
                 </p>
