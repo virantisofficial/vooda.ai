@@ -93,3 +93,35 @@ def test_declared_structured_output_settles_json_mode():
 def test_missing_metadata_is_never_held_against_a_model():
     for meta in ({}, {"description": ""}, {"description": "   ", "display_name": ""}):
         assert classify(**meta).tier == CANDIDATE, meta
+
+
+# ── Declared modality settles modality, and nothing else ──────
+
+def test_a_declared_text_emitter_is_still_checked_for_non_output_words():
+    """Every asynchronous batch endpoint declares text output, so the
+    declared-output rule waved all of them through as candidates.
+    Measured across 458 live models: 72 of the 89 that failed a real
+    check were batch variants."""
+    s = classify(identifier="openai/o3:batch", output_modalities=["text"],
+                 display_name="OpenAI: o3 (batch)")
+    assert s.tier == OTHER_MODALITY
+    assert s.may_exclude is False, "a name is still only a guess"
+
+
+def test_the_plain_model_beside_it_is_untouched():
+    """The pair differ by a suffix and a price, nothing else."""
+    assert classify(identifier="openai/o3", output_modalities=["text"],
+                    display_name="OpenAI: o3").tier == CANDIDATE
+
+
+def test_declared_modality_still_protects_a_vision_model():
+    """The rule this sits beside must keep working — that was the
+    original reason for it."""
+    s = classify(output_modalities=["text"], identifier="qwen/qwen2.5-vl-72b-instruct",
+                 description="recognizes common objects: flowers, birds, fish and insects")
+    assert s.tier == CANDIDATE
+
+
+def test_an_encoder_is_caught_even_when_text_output_is_declared():
+    s = classify(identifier="baai/bge-reranker-v2-m3", output_modalities=["text"])
+    assert s.tier == OTHER_MODALITY

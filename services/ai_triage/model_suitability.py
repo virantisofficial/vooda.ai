@@ -41,15 +41,35 @@ CANNOT_SERVE = "cannot_serve"
 #: caught nothing these words missed, and an input-side list meant to
 #: stop "understands images" demoting a vision model prevented zero
 #: false positives — the declared-modality check below already does it.
-_NON_TRIAGE_WORDS = {
-    # non-text output
+#: Words naming a non-text OUTPUT. A provider that declares its output
+#: modalities has already answered this better than a name can, so
+#: these are not consulted when it does.
+_MODALITY_WORDS = {
     "tts", "transcribe", "transcription", "speech", "music",
     "image", "images", "audio", "video", "diffusion",
+}
+
+#: Words naming something other than what a model outputs — what it
+#: does, or how it is served. Declared modalities say nothing about
+#: either, so these apply even when modalities ARE declared.
+#:
+#: Keeping the two apart matters. The declared-output rule exists to
+#: stop a vision model being demoted for mentioning images, and it was
+#: suppressing these as well: every asynchronous batch endpoint
+#: declares text output, so all of them sailed through as candidates.
+#: Measured against a live check of 458 models, 72 of the 89 that
+#: failed were batch variants — listed beside the real model at half
+#: price, with nothing in the metadata to tell them apart but the word
+#: itself.
+_NON_OUTPUT_WORDS = {
     # not generation at all — encoders and scorers, which self-hosted
     # catalogues list right beside the chat models
     "embed", "embedding", "embeddings", "rerank", "reranker",
     "reranking", "moderation",
+    # not a synchronous endpoint
+    "batch",
 }
+
 
 
 #: Architecture markers for encoder-only models. An encoder produces
@@ -67,6 +87,11 @@ _NON_TRIAGE_WORDS = {
 #: encoder in the list would hide a model that generates text perfectly
 #: well. A test holds that case.
 _ENCODER_ARCHITECTURES = ("bert",)
+
+
+def _words_of(*parts: str) -> set[str]:
+    """Every word across the text a provider gives us about a model."""
+    return set(re.split(r"[^a-z0-9]+", " ".join(p or "" for p in parts).lower()))
 
 
 @dataclass
@@ -111,11 +136,19 @@ def classify(
             return Suitability(OTHER_MODALITY,
                                f"Produces {', '.join(sorted(outs))}, not text",
                                may_exclude=True)
-        # It emits text, which is all triage needs — and that is a
-        # stated fact, so the guess below does not get to argue with it.
-        # Measured: a vision model declaring text-only output was being
-        # demoted on the word "images" in a sentence about what it can
-        # RECOGNISE. Whether it triages WELL is the probe's call.
+        # It emits text, which is all triage needs — a stated fact, so
+        # no guess about MODALITY gets to argue with it. Measured: a
+        # vision model declaring text-only output was being demoted on
+        # the word "images" in a sentence about what it can RECOGNISE.
+        #
+        # Non-output words still apply. Declared modalities say nothing
+        # about whether a model embeds rather than generates, or is
+        # served asynchronously, and skipping those checks here let
+        # every batch endpoint through as a candidate.
+        hit = _words_of(description, display_name, identifier) & _NON_OUTPUT_WORDS
+        if hit:
+            return Suitability(OTHER_MODALITY, f"Described as {sorted(hit)[0]}",
+                               declared_config=declared_config)
         return Suitability(CANDIDATE, declared_config=declared_config)
 
     # 2. Is it an encoder? Self-hosted catalogues list embedding models
@@ -135,8 +168,7 @@ def classify(
                            may_exclude=True, declared_config=declared_config)
 
     # 4. Nothing structured to go on — fall back to what it is called.
-    words = set(re.split(r"[^a-z0-9]+", f"{description} {display_name} {identifier}".lower()))
-    hit = words & _NON_TRIAGE_WORDS
+    hit = _words_of(description, display_name, identifier) & (_MODALITY_WORDS | _NON_OUTPUT_WORDS)
     if hit:
         return Suitability(OTHER_MODALITY, f"Described as {sorted(hit)[0]}",
                            declared_config=declared_config)
