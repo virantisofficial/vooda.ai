@@ -486,6 +486,9 @@ export const probeModels = (data: {
   provider: string; model_ids: string[]; api_key?: string;
   endpoint_url?: string; model_config_id?: string;
   supports_json_mode?: boolean; max_tokens?: number;
+  // What discovery concluded, keyed by model id — stored with the
+  // probe verdict so it outlives the response that produced it.
+  suitability?: Record<string, { tier: string; reason: string; may_exclude: boolean }>;
 }) => api.post("/ai-models/probe", data);
 
 // Scores one model against findings whose answer is already known.

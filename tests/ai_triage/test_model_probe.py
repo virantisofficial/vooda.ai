@@ -169,3 +169,23 @@ def test_every_offered_fix_actually_changes_something():
         res = _verdict_for("ok_salvaged", {}, False, json_mode_on=on)
         if res.suggested_config:
             assert res.suggested_config.get("supports_json_mode") != on
+
+
+def test_a_selected_model_is_always_re_checked():
+    """Reachability is the volatile part — a provider retires a model,
+    a key is revoked, a quota runs out. Reusing last week's verdict
+    saves one request and risks showing Ready for a model that stopped
+    working days ago, at the moment someone is choosing."""
+    from pathlib import Path
+    page = (Path(__file__).resolve().parents[2]
+            / "apps/web/src/app/integrations/page.tsx").read_text()
+    # The effect BODY only. RECHECK_AFTER_MS is still declared nearby
+    # and still used by Check All, which is a bulk run where re-probing
+    # hundreds of already-known models is pure waste. The point is that
+    # selecting one model does not consult it.
+    start = page.index("// Selecting a model always re-checks it.")
+    block = page[page.index("useEffect(", start):page.index("}, [form.model_id", start)]
+    assert "RECHECK_AFTER_MS" not in block, (
+        "the selection check must not skip a model on age")
+    assert "setTimeout" in block, "but it must still wait for the selection to settle"
+    assert "silent: true" in block, "and fail quietly while someone is browsing"

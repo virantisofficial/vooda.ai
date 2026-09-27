@@ -527,27 +527,23 @@ function AIModelsFullSection() {
 
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
 
-  // Selecting a model checks it, without making browsing expensive.
+  // Selecting a model always re-checks it.
   //
-  // Picking a model should answer "will this work" immediately, but
-  // firing a request on every click means someone comparing ten models
-  // pays for ten. Three things make it safe: it waits until the
-  // selection settles, it skips a model that already has a recent
-  // verdict, and it stays silent on failure — a browsing probe should
-  // not throw a banner. Re-checking on demand is always one click away.
+  // Reachability is the volatile part: a provider retires a model, a
+  // key is revoked, a quota runs out. Reusing a verdict from last week
+  // saves one request and risks showing "Ready" for a model that
+  // stopped working days ago — and the moment someone is choosing is
+  // exactly when a stale answer costs most.
+  //
+  // Browsing stays cheap because the probe waits for the selection to
+  // settle rather than firing on every click, and it fails silently: a
+  // background check should not throw a banner at someone still
+  // looking around.
   const RECHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
   useEffect(() => {
     const id = form.model_id;
     if (!id || !(keyValidated || editingId)) return;
     if (verifyingAll || probingModel) return;
-
-    const existing = probeResults[id];
-    if (existing) {
-      const age = existing.probed_at
-        ? Date.now() - new Date(existing.probed_at).getTime()
-        : 0;
-      if (age < RECHECK_AFTER_MS) return;   // recent enough to trust
-    }
     const t = setTimeout(() => { probeOne(id, { silent: true }); }, 800);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -736,6 +732,19 @@ function AIModelsFullSection() {
         max_tokens: form.max_tokens,
         supports_json_mode: form.supports_json_mode,
       };
+      // What discovery concluded about this model, so the verdict is
+      // kept with the probe result instead of living only in the
+      // response that produced it.
+      const m = discoveredModels.find((d) => d.model_id === modelId);
+      if (m?.suitability) {
+        payload.suitability = {
+          [modelId]: {
+            tier: m.suitability,
+            reason: m.suitability_reason || "",
+            may_exclude: !!m.suitability_may_exclude,
+          },
+        };
+      }
       if (editingId) payload.model_config_id = editingId;
       else if (form.api_key) payload.api_key = form.api_key;
       if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;

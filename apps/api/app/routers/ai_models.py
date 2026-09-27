@@ -401,6 +401,10 @@ class ProbeRequest(StrictModel):
     endpoint_url: Optional[str] = None
     model_config_id: Optional[UUID] = None
     supports_json_mode: bool = True
+    #: What discovery concluded about these models. Passed through so
+    #: the verdict is stored alongside the probe result rather than
+    #: living only in the response that produced it.
+    suitability: Optional[dict] = None
     #: The budget triage will actually use. engine.py calls with the
     #: tenant's configured max_tokens, so probing at anything else tests
     #: a request Vooda never makes — and probing low would fail models
@@ -429,6 +433,9 @@ class ProbeVerdict(BaseModel):
     detail: dict = {}
     latency_ms: float = 0
     probed_at: Optional[str] = None
+    #: What discovery concluded, kept with the probe result.
+    suitability: Optional[str] = None
+    suitability_reason: Optional[str] = None
     #: Null until someone runs it. An unscored model must not read as
     #: one that scored zero.
     accuracy: Optional[AccuracyVerdict] = None
@@ -462,7 +469,8 @@ def _probe_to_verdict(r, probed_at: str) -> ProbeVerdict:
     )
 
 
-async def _store_probe(db: AsyncSession, tenant_id, provider: str, r, probed_at: str):
+async def _store_probe(db: AsyncSession, tenant_id, provider: str, r, probed_at: str,
+                       suitability: dict | None = None):
     """Upsert by (tenant, provider, model) — one current answer per model."""
     existing = (await db.execute(
         select(AIModelProbeResult).where(
@@ -480,6 +488,10 @@ async def _store_probe(db: AsyncSession, tenant_id, provider: str, r, probed_at:
     row.detail = r.detail or {}
     row.latency_ms = round(r.latency_ms, 1)
     row.probed_at = probed_at
+    if suitability:
+        row.suitability = suitability.get("tier")
+        row.suitability_reason = (suitability.get("reason") or "")[:200] or None
+        row.suitability_may_exclude = bool(suitability.get("may_exclude"))
     if existing is None:
         db.add(row)
 
@@ -534,7 +546,8 @@ async def probe_models(
             extra_payload=extra_payload,
         )
         now = datetime.now(timezone.utc).isoformat()
-        await _store_probe(db, user.tenant_id, provider, r, now)
+        await _store_probe(db, user.tenant_id, provider, r, now,
+                           suitability=(body.suitability or {}).get(model_id))
         results.append(_probe_to_verdict(r, now))
 
     await db.flush()
@@ -659,6 +672,7 @@ async def get_probe_results(
             remedy=r.remedy or "", suggested_config=r.suggested_config or {},
             detail=r.detail or {}, latency_ms=r.latency_ms or 0,
             probed_at=r.probed_at, accuracy=_accuracy_from_row(r),
+            suitability=r.suitability, suitability_reason=r.suitability_reason,
         ) for r in rows
     ])
 

@@ -37,6 +37,9 @@ export interface ProbeVerdict {
   detail: Record<string, any>;
   latency_ms: number;
   probed_at?: string | null;
+  /** What discovery concluded, kept with the probe verdict. */
+  suitability?: string | null;
+  suitability_reason?: string | null;
   /** Null until someone runs it — not the same as scoring zero. */
   accuracy?: AccuracyVerdict | null;
 }

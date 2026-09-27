@@ -78,6 +78,17 @@ class AIModelProbeResult(Base, UUIDMixin, TimestampMixin, TenantMixin):
     latency_ms = Column(Float, default=0.0)
     probed_at = Column(String(50), nullable=True)
 
+    # ── What the provider's own metadata said about this model ──
+    #
+    # Computed from a discovery response, which is a moment in time: a
+    # provider can reword a description or change what it declares, and
+    # then nothing records what Vooda actually acted on. Kept so the
+    # reason a model was set aside survives the response that produced
+    # it, and so a stored verdict can be read without re-listing.
+    suitability = Column(String(20), nullable=True)
+    suitability_reason = Column(String(200), nullable=True)
+    suitability_may_exclude = Column(Boolean, nullable=True)
+
     # ── Accuracy, when the operator has asked for it ──
     #
     # Lives beside the probe result because it answers the other half
