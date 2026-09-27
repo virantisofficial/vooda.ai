@@ -32,20 +32,72 @@ ENTERPRISE_FEATURES: dict[str, str] = {
     "audit_export": "Audit Export & Retention",
     "custom_detectors": "Custom Detectors",
     "schedules": "Scan Schedules",
+    "webhooks": "Inbound Webhooks",
+    "ticketing": "Ticketing",
+    "notifications": "Notification Channels",
 }
 
-#: Deliberately NOT gated, though they sit alongside the four above in
-#: the same settings grid:
+#: Which gated feature a provider belongs to, if any.
 #:
-#:   Suppressions and Rule Overrides are how an operator lives with a
-#:   false positive. AI triage is good, not perfect, and when it gets a
-#:   verdict wrong these are the only remedy — without them the same
-#:   finding reappears on every scan with no recourse. Gating them would
-#:   contradict the noise-reduction the product is built on, and it
-#:   would push people away rather than upsell them.
+#: Two categories, one rule: Community finds, verifies and triages
+#: secrets; Enterprise carries the result out of Vooda — into a
+#: tracker, or into the systems a team watches.
 #:
-#: The gates above limit SCOPE (multi-team scoping, compliance tooling,
-#: org-specific rules, scheduling). They do not degrade the scanner.
+#: Ticketing is taken whole rather than split. A half-gated category
+#: left one tile in a row of three looking like a missing badge rather
+#: than a decision, and the boundary was hard to state in a sentence.
+#:
+#: Linear and the SIEM channels are listed although neither is
+#: advertised in PROVIDER_SCHEMAS — the dispatcher can still route to
+#: them, and a provider gated everywhere except the one path that
+#: actually sends is not gated.
+#:
+#: In-app notifications are deliberately absent. They are written
+#: straight to the notifications table, not through a channel, so the
+#: bell keeps working in every edition — including the signal that says
+#: triage could not run, which a customer must never stop receiving
+#: because of their licence.
+ENTERPRISE_PROVIDER_FEATURES: dict[str, str] = {
+    # Filing a finding into a tracker.
+    "jira": "ticketing",
+    "servicenow": "ticketing",
+    "custom_ticketing": "ticketing",
+    "linear": "ticketing",
+    # Telling a system outside Vooda that a finding exists.
+    "slack": "notifications",
+    "teams": "notifications",
+    "ms_teams": "notifications",
+    "email": "notifications",
+    "webhook": "notifications",
+    "pagerduty": "notifications",
+    "splunk": "notifications",
+    "sentinel": "notifications",
+    "datadog": "notifications",
+}
+
+#: Kept for the ticketing call sites and their tests.
+ENTERPRISE_TICKETING_PROVIDERS: frozenset[str] = frozenset(
+    p for p, f in ENTERPRISE_PROVIDER_FEATURES.items() if f == "ticketing"
+)
+
+
+def provider_feature(provider: str) -> "str | None":
+    """The gated feature this provider belongs to, or None."""
+    return ENTERPRISE_PROVIDER_FEATURES.get((provider or "").lower())
+
+
+def provider_enabled(provider: str) -> bool:
+    """True when this provider is available in the running edition."""
+    feature = provider_feature(provider)
+    return feature is None or feature_enabled(feature)
+
+
+def ticketing_provider_enabled(provider: str) -> bool:
+    """Narrower twin, kept so the ticketing contract reads as itself."""
+    if (provider or "").lower() not in ENTERPRISE_TICKETING_PROVIDERS:
+        return True
+    return feature_enabled("ticketing")
+
 
 #: HTTP methods that stay reachable even when their feature is gated.
 #:

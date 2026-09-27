@@ -2941,6 +2941,32 @@ function AdminSettingsContent() {
   }, []);
   const isGated = (key: string) => gatedFeatures.includes(key);
 
+  // The gate has to hold on the URL too, not just on the tile.
+  //
+  // The tile grid greyed a gated section, but `?tab=` was checked
+  // against validTabs alone, so /settings/admin?tab=custom_detectors
+  // opened the whole section with no badge — and every request inside
+  // it then failed, which is how a gate looks when it is drawn rather
+  // than enforced.
+  //
+  // Runs as its own effect because gatedFeatures arrives after the
+  // first render: the deep link opens, then closes once the edition is
+  // known. Sending them back to the grid is what a badge on the tile
+  // already told them.
+  // `audit` is excluded on purpose. It is the one key in the list with
+  // no API enforcement behind it: the endpoint serves Community, a test
+  // asserts it stays that way, the README lists "Audit log — view &
+  // search" as Community, and the dashboard links straight here from
+  // Recent Activity. Blocking it would be the UI enforcing something no
+  // other layer does, and would break that link. The compliance half —
+  // export and retention — is gated inside the section, per-endpoint.
+  useEffect(() => {
+    if (activeTab && activeTab !== "audit" && isGated(activeTab)) {
+      setActiveTab(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, gatedFeatures]);
+
   const activeTabInfo = TABS.find((t) => t.key === activeTab);
 
   // Single-source breadcrumb — passed to AppShell so it renders in

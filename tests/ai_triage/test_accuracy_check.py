@@ -112,11 +112,36 @@ def test_no_answer_at_all_is_recorded_as_such():
 # ── the headline ────────────────────────────────────────────────
 
 def test_the_headline_leads_with_missed_secrets():
+    """A miss caps the verdict however good the rate looks."""
     res = AccuracyResult("m", total=20, correct=17, missed_secrets=2)
-    assert "17 of 20 correct" in res.headline
-    assert "missed 2 real secrets" in res.headline
+    assert "missed several real secrets" in res.headline
+    assert res.headline.startswith("Not safe for triage")
 
 
+def test_the_headline_does_not_publish_the_size_of_the_corpus():
+    """The counts were both a leak and a distraction.
+
+    A corpus a reader can enumerate is one a model can be tuned
+    against, and nobody ever chose differently on 15 rather than 16.
+    """
+    for res in (
+        AccuracyResult("m", total=20, correct=15, missed_secrets=1, false_alarms=4),
+        AccuracyResult("m", total=20, correct=20),
+        AccuracyResult("m", total=20, correct=12, unanswered=8, false_alarms=3),
+    ):
+        assert not any(ch.isdigit() for ch in res.headline), res.headline
+
+
+def test_the_two_kinds_of_error_are_named_not_summed():
+    """"15 of 20, missed 1" accounted for one mistake and left four.
+
+    A reader could not tell whether the rest were harmless findings
+    raised as real or real secrets let through, and those have
+    opposite consequences.
+    """
+    res = AccuracyResult("m", total=20, correct=15, missed_secrets=1, false_alarms=4)
+    assert "missed a real secret" in res.headline
+    assert "harmless findings" in res.headline
 def test_a_clean_run_says_so_explicitly():
     """Silence on this point reads as absence of data rather than
     absence of misses."""
@@ -125,10 +150,9 @@ def test_a_clean_run_says_so_explicitly():
 
 
 def test_one_miss_is_singular():
-    assert "1 real secret" in AccuracyResult("m", total=20, correct=19,
-                                             missed_secrets=1).headline
-
-
+    res = AccuracyResult("m", total=20, correct=19, missed_secrets=1)
+    assert "missed a real secret" in res.headline
+    assert "several" not in res.headline
 def test_a_check_that_answered_nothing_is_not_a_clean_sheet():
     """Seen live: every request returned 401 and the headline read
     "0 of 20 correct — missed no real secrets", stating the
@@ -139,13 +163,15 @@ def test_a_check_that_answered_nothing_is_not_a_clean_sheet():
 
 
 def test_a_partial_run_says_how_much_it_covered():
-    """Silence about the cases that never ran reads as "none missed"
-    across the whole corpus."""
-    res = AccuracyResult("m", total=20, correct=12, missed_secrets=0, unanswered=8)
-    assert "8 unanswered" in res.headline
-    assert "among those answered" in res.headline
+    """Silence about cases that never ran reads as "none missed".
 
-
+    Kept above the coverage floor deliberately. A handful of gaps is
+    still a result about the model and has to admit them; a run where
+    most cases never completed is voided instead, which
+    test_a_run_that_mostly_failed_is_not_a_low_score covers.
+    """
+    res = AccuracyResult("m", total=20, correct=17, missed_secrets=0, unanswered=2)
+    assert "unanswered" in res.headline
 def test_a_complete_clean_run_still_says_so_plainly():
     res = AccuracyResult("m", total=20, correct=20, missed_secrets=0, unanswered=0)
-    assert res.headline == "20 of 20 correct — missed no real secrets"
+    assert res.headline == "Strong — missed no real secrets."

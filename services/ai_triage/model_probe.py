@@ -25,6 +25,9 @@ import json
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
+from services.ai_triage.account_errors import (
+    PAYMENT_REQUIRED, RATE_LIMITED, REMEDY, SHORT, refusal_reason,
+)
 
 # States, in the order a customer cares about them.
 READY = "ready"            # returned a usable verdict, first try
@@ -227,10 +230,19 @@ def _verdict_for(outcome: str, ev: dict, retried_ok: bool,
             "Needed a larger reply budget to answer completely.",
             f"Raise the output limit to {retry_at}. Verified working at that setting.",
             {"max_tokens": retry_at}, ev)
+    # Unresolved, not disqualified.
+    #
+    # The other verdicts that end a model's candidacy are facts the
+    # provider stated: a 404, an access refusal, a reply cut short even
+    # at a larger budget. This one is Vooda's own reader coming up
+    # empty, which is weaker evidence — the model may answer perfectly
+    # in a format nothing here anticipated. Calling that "Won't Work"
+    # rules out a model on the strength of our own parser, so it reads
+    # as unresolved and stays worth another ask.
     return ProbeResult(
-        "", UNUSABLE,
-        "Did not return an answer Vooda can read.",
-        "Pick a different model for triage.", {}, ev)
+        "", UNVERIFIED,
+        "Vooda could not read the answer it gave.",
+        "Worth checking again — if it repeats, pick a different model.", {}, ev)
 
 
 async def probe_model(provider_name: str, api_key: str, model_id: str,
@@ -277,11 +289,30 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
         # key then has to know the verdicts are stale.
         #
         # We could not check it, which is what unverified is for.
-        if _is_auth_failure(msg):
+        # A refusal aimed at the account, named. The generic fallback
+        # below says only "something went wrong", which sent an operator
+        # whose account had run out of credit to go and check a key that
+        # was perfectly valid.
+        reason = refusal_reason(msg)
+        if reason in (PAYMENT_REQUIRED, RATE_LIMITED):
             return ProbeResult(model_id, UNVERIFIED,
-                               "Couldn't check — the provider rejected the key.",
+                               f"Couldn't check — {SHORT[reason]}.",
+                               REMEDY[reason], {},
+                               {"error": msg[:300], "account_refused": reason},
+                               total, calls)
+
+        if _is_auth_failure(msg):
+            # Flagged, not judged. Alone, a 401 is ambiguous: the key
+            # may be wrong, or it may be fine and simply lack access to
+            # this model — an aggregator returns the same status for a
+            # model your account has not enabled. Only the caller,
+            # which can see whether other models answered, can tell the
+            # two apart, so the marker travels with the result.
+            return ProbeResult(model_id, UNVERIFIED,
+                               "Couldn't check — the provider rejected the request.",
                                "Check the API key, then try again.",
-                               {}, {"error": msg[:300]}, total, calls)
+                               {}, {"error": msg[:300], "auth_failure": True},
+                               total, calls)
 
         definitive = _definitive_failure(msg)
         if definitive:

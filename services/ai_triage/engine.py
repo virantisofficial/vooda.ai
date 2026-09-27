@@ -337,9 +337,24 @@ class TriageEngine:
             )
         except RuntimeError as upstream_exc:
             err_text = str(upstream_exc)
+            # An account the provider refused is not an upstream hiccup.
+            # Both arrive here as a RuntimeError, and sharing a failure
+            # type made them share advice — "switch the model_id, or
+            # retry once the upstream recovers" — which is wrong for a
+            # refusal that reaches every model equally.
+            from services.ai_triage.account_errors import (
+                PAYMENT_REQUIRED, RATE_LIMITED, UNAUTHORIZED, refusal_reason,
+            )
+            _REFUSAL_FAILURE = {
+                PAYMENT_REQUIRED: "payment_required",
+                UNAUTHORIZED: "credential_rejected",
+                RATE_LIMITED: "rate_limited",
+            }
+            failure_type = _REFUSAL_FAILURE.get(
+                refusal_reason(err_text) or "", "upstream_error")
             logger.warning(
                 "ai_response_upstream_error",
-                failure_type="upstream_error",
+                failure_type=failure_type,
                 error=err_text[:300],
                 model=getattr(self.provider, "model", "unknown"),
             )
@@ -354,7 +369,7 @@ class TriageEngine:
                 "required_human_review": True,
                 "evidence": [],
                 "recommended_next_action": "request_human_review",
-                "_parse_failure": "upstream_error",
+                "_parse_failure": failure_type,
             }
 
         # Parse and validate response

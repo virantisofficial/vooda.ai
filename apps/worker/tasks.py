@@ -252,6 +252,35 @@ _FAILURE_TYPE_COPY = {
     # rejected request, or a circuit breaker that stopped trying. The
     # findings are untriaged, which is not the same as low risk, and
     # the fix is the customer's to make.
+    # The provider refused the ACCOUNT, before any model was reached.
+    #
+    # These used to fall under upstream_error, whose advice is to switch
+    # model_id or wait for the upstream to recover. Neither can work
+    # here: a refused account is refused for every model, and nothing
+    # recovers on its own. An operator whose overnight scan died was
+    # being sent to do two things that could not help, while the one
+    # thing that would was not mentioned.
+    "payment_required": {
+        "summary": "provider refused — payment required",
+        "body": ("The provider refused these requests for payment. Add "
+                 "credit to the account, then re-run AI analysis on the "
+                 "scan. Changing the model will not help — no model can "
+                 "answer until the account is funded."),
+    },
+    "credential_rejected": {
+        "summary": "provider rejected the credential",
+        "body": ("The provider rejected the API key for this provider. "
+                 "Re-enter it on the AI Provider screen, then re-run AI "
+                 "analysis on the scan. Changing the model will not help "
+                 "while the credential is refused."),
+    },
+    "rate_limited": {
+        "summary": "provider rate-limited the account",
+        "body": ("The provider rate-limited this account and the retries "
+                 "did not outlast it. Wait for the limit to reset, or move "
+                 "to a plan with a higher limit, then re-run AI analysis "
+                 "on the scan."),
+    },
     "no_response": {
         "summary": "the model returned no answer",
         "body": ("Vooda could not get a verdict from this model — it may be "

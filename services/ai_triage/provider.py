@@ -714,8 +714,15 @@ async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[
             m = (await session.execute(query)).scalar_one_or_none()
 
     if m:
+        from packages.common.encryption import decrypt_credential
+        # Decrypted for this call only. If it cannot be read the
+        # exception travels — triage that runs with an unusable
+        # credential produces a scan whose findings are untriaged and
+        # look reviewed, which is the failure mode the health signal
+        # exists to prevent.
         return create_provider(
-            m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
+            m.provider, decrypt_credential(m.api_key_encrypted or ""),
+            m.model_id, m.endpoint_url,
             extra_payload=m.provider_config or None,
             # The tenant's legacy flag still steers the NATIVE mechanism
             # (it exists because forcing response_format through

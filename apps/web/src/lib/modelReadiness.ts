@@ -52,8 +52,13 @@ export interface ProbeVerdict {
  *  good the overall count looks. */
 export function accuracyTone(a?: AccuracyVerdict | null): string {
   if (!a || a.total === 0) return "text-slate-500";
-  if (a.total - a.unanswered === 0) return "text-slate-400";
-  if (a.missed_secrets > 0) return "text-amber-400";
+  const scored = a.total - a.unanswered;
+  if (scored === 0) return "text-slate-400";
+  // A miss is not a shade of "nearly". Raising a harmless finding
+  // costs a reviewer minutes; dismissing a live credential ends up in
+  // an incident report, so it reads as a failure rather than a warning.
+  if (a.missed_secrets > 0) return "text-rose-400";
+  if (a.correct / scored < 0.75) return "text-amber-400";
   return "text-emerald-400";
 }
 
@@ -73,6 +78,22 @@ export function readinessLabel(state?: string): string {
     case UNVERIFIED: return "Couldn't Check";
     case UNUSABLE: return "Won't Work";
     default: return "Not Checked";
+  }
+}
+
+/** What a badge means, for its tooltip.
+ *
+ *  These definitions used to sit in a paragraph above the list, where
+ *  every reader paid for them once and needed them once. On the badge
+ *  they are there for whoever is looking at that badge.
+ */
+export function readinessHint(state?: string): string {
+  switch (state) {
+    case READY: return "Answered a sample finding with a usable verdict.";
+    case NEEDS_SETUP: return "Works once a setting is changed — use Fix to apply it.";
+    case UNVERIFIED: return "The provider gave nothing usable back, usually temporary. Worth checking again.";
+    case UNUSABLE: return "Asked, and the answer ruled it out for triage.";
+    default: return "No request has been made yet.";
   }
 }
 

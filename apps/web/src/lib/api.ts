@@ -27,6 +27,25 @@ api.interceptors.response.use(
       localStorage.removeItem("vooda_token");
       window.location.href = "/login";
     }
+    // An edition refusal, surfaced once, here.
+    //
+    // The API answers 402 with a sentence written for the customer —
+    // which feature, and what the Community edition still includes.
+    // Nothing read it: callers catch and fall back to an empty list,
+    // so a gated tenant saw "no custom detectors" rather than a gate,
+    // and a refused schedule change reverted the select in silence.
+    //
+    // Done in the interceptor rather than at each call site because
+    // there are dozens of them and the ones that swallow the error are
+    // exactly the ones that would never be updated.
+    if (err.response?.status === 402 && typeof window !== "undefined") {
+      const detail = err.response?.data?.detail;
+      window.dispatchEvent(new CustomEvent("vooda:edition-gated", {
+        detail: typeof detail === "string" && detail
+          ? detail
+          : "This feature is available in Vooda Enterprise.",
+      }));
+    }
     return Promise.reject(err);
   }
 );

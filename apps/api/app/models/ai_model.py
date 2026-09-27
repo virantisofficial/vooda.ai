@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Virantis
 # SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
-from sqlalchemy import Column, String, Boolean, Float, Integer, Text, UniqueConstraint
+from sqlalchemy import (Column, String, Boolean, DateTime, Float, Integer, Text,
+                        UniqueConstraint)
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 
 from apps.api.app.core.database import Base
@@ -18,6 +19,15 @@ class AIModelConfig(Base, UUIDMixin, TimestampMixin, TenantMixin):
     model_id = Column(String(255), nullable=False)          # claude-sonnet-4-20250514, gpt-4o, phi3.5, etc.
     api_key_encrypted = Column(String(1024), nullable=True) # Encrypted API key (never returned to frontend; optional for local models)
     endpoint_url = Column(String(1024), nullable=True)      # Custom endpoint for self-hosted / Azure / Bedrock / Ollama
+    #: When the key above was last set.
+    #:
+    #: What Vooda learned by asking a provider was learned about ONE
+    #: credential. After the key changes those answers describe a key
+    #: that is no longer in use, and treating them as current let a
+    #: probe report "the key works for other models" about a key that
+    #: worked for none — pointing the reader at billing for a model
+    #: when the credential was the problem.
+    api_key_set_at = Column(DateTime(timezone=True), nullable=True)
     tasks = Column(JSONB, default=list)                     # ["triage"] — the task keyword the worker dispatches on. Column is kept flexible so additional task types can be added without a migration if product scope grows.
     is_active = Column(Boolean, default=True)
 

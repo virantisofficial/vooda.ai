@@ -120,7 +120,25 @@ def test_every_outcome_maps_to_a_real_state():
     for o in outcomes:
         for retried in (True, False):
             st = _verdict_for(o, {"latency_ms": 1000}, retried).state
-            assert st in {READY, NEEDS_SETUP, UNUSABLE}, (o, retried, st)
+            assert st in {READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE}, (o, retried, st)
+
+
+def test_our_own_parser_failing_does_not_disqualify_a_model():
+    """UNUSABLE is reserved for what the provider told us.
+
+    A 404, a refusal, a reply still cut short at a larger budget — those
+    are the provider's answers. A reply Vooda simply could not read is
+    our reader coming up empty, and rejecting a model on that basis
+    rules it out on our own limitation. It stays unresolved.
+    """
+    res = _verdict_for("unparseable", {"latency_ms": 1000}, retried_ok=False)
+    assert res.state == UNVERIFIED, res.state
+    assert res.remedy, "an unresolved verdict has to say what to do next"
+
+    # What the provider did state still disqualifies.
+    cut_short = _verdict_for("empty_truncated", {"latency_ms": 1000},
+                             retried_ok=False)
+    assert cut_short.state == UNUSABLE, cut_short.state
 
 
 def test_a_fixable_state_always_carries_a_remedy():
@@ -222,3 +240,28 @@ def test_a_probe_that_raises_does_not_lose_the_rest_of_the_batch():
     import inspect
     from apps.api.app.routers import ai_models as R
     assert "return_exceptions=True" in inspect.getsource(R.probe_models)
+
+
+def test_an_auth_failure_is_flagged_not_judged():
+    """Alone, a 401 is ambiguous: the key may be wrong, or fine but
+    lacking access to this model. Only a caller that can see whether
+    anything else answered can tell the two apart."""
+    from services.ai_triage.model_probe import _verdict_for  # noqa: F401
+    import inspect
+    from services.ai_triage import model_probe as mp
+    src = inspect.getsource(mp.probe_model)
+    assert '"auth_failure": True' in src
+    assert 'UNVERIFIED' in src
+
+
+def test_the_caller_decides_what_a_rejection_means():
+    """Measured: one key produced 165 working models and 267
+    rejections. Calling all 267 "the provider rejected the key" pointed
+    the reader at a credential that was demonstrably working."""
+    import inspect
+    from apps.api.app.routers import ai_models as R
+    src = inspect.getsource(R.probe_models)
+    assert "key_works" in src
+    assert "Not available on this account." in src
+    # Both halves must be consulted: this batch, and what is on record.
+    assert "ok_now" in src and "ok_before" in src

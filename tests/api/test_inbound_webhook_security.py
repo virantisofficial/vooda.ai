@@ -14,6 +14,26 @@ import json
 
 import pytest
 
+from apps.api.app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _configurable_webhooks():
+    """Configure webhooks as Enterprise; test the receiver as itself.
+
+    Configuring an inbound webhook is gated — Community triggers its
+    own scans rather than having Vooda listen for pushes. These tests
+    are about whether the RECEIVER can be forged, which has to hold in
+    every edition, and they reach it by setting a secret through the
+    gated config endpoint. Without this the setup calls 402 and the
+    signature checks never run, which would retire five security tests
+    over a licensing change.
+    """
+    previous = settings.EDITION
+    settings.EDITION = "enterprise"
+    yield
+    settings.EDITION = previous
+
 
 async def _set_secret(client, jwt, provider, secret, enable=None):
     """Set the signing secret, and enable the webhook when one is given.

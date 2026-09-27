@@ -5,6 +5,8 @@
 AI Model Configuration API — CRUD + test connection + task routing.
 """
 
+import re
+from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
 
@@ -18,6 +20,7 @@ from apps.api.app.core.database import get_db
 from apps.api.app.core.security import get_current_user
 from apps.api.app.models.user import User
 from apps.api.app.models.ai_model import AIModelConfig, AIModelProbeResult
+from packages.common.encryption import encrypt_value
 
 router = APIRouter()
 
@@ -254,7 +257,12 @@ async def create_model(
         name=body.name,
         provider=body.provider,
         model_id=body.model_id,
-        api_key_encrypted=body.api_key,  # In production, encrypt this
+        # Encrypted at rest. The column has always been named for it;
+        # until now it held the key verbatim, so a database backup, a
+        # read replica or a support dump carried the customer's
+        # provider credential in the clear.
+        api_key_encrypted=encrypt_value(body.api_key) if body.api_key else body.api_key,
+        api_key_set_at=datetime.now(timezone.utc) if body.api_key else None,
         endpoint_url=body.endpoint_url,
         tasks=body.tasks,
         max_tokens=body.max_tokens,
@@ -460,6 +468,21 @@ class ProbeResponse(BaseModel):
     results: list[ProbeVerdict] = []
 
 
+def _stored_key(stored: str | None) -> str:
+    """The provider key held for a config, in the clear, for one call.
+
+    Refuses rather than returning something unusable: handing a
+    provider an unreadable value would come back as 401 on every model
+    and read as a revoked key, sending an operator to rotate a
+    credential that was fine.
+    """
+    from packages.common.encryption import CredentialUnreadable, decrypt_credential
+    try:
+        return decrypt_credential(stored or "")
+    except CredentialUnreadable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _accuracy_from_row(row) -> Optional[AccuracyVerdict]:
     if row is None or row.accuracy_total is None:
         return None
@@ -536,6 +559,7 @@ async def probe_models(
     endpoint_url = body.endpoint_url
     extra_payload = None
 
+    cfg = None
     if body.model_config_id:
         cfg = (await db.execute(
             select(AIModelConfig).where(
@@ -546,7 +570,7 @@ async def probe_models(
         if not cfg:
             raise HTTPException(status_code=404, detail="Model config not found")
         provider = cfg.provider
-        api_key = cfg.api_key_encrypted
+        api_key = _stored_key(cfg.api_key_encrypted)
         endpoint_url = cfg.endpoint_url
         extra_payload = cfg.provider_config or None
 
@@ -573,6 +597,42 @@ async def probe_models(
     probed = await asyncio.gather(*(one(m) for m in model_ids),
                                   return_exceptions=True)
 
+    # A rejected request means different things depending on whether
+    # anything else worked.
+    #
+    # If no model answers, the key is the problem and every verdict is
+    # "we could not check". If others answered on the same key, the key
+    # is fine and these particular models are not available to this
+    # account — which an aggregator also reports as 401. Measured: one
+    # key produced 165 working models and 267 rejections, and calling
+    # all 267 "the provider rejected the key" pointed the reader at a
+    # credential that was demonstrably working.
+    ok_now = any(not isinstance(i, Exception) and i[1].state in ("ready", "needs_setup")
+                 for i in probed)
+    # Only what this key proved.
+    #
+    # A stored result is evidence about the credential that produced
+    # it. Counting them all meant a replaced key inherited the previous
+    # one's reputation: a key that authenticated nothing was reported
+    # as working "for other models", and every refusal was dressed up
+    # as a billing or availability problem on the model.
+    #
+    # A caller who passed a key inline rather than naming a stored
+    # config gets nothing from history either — those results belong to
+    # whatever is saved, which is not what is being tested.
+    ok_before = False
+    if cfg is not None:
+        prior = select(AIModelProbeResult.id).where(
+            AIModelProbeResult.tenant_id == user.tenant_id,
+            AIModelProbeResult.provider == provider,
+            AIModelProbeResult.state.in_(("ready", "needs_setup")),
+        )
+        if cfg.api_key_set_at is not None:
+            prior = prior.where(AIModelProbeResult.updated_at >= cfg.api_key_set_at)
+        ok_before = bool(
+            (await db.execute(prior.limit(1))).scalar_one_or_none())
+    key_works = ok_now or ok_before
+
     results: list[ProbeVerdict] = []
     for item in probed:
         if isinstance(item, Exception):
@@ -581,6 +641,14 @@ async def probe_models(
             # looking unchecked after the customer asked for a check.
             continue
         model_id, r = item
+        if key_works and (r.detail or {}).get("auth_failure"):
+            # The key answers elsewhere, so this is about the model's
+            # availability — a fact the customer can act on, and one
+            # that should not read as a broken credential.
+            r.state = "unusable"
+            r.headline = "Not available on this account."
+            r.remedy = ("The key works for other models. This one may need to be "
+                        "enabled, funded, or may require your own provider key.")
         now = datetime.now(timezone.utc).isoformat()
         await _store_probe(db, user.tenant_id, provider, r, now,
                            suitability=(body.suitability or {}).get(model_id))
@@ -635,7 +703,7 @@ async def check_model_accuracy(
         if not cfg:
             raise HTTPException(status_code=404, detail="Model config not found")
         provider = cfg.provider
-        api_key = cfg.api_key_encrypted
+        api_key = _stored_key(cfg.api_key_encrypted)
         endpoint_url = cfg.endpoint_url
         extra_payload = cfg.provider_config or None
 
@@ -755,7 +823,9 @@ async def update_model(
     if "api_key" in update_data:
         api_key = update_data.pop("api_key")
         if api_key:
-            model.api_key_encrypted = api_key  # In production, encrypt
+            model.api_key_encrypted = encrypt_value(api_key)
+            # Everything learned about the old key stops counting here.
+            model.api_key_set_at = datetime.now(timezone.utc)
             key_replaced = True
 
     for field, value in update_data.items():
@@ -834,7 +904,7 @@ async def test_model_connection(
             raise HTTPException(status_code=404, detail="Model not found")
         provider = model.provider
         model_id = model.model_id
-        api_key = model.api_key_encrypted
+        api_key = _stored_key(model.api_key_encrypted)
         endpoint_url = model.endpoint_url
 
     # Local providers (Ollama, vLLM, etc.) don't need an API key
@@ -1064,7 +1134,7 @@ async def discover_available_models(
         # about a key that was fine.
         provider = (stored.provider or provider or "").lower()
         if not api_key:
-            api_key = stored.api_key_encrypted or ""
+            api_key = _stored_key(stored.api_key_encrypted) or ""
         if not endpoint_url:
             endpoint_url = stored.endpoint_url
 
@@ -1112,6 +1182,30 @@ async def discover_available_models(
             return DiscoverModelsResponse(status="error", message=f"Unknown provider: {provider}", provider=provider)
     except Exception as e:
         return DiscoverModelsResponse(status="error", message=f"Failed to discover models: {str(e)[:200]}", provider=provider)
+
+
+def _plain_description(text: str) -> str:
+    """Provider prose, with its markup taken out.
+
+    Discovery used to store "Owned by openrouter" and nobody noticed
+    what the real field held. Passing the provider's own description
+    through put "[Kimi K3](https://openrouter.ai/moonshotai/kimi-k3)"
+    on seventeen model cards, where the link cannot be clicked and the
+    brackets read as a typo.
+
+    The URL goes rather than the link text: the words are what tell a
+    reader what the model is, and a URL full of vendor and product
+    names is also noise to the suitability classifier, which reads this
+    same string.
+    """
+    if not text:
+        return ""
+    # [label](url) -> label
+    out = re.sub(r"\[([^\]]*)\]\((?:[^)]*)\)", r"\1", text)
+    # Bare URLs, and the backticks around inline code.
+    out = re.sub(r"https?://\S+", "", out)
+    out = out.replace("`", "")
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def _apply_suitability(model: "DiscoveredModel", **meta) -> "DiscoveredModel":
@@ -1355,7 +1449,16 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
     """Discover models on a local/self-hosted endpoint (Ollama, vLLM, LM Studio, etc.)."""
     import httpx
 
+    from services.ai_triage.provider import openai_compatible_root
+
     base = endpoint_url.rstrip("/")
+    # The same rule the completion path uses. An operator pastes the
+    # base URL their provider documents, which ends in /v1, and asking
+    # for "{base}/v1/models" made that ".../v1/v1/models" — a 404 on a
+    # URL copied from the provider's own page. This fell through to the
+    # bare "/models" attempt below, which answered, so discovery looked
+    # like it worked while quietly taking a lesser path.
+    root = openai_compatible_root(base)
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1406,17 +1509,32 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
 
         # 2. Try OpenAI-compatible /v1/models
         try:
-            r = await client.get(f"{base}/v1/models", headers=headers)
+            r = await client.get(f"{root}/v1/models", headers=headers)
             if r.status_code == 200:
                 data = r.json()
                 models = []
                 for m in data.get("data", []):
                     mid = m.get("id", "")
+                    arch = m.get("architecture") or {}
+                    top = m.get("top_provider") or {}
                     models.append(_apply_suitability(DiscoveredModel(
                         model_id=mid,
-                        name=mid,
-                        description=f"Owned by {m.get('owned_by', 'local')}",
-                    ), identifier=mid, description=m.get("description", "")))
+                        name=m.get("name") or mid,
+                        description=(_plain_description(m.get("description"))
+                                     or f"Owned by {m.get('owned_by', 'local')}"),
+                        context_window=_int_or_none(m.get("context_length")),
+                        max_output=_int_or_none(top.get("max_completion_tokens")),
+                    ), identifier=mid,
+                        description=_plain_description(m.get("description", "")),
+                        display_name=m.get("name", "") or "",
+                        # What the provider DECLARED, which outranks
+                        # anything read out of prose. A model that takes
+                        # images and answers in text is a triage model;
+                        # judged on its description alone it reads as an
+                        # image model and gets struck off.
+                        output_modalities=arch.get("output_modalities"),
+                        supported_parameters=m.get("supported_parameters"),
+                    ))
                 if models:
                     return DiscoverModelsResponse(
                         status="success",
@@ -1434,9 +1552,30 @@ async def _discover_local(endpoint_url: str, api_key: str, provider: str) -> Dis
                 data = r.json()
                 items = data.get("data", data.get("models", []))
                 if isinstance(items, list) and items:
-                    models = [DiscoveredModel(
-                        model_id=m.get("id", m.get("name", str(i))),
-                        name=m.get("id", m.get("name", f"model-{i}")),
+                    # Classified, like every other discovery path. This
+                    # one built its rows bare, so whatever reached it
+                    # was returned as a candidate whatever it was — an
+                    # embedding endpoint, a reranker, an asynchronous
+                    # batch variant that cannot answer a request at all.
+                    # A fallback that silently drops the filter is worse
+                    # than a fallback that fails.
+                    models = [_apply_suitability(
+                        DiscoveredModel(
+                            model_id=m.get("id", m.get("name", str(i))),
+                            name=m.get("id", m.get("name", f"model-{i}")),
+                            description=_plain_description(m.get("description", "")),
+                            context_window=_int_or_none(m.get("context_length")),
+                        ),
+                        identifier=m.get("id", m.get("name", "")),
+                        description=_plain_description(m.get("description", "")),
+                        display_name=m.get("name", "") or "",
+                        # Same declared signals as the versioned route.
+                        # Reading them on one route and not the other is
+                        # how a model ends up usable or struck off
+                        # depending on which URL a server happens to
+                        # answer on.
+                        output_modalities=(m.get("architecture") or {}).get("output_modalities"),
+                        supported_parameters=m.get("supported_parameters"),
                     ) for i, m in enumerate(items) if isinstance(m, dict)]
                     return DiscoverModelsResponse(
                         status="success",

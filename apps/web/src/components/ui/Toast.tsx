@@ -36,6 +36,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Edition refusals, raised by the axios interceptor.
+  //
+  // The interceptor cannot call a hook, so it raises an event and this
+  // listens. Shown longer than a normal toast: it explains a product
+  // boundary rather than reporting a transient failure, and it is the
+  // only place the customer is told why the thing they clicked did
+  // nothing.
+  useEffect(() => {
+    const onGated = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      addToast("info", "Vooda Enterprise", detail, 9000);
+    };
+    window.addEventListener("vooda:edition-gated", onGated);
+    return () => window.removeEventListener("vooda:edition-gated", onGated);
+  }, [addToast]);
+
   return (
     <ToastContext.Provider value={{ toast: addToast }}>
       {children}

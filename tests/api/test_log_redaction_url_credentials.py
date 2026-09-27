@@ -1,5 +1,11 @@
 """A credential in a URL must not reach the log file.
 
+The fixture below is invented. It is shaped like the real thing
+because the redactor is being asked to handle a shape, but nothing
+here is or was a working credential — a regression test does not need
+a live key to prove a redactor works, and a repository is the wrong
+place to keep one.
+
 Every other rule in the redactor matches a credential by its SHAPE, so
 a key in a format nobody anticipated goes straight to disk. Measured:
 66 log lines from a single session carried a live Google API key in

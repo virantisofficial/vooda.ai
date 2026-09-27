@@ -1144,6 +1144,26 @@ async def create_integration(
     if provider not in PROVIDER_SCHEMAS:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
+    # Ticketing and notification channels are Enterprise.
+    #
+    # Checked here rather than on the mount because this one router
+    # creates every kind of integration, and only some providers move.
+    # The feature key drives the message, so the refusal always names
+    # the thing the badge names.
+    from apps.api.app.core.edition import (
+        ENTERPRISE_FEATURES, provider_enabled, provider_feature,
+    )
+    if not provider_enabled(provider):
+        label = ENTERPRISE_FEATURES.get(provider_feature(provider), "This feature")
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"{label} is available in Vooda Enterprise. Scanning, "
+                "detection, live credential verification and AI triage "
+                "are included in Community. See https://vooda.ai/"
+            ),
+        )
+
     # Validate scoping: BU-scoped needs business_unit_id, project-scoped needs repository_id
     scope = body.scope_level or "organization"
     if scope == "business_unit" and not body.business_unit_id:

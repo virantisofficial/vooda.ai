@@ -12,13 +12,14 @@ import api, {
   getIntegrations, deleteIntegration, updateIntegration,
   getAIModels, createAIModel, updateAIModel, deleteAIModel, testAIModel, getAITaskRouting,
   getAIEngineSettings, updateAIEngineSettings, discoverModels, getAutoConfig,
+  getEdition,
   probeModels, getProbeResults, checkModelAccuracy,
   getNotificationRules, updateNotificationRules,
   getProviderSchema, testIntegrationConnection, createIntegration, getBusinessUnits, getRepositories,
 } from "@/lib/api";
 import SearchableSelect from "@/components/ui/SearchableSelect";
 import {
-  READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE,
+  READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE, readinessHint,
   readinessLabel, readinessTone, readinessPanelTone,
   needsExplanation, accuracyTone, type ProbeVerdict,
 } from "@/lib/modelReadiness";
@@ -431,6 +432,9 @@ function AIModelsFullSection() {
   const [showProbeDetail, setShowProbeDetail] = useState(false);
   const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
   const [showOtherModality, setShowOtherModality] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
+  const [showNeedsSetup, setShowNeedsSetup] = useState(false);
+  const [showUnresolved, setShowUnresolved] = useState(false);
   const [scoringModel, setScoringModel] = useState<string | null>(null);
   // A ref, not state: the loop reads it between requests and must see
   // the current value, not the one captured when the run began.
@@ -441,6 +445,7 @@ function AIModelsFullSection() {
   // a different model, we auto-recompute backend defaults so stale per-model
   // values (max_tokens, context_window, etc.) don't leak across models.
   const [originalModelId, setOriginalModelId] = useState<string>("");
+  const [originalName, setOriginalName] = useState<string>("");
   const [defaultsRecomputedFor, setDefaultsRecomputedFor] = useState<string | null>(null);
 
   const loadModels = () => { getAIModels().then((r) => setModels(r.data || [])).catch(() => {}).finally(() => setLoading(false)); };
@@ -481,6 +486,38 @@ function AIModelsFullSection() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.model_id, editingId, originalModelId]);
+
+  /** True while the form would change which model does the triaging.
+   *
+   *  Clicking a card only edits the form; the swap happens on save.
+   *  Someone who opened this screen to replace an expired key, and
+   *  clicked a card along the way, saved a different triage model
+   *  without being told — the button says "Update Provider" either
+   *  way, and the display name gets rewritten to the new model id, so
+   *  afterwards nothing on the screen looks out of place.
+   */
+  const modelWouldChange = !!(editingId && form.model_id && originalModelId
+                              && form.model_id !== originalModelId);
+
+  /** Put the saved model back, label and all. */
+  const keepSavedModel = () => {
+    setForm((f) => ({ ...f, model_id: originalModelId, name: originalName || f.name }));
+    setDefaultsRecomputedFor(null);
+  };
+
+  const renderModelChangeNotice = (className = "") => (
+    modelWouldChange ? (
+      <p className={`text-[11px] text-amber-400 ${className}`}>
+        Saving switches triage from{" "}
+        <span className="font-mono text-amber-300">{originalModelId}</span> to{" "}
+        <span className="font-mono text-amber-300">{form.model_id}</span>.
+        <button type="button" onClick={keepSavedModel}
+          className="ml-1.5 underline underline-offset-2 hover:text-amber-200 transition-colors">
+          Keep {originalModelId}
+        </button>
+      </p>
+    ) : null
+  );
 
   const providerFor = (p: string) => AI_PROVIDERS.find((pr) => pr.value === p);
 
@@ -525,6 +562,41 @@ function AIModelsFullSection() {
   // can see it rather than wondering where it went.
   const selectedIsUnsuitable = unsuitableModels.some((m) => m.model_id === form.model_id);
 
+  // Three shelves out of what is left, best first. Ready is what you
+  // can pick right now; Needs Setup is a third of the list and one
+  // click from working, so it gets its own section rather than being
+  // filed with the failures; everything else is unresolved — either
+  // never asked, or asked and the provider gave nothing back.
+  const stateOf = (m: any) => probeResults[m.model_id]?.state;
+
+  // Name and identifier, not the description — searching prose across
+  // several hundred models matches almost everything and ranks nothing.
+  const modelQ = modelQuery.trim().toLowerCase();
+  const searching = modelQ.length > 0;
+  const matchesQuery = (m: any) =>
+    !searching
+    || String(m.model_id || "").toLowerCase().includes(modelQ)
+    || String(m.name || "").toLowerCase().includes(modelQ);
+
+  const readyModels = candidateModels.filter((m) => stateOf(m) === READY && matchesQuery(m));
+  const needsSetupModels = candidateModels.filter((m) => stateOf(m) === NEEDS_SETUP && matchesQuery(m));
+  const unresolvedModels = candidateModels.filter(
+    (m) => stateOf(m) !== READY && stateOf(m) !== NEEDS_SETUP && matchesQuery(m));
+  const shownUnsuitable = unsuitableModels.filter(matchesQuery);
+  const matchCount = readyModels.length + needsSetupModels.length
+    + unresolvedModels.length + shownUnsuitable.length;
+
+  // Before anything is checked every model is unresolved, and grouping
+  // would open on an empty shelf. A flat list and the Check All prompt
+  // is the honest first screen.
+  // Judged on the whole inventory, never on what a search left behind:
+  // a query matching nothing Ready must not silently drop the screen
+  // back to an ungrouped list of everything.
+  const grouped = candidateModels.some(
+    (m) => stateOf(m) === READY || stateOf(m) === NEEDS_SETUP);
+  const holdsSelection = (list: any[]) =>
+    !!form.model_id && list.some((m) => m.model_id === form.model_id);
+
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
 
   // Selecting a model always re-checks it.
@@ -567,6 +639,7 @@ function AIModelsFullSection() {
    *  actually considering. */
   const runAccuracyCheck = async (modelId: string) => {
     if (!modelId) return;
+    const startedAt = Date.now();
     setScoringModel(modelId);
     try {
       const payload: any = {
@@ -580,6 +653,23 @@ function AIModelsFullSection() {
       const v: ProbeVerdict | undefined = r.data;
       if (v) setProbeResults((prev) => ({ ...prev, [modelId]: { ...prev[modelId], ...v } }));
     } catch (e: any) {
+      // A connection that drops is not a run that failed. The score is
+      // written server-side as soon as it finishes, so before reporting
+      // failure, go and look: a result stored since this run began is
+      // this run's, and "couldn't score" over it would be a lie.
+      if (!e.response) {
+        try {
+          const stored = await getProbeResults(form.provider);
+          const mine = (stored.data || []).find((v: any) => v.model_id === modelId);
+          const at = mine?.accuracy?.checked_at ? Date.parse(mine.accuracy.checked_at) : 0;
+          if (mine?.accuracy && at >= startedAt) {
+            setProbeResults((prev) => ({ ...prev, [modelId]: { ...prev[modelId], ...mine } }));
+            return;
+          }
+        } catch {
+          // Fall through to the failure verdict below.
+        }
+      }
       setProbeResults((prev) => ({
         ...prev,
         [modelId]: {
@@ -593,6 +683,46 @@ function AIModelsFullSection() {
     } finally {
       setScoringModel(null);
     }
+  };
+
+  /** A collapsed shelf of models, with the count and the reason on the
+   *  header. Always opens when it holds the current selection: a model
+   *  that disappears on being picked is the complaint this grouping
+   *  exists to answer. */
+  const renderModelSection = (
+    label: string, models: any[], open: boolean,
+    setOpen: (v: boolean) => void, hint: string, action?: React.ReactNode,
+  ) => {
+    if (models.length === 0) return null;
+    const mine = holdsSelection(models);
+    // A match hidden inside a collapsed section reads as "no results",
+    // which is the one answer a search must never give wrongly.
+    const shown = open || mine || searching;
+    return (
+      <div className="mt-2.5">
+        <div className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
+          <button type="button" onClick={() => setOpen(!open)}
+            className="flex items-center gap-2 min-w-0 flex-1 text-left">
+            <span className="text-[11px] text-slate-400 flex items-center gap-1.5 shrink-0">
+              <svg className={`w-3 h-3 transition-transform ${shown ? "rotate-90" : ""}`}
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              {label} ({models.length})
+            </span>
+            <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
+              {mine ? "Includes your current choice" : hint}
+            </span>
+          </button>
+          {action}
+        </div>
+        {shown && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
+            {models.map(renderModelCard)}
+          </div>
+        )}
+      </div>
+    );
   };
 
   /** Settings the provider stated outright, applied on selection.
@@ -622,7 +752,8 @@ function AIModelsFullSection() {
                              never-checked ones blank meant the only
                              cards saying "Not checked" were the ones
                              Vooda had checked and failed to reach. */
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id]?.state)}`}>
+                          <span title={readinessHint(probeResults[m.model_id]?.state)}
+                            className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id]?.state)}`}>
                             {readinessLabel(probeResults[m.model_id]?.state)}
                           </span>
                         )}
@@ -805,6 +936,37 @@ function AIModelsFullSection() {
     }
   };
 
+  /** Probe a set of models in chunks, with progress and a way out.
+   *
+   *  Chunks, not one at a time. One request per model was simple and
+   *  took forty minutes across a provider listing hundreds — not a
+   *  button anyone presses twice. The server probes a chunk
+   *  concurrently under its own ceiling, so the wait drops roughly by
+   *  that factor while the provider still sees a sane request rate.
+   *
+   *  Chunked rather than one request for everything, so the grid keeps
+   *  filling in and the run stays interruptible: a long wait with no
+   *  progress and no way out is one a customer abandons. Every answer
+   *  already received is kept. The chunk also stays under the server's
+   *  own batch ceiling, which a whole section sent at once would not.
+   */
+  const probeInChunks = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    verifyAllCancelled.current = false;
+    setVerifyingAll({ done: 0, total: ids.length });
+    try {
+      const CHUNK = 8;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        if (verifyAllCancelled.current) break;
+        await probeMany(ids.slice(i, i + CHUNK));
+        setVerifyingAll({ done: Math.min(i + CHUNK, ids.length), total: ids.length });
+      }
+    } finally {
+      setVerifyingAll(null);
+      verifyAllCancelled.current = false;
+    }
+  };
+
   const verifyAll = async () => {
     // Candidates only. Probing a music model costs a request and
     // proves what the provider already told us — one returned 429
@@ -819,32 +981,7 @@ function AIModelsFullSection() {
         return Date.now() - new Date(v.probed_at).getTime() >= RECHECK_AFTER_MS;
       })
       .map((m) => m.model_id).filter(Boolean);
-    if (ids.length === 0) return;
-    verifyAllCancelled.current = false;
-    setVerifyingAll({ done: 0, total: ids.length });
-    try {
-      // Chunks, not one at a time.
-      //
-      // One request per model was simple and took forty minutes across
-      // a provider listing hundreds — not a button anyone presses
-      // twice. The server probes a chunk concurrently under its own
-      // ceiling, so the wait drops roughly by that factor while the
-      // provider still sees a sane request rate.
-      //
-      // Chunked rather than one request for everything, so the grid
-      // keeps filling in and the run stays interruptible: a long wait
-      // with no progress and no way out is one a customer abandons.
-      // Every answer already received is kept.
-      const CHUNK = 8;
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        if (verifyAllCancelled.current) break;
-        await probeMany(ids.slice(i, i + CHUNK));
-        setVerifyingAll({ done: Math.min(i + CHUNK, ids.length), total: ids.length });
-      }
-    } finally {
-      setVerifyingAll(null);
-      verifyAllCancelled.current = false;
-    }
+    await probeInChunks(ids);
   };
 
   /** Rough wall-clock for a full run, from measured probe latency. */
@@ -882,6 +1019,7 @@ function AIModelsFullSection() {
     setShowAdvanced(false);
     setSelectedModelParam(null);
     setOriginalModelId("");
+    setOriginalName("");
     setDefaultsRecomputedFor(null);
     setProviderConfigError(null);
   };
@@ -889,6 +1027,7 @@ function AIModelsFullSection() {
   const handleEditModel = (model: any) => {
     setEditingId(model.id);
     setOriginalModelId(model.model_id || "");
+    setOriginalName(model.name || "");
     setDefaultsRecomputedFor(null);
     setForm({
       name: model.name || "",
@@ -1420,8 +1559,32 @@ function AIModelsFullSection() {
                 {/* Header: what to do on the left, the one action on
                     the right. A single row, so the grid below starts
                     from an even baseline. */}
-                <div className="flex items-center justify-between gap-3 mb-1 min-h-[28px]">
-                  <label className="text-sm text-slate-300">Choose a Model for AI Triage</label>
+                {/* Wraps rather than squeezing. In a narrow window the
+                    three items shared one row and the search box gave
+                    up its width first, collapsing to about sixty pixels
+                    — wide enough to show "Fi" of its own placeholder. */}
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-1 min-h-[28px]">
+                  <label className="text-sm text-slate-300 shrink-0">Choose a Model for AI Triage</label>
+                  {/* Grouping shortens the list; it does not help someone
+                      who already knows the name they want. Several hundred
+                      cards is a scroll either way. */}
+                  <div className="relative flex-1 min-w-[150px] max-w-[220px] ml-auto">
+                    <svg className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+                    </svg>
+                    <input type="text" value={modelQuery}
+                      onChange={(e) => setModelQuery(e.target.value)}
+                      placeholder="Find a model by name"
+                      className="input-dark text-[11px] w-full pl-6 pr-6 py-1" />
+                    {searching && (
+                      <button type="button" onClick={() => setModelQuery("")}
+                        title="Clear"
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-300 transition-colors text-[13px] leading-none">
+                        ×
+                      </button>
+                    )}
+                  </div>
                   <button type="button"
                     onClick={() => { if (verifyingAll) { verifyAllCancelled.current = true; } else { verifyAll(); } }}
                     className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0">
@@ -1438,80 +1601,39 @@ function AIModelsFullSection() {
                     )}
                   </button>
                 </div>
-                {/* Two short sentences: what you are looking at, then
-                    what the button will do. These used to be one line
-                    with three unrelated counts run together. */}
-                {/* Inventory first, then the action. Both state what
-                    they cost and what they mean — an evaluator should
-                    not have to infer either from the controls. */}
-                <p className="text-[11px] text-slate-500 mb-0.5">
-                  {candidateModels.length} of {discoveredModels.length} models from this provider support
-                  text-based triage.
-                  {unsuitableModels.length > 0 && ` The remaining ${unsuitableModels.length} are listed below with the reason each was excluded.`}
+                {/* One line for the inventory, one for what the
+                    button costs. The badge definitions that used to
+                    follow are on the badges now: every reader paid for
+                    them, and only the reader looking at a badge needs
+                    them. */}
+                <p className="text-[11px] text-slate-500 mb-2">
+                  {candidateModels.length} of {discoveredModels.length} models support text triage
+                  {unsuitableModels.length > 0 && `; the other ${unsuitableModels.length} are listed below with reasons`}.
+                  <span className="text-slate-600">
+                    {" "}Checking sends one short request per model
+                    {estimatedCheckMinutes >= 2 ? `, about ${estimatedCheckMinutes} minutes for all ${candidateModels.length}` : ""}.
+                    {estimatedCheckMinutes >= 2 && " You can stop at any point; answers already received are kept."}
+                  </span>
                 </p>
-                {/* Both unmeasured badges get explained, because the
-                    one that needs an action is the one that reads like
-                    a verdict. */}
-                <p className="text-[10px] text-slate-600 mb-2">
-                  Checking submits one sample finding and validates the model&apos;s response — a single short request
-                  per model{estimatedCheckMinutes >= 2 ? `, roughly ${estimatedCheckMinutes} minutes for all ${candidateModels.length}` : ""}.
-                  {estimatedCheckMinutes >= 2 && " You can stop part way and keep the answers already received."} <span className="text-slate-500">Not Checked</span> means no request has been made.
-                  <span className="text-slate-500"> Couldn&apos;t Check</span> means the provider was unavailable, which
-                  is usually temporary — those are worth checking again.
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {candidateModels.map(renderModelCard)}
-                </div>
-
-                {/* Everything set aside, in one place, each card
-                    saying why. Collapsed, never removed: a provider's
-                    description can be wrong, and a model the customer's
-                    organisation has standardised on must be reachable
-                    rather than silently absent. */}
-                {unsuitableModels.length > 0 && (
-                  <div className="mt-2.5">
-                    <button type="button" onClick={() => setShowOtherModality((v) => !v)}
-                      className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
-                      <span className="flex items-center gap-2 text-xs text-slate-400 whitespace-nowrap">
-                        <svg className={`w-3 h-3 transition-transform ${(showOtherModality || selectedIsUnsuitable) ? "rotate-90" : ""}`}
-                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                        Can&apos;t Be Used for Triage ({unsuitableModels.length})
-                      </span>
-                      <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
-                        {selectedIsUnsuitable ? "Includes your current choice" : "Image, speech, music, unsupported"}
-                      </span>
-                    </button>
-                    {(showOtherModality || selectedIsUnsuitable) && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
-                        {unsuitableModels.map((m) => (
-                          <div key={m.model_id} className="relative">
-                            {renderModelCard(m)}
-                            {/* The reason, on the card. Answers "what is
-                                in here?" without anyone having to ask. */}
-                            <p className="text-[9px] text-slate-600 mt-0.5 ml-3 truncate">
-                              {unsuitableReason(m)}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* The selected model's verdict, sized to what it has
-                    to say. It carries four things — the verdict, the
-                    remedy, the button that applies the remedy, and the
-                    evidence behind it — but only the first is always
-                    present. As a fixed panel with a divider it spent
-                    the same height announcing "try again in a moment"
-                    as it did explaining a fix, so it now states itself
-                    on one line and grows only when asked. */}
+                {/* The selected model, pinned above the list.
+                    Carries the verdict, the accuracy line and both
+                    actions in one place, so a click on any card
+                    reports back where the reader already is rather
+                    than somewhere below several hundred cards. */}
                 {form.model_id && (
-                  <div className={`mt-2.5 rounded-lg border px-3 py-2 ${readinessPanelTone(selectedVerdict?.state)}`}>
+                  // Opaque base under the tone, or the cards it is
+                  // meant to float above read straight through it.
+                  <div className={`sticky top-2 z-20 mb-2 rounded-lg border px-3 py-2 bg-[#07091a] shadow-lg shadow-black/40 ${readinessPanelTone(selectedVerdict?.state)}`}>
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0 flex-1">
+                        {/* Which model this is about. Scrolled away
+                            from the card you clicked, a verdict with
+                            no subject is a verdict about nothing. */}
+                        <p className="text-[11px] text-slate-300 font-medium truncate">
+                          <span className="text-slate-600 font-normal">Selected: </span>
+                          {form.model_id}
+                        </p>
+                        {renderModelChangeNotice("mt-0.5")}
                         <p className="text-xs leading-relaxed">
                           <span className={
                             selectedVerdict?.state === READY ? "text-emerald-400"
@@ -1535,11 +1657,15 @@ function AIModelsFullSection() {
                             </span>
                           )}
                         </p>
-                        {/* How often it is RIGHT, which the badge above
-                            does not answer. Kept on its own line because
-                            a model can be Ready and still dismiss real
-                            secrets. */}
-                        {selectedVerdict?.accuracy && (
+                        {/* How often it is RIGHT, which the badge does
+                            not answer. On its own line because a model
+                            can be Ready and still dismiss real secrets. */}
+                        {scoringModel === form.model_id ? (
+                          <p className="text-[11px] mt-1 text-violet-300 flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin inline-block" />
+                            Scoring against sample findings whose answer is already known…
+                          </p>
+                        ) : selectedVerdict?.accuracy && (
                           <p className={`text-[11px] mt-1 ${accuracyTone(selectedVerdict.accuracy)}`}>
                             {selectedVerdict.accuracy.headline}
                           </p>
@@ -1552,13 +1678,13 @@ function AIModelsFullSection() {
                             Fix
                           </button>
                         )}
-                        {/* Opt-in, one model, twenty requests. Never
-                            part of Check All — across a provider's whole
-                            list that is hours and real money to answer a
+                        {/* Opt-in, one model at a time. Never part of
+                            Check All — across a provider's whole list
+                            that is hours and real money to answer a
                             question about models nobody will configure. */}
                         <button type="button" onClick={() => runAccuracyCheck(form.model_id)}
                           disabled={!!scoringModel || probingModel === form.model_id || !!verifyingAll}
-                          title="Score this model against findings whose answer is already known (about 20 short requests)"
+                          title="Score this model against findings whose answer is already known"
                           className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
                           {scoringModel === form.model_id ? "Scoring…" : "Accuracy Check"}
                         </button>
@@ -1577,6 +1703,93 @@ function AIModelsFullSection() {
                     )}
                   </div>
                 )}
+
+                {searching && matchCount === 0 && (
+                  <p className="text-[11px] text-slate-500 py-3">
+                    No model matches &ldquo;{modelQuery.trim()}&rdquo;.
+                    <button type="button" onClick={() => setModelQuery("")}
+                      className="ml-1.5 text-slate-400 hover:text-slate-200 underline underline-offset-2">
+                      Clear the search
+                    </button>
+                  </p>
+                )}
+                {searching && matchCount > 0 && (
+                  <p className="text-[11px] text-slate-500 mb-1.5">
+                    {matchCount} {matchCount === 1 ? "model matches" : "models match"} &ldquo;{modelQuery.trim()}&rdquo;,
+                    across every group.
+                  </p>
+                )}
+                {grouped ? (
+                  <>
+                    {readyModels.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {readyModels.map(renderModelCard)}
+                      </div>
+                    )}
+                    {readyModels.length === 0 && !searching && (
+                      <p className="text-[11px] text-slate-500 py-2">
+                        No model answered cleanly yet. The sections below hold the rest.
+                      </p>
+                    )}
+                    {renderModelSection(
+                      "Works After One Fix", needsSetupModels,
+                      showNeedsSetup, setShowNeedsSetup,
+                      "Usable once a setting is changed — the Fix button applies it")}
+                    {renderModelSection(
+                      "Not Checked or Unresolved", unresolvedModels,
+                      showUnresolved, setShowUnresolved,
+                      "Never asked, or the provider gave nothing back",
+                      <button type="button"
+                        onClick={(e) => { e.stopPropagation(); probeInChunks(unresolvedModels.map((m) => m.model_id).filter(Boolean)); }}
+                        disabled={!!verifyingAll || !!probingModel}
+                        title="Ask these again — an unresolved verdict is usually a temporary provider outage"
+                        className="btn-secondary text-[10px] px-2 py-0.5 shrink-0 disabled:opacity-50">
+                        Check Again
+                      </button>)}
+                  </>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {candidateModels.filter(matchesQuery).map(renderModelCard)}
+                  </div>
+                )}
+
+                {/* Everything set aside, in one place, each card
+                    saying why. Collapsed, never removed: a provider's
+                    description can be wrong, and a model the customer's
+                    organisation has standardised on must be reachable
+                    rather than silently absent. */}
+                {(searching ? shownUnsuitable.length > 0 : unsuitableModels.length > 0) && (
+                  <div className="mt-2.5">
+                    <button type="button" onClick={() => setShowOtherModality((v) => !v)}
+                      className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
+                      <span className="flex items-center gap-2 text-xs text-slate-400 whitespace-nowrap">
+                        <svg className={`w-3 h-3 transition-transform ${(showOtherModality || selectedIsUnsuitable || searching) ? "rotate-90" : ""}`}
+                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        Can&apos;t Be Used for Triage ({searching ? shownUnsuitable.length : unsuitableModels.length})
+                      </span>
+                      <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
+                        {selectedIsUnsuitable ? "Includes your current choice" : "Image, speech, music, unsupported"}
+                      </span>
+                    </button>
+                    {(showOtherModality || selectedIsUnsuitable || searching) && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
+                        {shownUnsuitable.map((m) => (
+                          <div key={m.model_id} className="relative">
+                            {renderModelCard(m)}
+                            {/* The reason, on the card. Answers "what is
+                                in here?" without anyone having to ask. */}
+                            <p className="text-[9px] text-slate-600 mt-0.5 ml-3 truncate">
+                              {unsuitableReason(m)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
               </div>
 
             </div>
@@ -1798,6 +2011,7 @@ function AIModelsFullSection() {
           )}
 
           {/* Actions */}
+          {renderModelChangeNotice("mb-2")}
           <div className="flex gap-3 items-center">
             {((editingId && form.model_id) || (keyValidated && form.model_id && form.name)) && (
               <button onClick={handleSave} disabled={saving || !form.model_id || !form.name} className="btn-primary">
@@ -2078,6 +2292,20 @@ function SSOSection() {
 function TicketingSection() {
   const { toast } = useToast();
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // Ticketing is Enterprise, whole.
+  //
+  // All three tiles stay on screen, greyed and badged, rather than
+  // being hidden: the row shows what the edition includes, not only
+  // what this install can click today.
+  const [gatedFeatures, setGatedFeatures] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setGatedFeatures(r.data?.gated || []))
+      .catch(() => setGatedFeatures([]));
+  }, []);
+  const ticketingGated = gatedFeatures.includes("ticketing");
+  const isGatedTool = (_provider: string) => ticketingGated;
   const [configs, setConfigs] = useState<Record<string, any>>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -2708,11 +2936,17 @@ function TicketingSection() {
           constrain it. */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {TICKETING_TOOLS.map((t) => {
-          const isExpanded = expandedId === t.provider;
+          const gated = isGatedTool(t.provider);
+          const isExpanded = gated ? false : expandedId === t.provider;
           const isConfigured = !!configs[t.provider];
 
           return (
-            <button key={t.provider} onClick={() => {
+            <button key={t.provider}
+              disabled={gated}
+              aria-disabled={gated}
+              title={gated ? `${t.name} is available in Vooda Enterprise` : undefined}
+              onClick={() => {
+              if (gated) return;
               setExpandedId(isExpanded ? null : t.provider);
               if (!isExpanded && isConfigured) {
                 // Pre-fill form with existing config. For jira this
@@ -2752,12 +2986,17 @@ function TicketingSection() {
               }
             }}
               className={`relative text-left rounded-xl border p-4 transition-all duration-200 ${
-                isExpanded ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
+                gated ? "border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
+                : isExpanded ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
                 : isConfigured ? "border-green-500/20 bg-white/[0.02] hover:border-green-500/30 hover:bg-white/[0.04]"
                 : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
               }`}>
               <div className="absolute top-3 right-3 pointer-events-none">
-                {isConfigured ? (
+                {gated ? (
+                  <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                    Enterprise
+                  </span>
+                ) : isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />
                     {t.provider === "jira" && jiraBoards.length > 1
@@ -2769,13 +3008,14 @@ function TicketingSection() {
                 )}
               </div>
               <div className="flex items-center gap-3 pr-16">
-                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${t.color} flex items-center justify-center text-white shrink-0`}>
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${gated ? "from-slate-700 to-slate-800" : t.color} flex items-center justify-center text-white shrink-0`}>
                   {t.icon}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white">{t.name}</p>
                   <p className="text-[10px] text-slate-600 mt-0.5">
-                    {t.provider === "jira" && jiraBoards.length > 0
+                    {gated ? t.description
+                      : t.provider === "jira" && jiraBoards.length > 0
                       ? `${jiraBoards.length} board${jiraBoards.length === 1 ? "" : "s"} configured`
                       : isConfigured ? t.description : "Click to configure"}
                   </p>
@@ -3350,6 +3590,22 @@ function WebhooksSection() {
   const [copied, setCopied] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
 
+  // Inbound webhooks are an Enterprise capability: Community triggers
+  // its own scans (UI, CLI, CI key, pre-push hook) rather than having
+  // Vooda listen for pushes on its behalf.
+  //
+  // All three providers stay on screen, greyed and badged, rather than
+  // hidden. A feature nobody can see is a feature nobody asks for —
+  // the tiles are there to show what the edition includes, not only
+  // what this install can click today.
+  const [gatedFeatures, setGatedFeatures] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setGatedFeatures(r.data?.gated || []))
+      .catch(() => setGatedFeatures([]));
+  }, []);
+  const webhooksGated = gatedFeatures.includes("webhooks");
+
   // Load webhook config on mount
   useEffect(() => {
     api.get("/webhooks/config").then((r) => {
@@ -3407,7 +3663,7 @@ function WebhooksSection() {
       {/* 3 tiles side by side */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {WEBHOOK_PROVIDERS.map((wh) => {
-          const isExpanded = expandedProvider === wh.provider;
+          const isExpanded = webhooksGated ? false : expandedProvider === wh.provider;
           const status = webhookStatus[wh.provider];
           const hasSecret = !!webhookSecrets[wh.provider];
           const isConfigured = hasSecret || status?.enabled;
@@ -3415,9 +3671,14 @@ function WebhooksSection() {
           return (
             <button
               key={wh.provider}
-              onClick={() => setExpandedProvider(isExpanded ? null : wh.provider)}
+              onClick={() => { if (!webhooksGated) setExpandedProvider(isExpanded ? null : wh.provider); }}
+              disabled={webhooksGated}
+              aria-disabled={webhooksGated}
+              title={webhooksGated ? `${wh.name} inbound webhooks are available in Vooda Enterprise` : undefined}
               className={`relative text-left rounded-xl border p-4 transition-all duration-200 ${
-                isExpanded
+                webhooksGated
+                  ? "border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
+                  : isExpanded
                   ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
                   : isConfigured
                     ? "border-green-500/20 bg-white/[0.02] hover:border-green-500/30 hover:bg-white/[0.04]"
@@ -3426,7 +3687,13 @@ function WebhooksSection() {
             >
               {/* Status badge — top right */}
               <div className="absolute top-3 right-3 pointer-events-none">
-                {isConfigured ? (
+                {webhooksGated ? (
+                  /* Replaces the connection status, which is not the
+                     fact that matters while the feature is gated. */
+                  <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                    Enterprise
+                  </span>
+                ) : isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />Active
                   </span>
@@ -3435,12 +3702,14 @@ function WebhooksSection() {
                 )}
               </div>
               <div className="flex items-center gap-3 pr-16">
-                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${wh.color} flex items-center justify-center text-white shrink-0`}>
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${webhooksGated ? "from-slate-700 to-slate-800" : wh.color} flex items-center justify-center text-white shrink-0`}>
                   {wh.icon}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white">{wh.name}</p>
-                  {status?.totalEvents ? (
+                  {webhooksGated ? (
+                    <p className="text-[10px] text-slate-600 mt-0.5">Scan on every push</p>
+                  ) : status?.totalEvents ? (
                     <p className="text-[10px] text-slate-500 mt-0.5">{status.totalEvents} events received</p>
                   ) : (
                     <p className="text-[10px] text-slate-600 mt-0.5">Click to configure</p>
@@ -3944,6 +4213,23 @@ function NotificationsFullSection() {
   // breadcrumb's identity.  Cleared on unmount / when showForm flips
   // (no Add button visible while the create form is open).
   const { setAction } = useContext(SectionActionContext);
+
+  // Notification channels are Enterprise. All five stay on screen,
+  // greyed and badged, so the section shows what the edition includes
+  // rather than an empty list.
+  //
+  // The in-app bell is untouched — it is written straight to the
+  // notifications table rather than through a channel, so the signal
+  // that says triage could not run still reaches the customer. A
+  // licence must not be able to silence that.
+  const [channelsGatedList, setChannelsGatedList] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setChannelsGatedList(r.data?.gated || []))
+      .catch(() => setChannelsGatedList([]));
+  }, []);
+  const channelsGated = channelsGatedList.includes("notifications");
+
   const [savedIntegrations, setSavedIntegrations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -4267,10 +4553,23 @@ function NotificationsFullSection() {
           {!selectedProvider ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {NOTIFICATION_CHANNELS.map((ch) => (
-                <button key={ch.provider} onClick={() => handleSelectProvider(ch.provider)}
-                  className="text-left p-4 rounded-xl border border-white/[0.06] hover:border-red-500/30 hover:bg-red-500/5 transition-all">
+                <button key={ch.provider}
+                  onClick={() => { if (!channelsGated) handleSelectProvider(ch.provider); }}
+                  disabled={channelsGated}
+                  aria-disabled={channelsGated}
+                  title={channelsGated ? `${ch.name} notifications are available in Vooda Enterprise` : undefined}
+                  className={`relative text-left p-4 rounded-xl border transition-all ${
+                    channelsGated
+                      ? "border-white/[0.06] opacity-60 cursor-not-allowed"
+                      : "border-white/[0.06] hover:border-red-500/30 hover:bg-red-500/5"
+                  }`}>
+                  {channelsGated && (
+                    <span className="absolute top-3 right-3 text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                      Enterprise
+                    </span>
+                  )}
                   <div className="flex items-center gap-3 mb-2">
-                    <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${ch.color} flex items-center justify-center text-white`}>
+                    <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${channelsGated ? "from-slate-700 to-slate-800" : ch.color} flex items-center justify-center text-white`}>
                       {ch.icon}
                     </div>
                     <span className="text-sm font-medium text-slate-200">{ch.name}</span>
@@ -4801,6 +5100,26 @@ function IntegrationsPageInner() {
     loadIntegrations();
   };
 
+  // The hub tiles say which categories the edition includes.
+  //
+  // A category key here is the same string as its feature key in
+  // ENTERPRISE_FEATURES, so a badge cannot describe a different thing
+  // from the endpoint's refusal.
+  //
+  // Only the categories below are stopped at the hub. Webhooks and
+  // Ticketing are gated just as firmly, but stay open and unbadged
+  // here so the providers inside can be browsed — each one carries
+  // its own ENTERPRISE badge, which is what advertises them. A
+  // product choice rather than a technical one: these two are worth
+  // looking through, this one is not.
+  const HUB_BLOCKED_CATEGORIES = new Set(["notifications"]);
+  const [hubGated, setHubGated] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setHubGated(r.data?.gated || []))
+      .catch(() => setHubGated([]));
+  }, []);
+
   const CATEGORIES: CategoryDef[] = [
     { key: "ai_models", label: "AI Provider", description: "LLM provider for false positive triage", color: "from-purple-500 to-indigo-500", count: AI_PROVIDERS.length,
       icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg> },
@@ -4880,17 +5199,23 @@ function IntegrationsPageInner() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {CATEGORIES.map((cat) => {
               const connected = 0;
+              const gated = HUB_BLOCKED_CATEGORIES.has(cat.key)
+                && hubGated.includes(cat.key);
               return (
                 <div
                   key={cat.key}
-                  onClick={() => openCategory(cat.key)}
-                  className="card card-hover cursor-pointer group relative overflow-hidden"
+                  onClick={() => { if (!gated) openCategory(cat.key); }}
+                  aria-disabled={gated}
+                  title={gated ? `${cat.label} is available in Vooda Enterprise` : undefined}
+                  className={`card group relative overflow-hidden ${
+                    gated ? "opacity-60 cursor-not-allowed" : "card-hover cursor-pointer"
+                  }`}
                 >
                   {/* Gradient accent line at top */}
-                  <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
+                  <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${gated ? "from-slate-700 to-slate-800" : cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
 
                   <div className="flex items-start gap-4 pt-2">
-                    <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
+                    <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${gated ? "from-slate-700 to-slate-800" : cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
                       {cat.icon}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -4898,6 +5223,11 @@ function IntegrationsPageInner() {
                       <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{cat.description}</p>
                       <div className="flex items-center gap-3 mt-3">
                         <span className="text-[10px] text-slate-600">{cat.count} available</span>
+                        {gated && (
+                          <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                            Enterprise
+                          </span>
+                        )}
                         {connected > 0 && (
                           <span className="flex items-center gap-1 text-[10px] text-green-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
@@ -4906,9 +5236,13 @@ function IntegrationsPageInner() {
                         )}
                       </div>
                     </div>
-                    <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
+                    {/* No arrow when the tile leads nowhere — an arrow
+                        promising navigation would be a lie. */}
+                    {!gated && (
+                      <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    )}
                   </div>
                 </div>
               );
