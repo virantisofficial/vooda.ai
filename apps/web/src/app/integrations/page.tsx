@@ -12,7 +12,7 @@ import api, {
   getIntegrations, deleteIntegration, updateIntegration,
   getAIModels, createAIModel, updateAIModel, deleteAIModel, testAIModel, getAITaskRouting,
   getAIEngineSettings, updateAIEngineSettings, discoverModels, getAutoConfig,
-  probeModels, getProbeResults,
+  probeModels, getProbeResults, checkModelAccuracy,
   getNotificationRules, updateNotificationRules,
   getProviderSchema, testIntegrationConnection, createIntegration, getBusinessUnits, getRepositories,
 } from "@/lib/api";
@@ -20,7 +20,7 @@ import SearchableSelect from "@/components/ui/SearchableSelect";
 import {
   READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE,
   readinessLabel, readinessTone, readinessPanelTone,
-  needsExplanation, type ProbeVerdict,
+  needsExplanation, accuracyTone, type ProbeVerdict,
 } from "@/lib/modelReadiness";
 import { useToast } from "@/components/ui/Toast";
 
@@ -431,6 +431,7 @@ function AIModelsFullSection() {
   const [showProbeDetail, setShowProbeDetail] = useState(false);
   const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
   const [showOtherModality, setShowOtherModality] = useState(false);
+  const [scoringModel, setScoringModel] = useState<string | null>(null);
   // A ref, not state: the loop reads it between requests and must see
   // the current value, not the one captured when the run began.
   const verifyAllCancelled = useRef(false);
@@ -526,6 +527,32 @@ function AIModelsFullSection() {
 
   const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
 
+  // Selecting a model checks it, without making browsing expensive.
+  //
+  // Picking a model should answer "will this work" immediately, but
+  // firing a request on every click means someone comparing ten models
+  // pays for ten. Three things make it safe: it waits until the
+  // selection settles, it skips a model that already has a recent
+  // verdict, and it stays silent on failure — a browsing probe should
+  // not throw a banner. Re-checking on demand is always one click away.
+  const RECHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+  useEffect(() => {
+    const id = form.model_id;
+    if (!id || !(keyValidated || editingId)) return;
+    if (verifyingAll || probingModel) return;
+
+    const existing = probeResults[id];
+    if (existing) {
+      const age = existing.probed_at
+        ? Date.now() - new Date(existing.probed_at).getTime()
+        : 0;
+      if (age < RECHECK_AFTER_MS) return;   // recent enough to trust
+    }
+    const t = setTimeout(() => { probeOne(id, { silent: true }); }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.model_id, keyValidated, editingId]);
+
   /** One model card. Shared so both groups look identical. */
   /** What a suggested fix would actually change, given the current
    *  form. A suggestion matching what is already set is not a fix, and
@@ -535,6 +562,41 @@ function AIModelsFullSection() {
     const cfg = v?.suggested_config || {};
     return Object.fromEntries(
       Object.entries(cfg).filter(([k, val]) => (form as any)[k] !== val));
+  };
+
+  /** Score the selected model against findings we know the answer to.
+   *  Twenty requests, so it is never run across a list — the probe
+   *  answers "does it work", this answers "is it right", and only the
+   *  second is worth spending twenty calls on for a model somebody is
+   *  actually considering. */
+  const runAccuracyCheck = async (modelId: string) => {
+    if (!modelId) return;
+    setScoringModel(modelId);
+    try {
+      const payload: any = {
+        provider: form.provider, model_id: modelId,
+        max_tokens: form.max_tokens, supports_json_mode: form.supports_json_mode,
+      };
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+      const r = await checkModelAccuracy(payload);
+      const v: ProbeVerdict | undefined = r.data;
+      if (v) setProbeResults((prev) => ({ ...prev, [modelId]: { ...prev[modelId], ...v } }));
+    } catch (e: any) {
+      setProbeResults((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...prev[modelId],
+          accuracy: {
+            total: 0, correct: 0, missed_secrets: 0, unanswered: 0,
+            headline: e.response?.data?.detail || "Couldn't score this model.",
+          },
+        } as ProbeVerdict,
+      }));
+    } finally {
+      setScoringModel(null);
+    }
   };
 
   /** Settings the provider stated outright, applied on selection.
@@ -706,7 +768,16 @@ function AIModelsFullSection() {
     // Candidates only. Probing a music model costs a request and
     // proves what the provider already told us — one returned 429
     // quota exceeded during testing.
-    const ids = candidateModels.map((m) => m.model_id).filter(Boolean);
+    // Skip what is already known. Re-running this re-probed every
+    // candidate including the ones checked minutes earlier, so a second
+    // run cost as much as the first for no new information.
+    const ids = candidateModels
+      .filter((m) => {
+        const v = probeResults[m.model_id];
+        if (!v?.probed_at) return true;
+        return Date.now() - new Date(v.probed_at).getTime() >= RECHECK_AFTER_MS;
+      })
+      .map((m) => m.model_id).filter(Boolean);
     if (ids.length === 0) return;
     verifyAllCancelled.current = false;
     setVerifyingAll({ done: 0, total: ids.length });
@@ -1417,6 +1488,15 @@ function AIModelsFullSection() {
                             </span>
                           )}
                         </p>
+                        {/* How often it is RIGHT, which the badge above
+                            does not answer. Kept on its own line because
+                            a model can be Ready and still dismiss real
+                            secrets. */}
+                        {selectedVerdict?.accuracy && (
+                          <p className={`text-[11px] mt-1 ${accuracyTone(selectedVerdict.accuracy)}`}>
+                            {selectedVerdict.accuracy.headline}
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         {selectedVerdict && Object.keys(pendingFix(selectedVerdict)).length > 0 && (
@@ -1425,6 +1505,16 @@ function AIModelsFullSection() {
                             Fix
                           </button>
                         )}
+                        {/* Opt-in, one model, twenty requests. Never
+                            part of Check All — across a provider's whole
+                            list that is hours and real money to answer a
+                            question about models nobody will configure. */}
+                        <button type="button" onClick={() => runAccuracyCheck(form.model_id)}
+                          disabled={!!scoringModel || probingModel === form.model_id || !!verifyingAll}
+                          title="Score this model against findings whose answer is already known (about 20 short requests)"
+                          className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
+                          {scoringModel === form.model_id ? "Scoring…" : "Accuracy Check"}
+                        </button>
                         <button type="button" onClick={() => probeOne(form.model_id)}
                           disabled={probingModel === form.model_id || !!verifyingAll}
                           className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">

@@ -18,6 +18,16 @@ export const UNUSABLE = "unusable";
 export type ReadinessState =
   | typeof READY | typeof NEEDS_SETUP | typeof UNVERIFIED | typeof UNUSABLE;
 
+export interface AccuracyVerdict {
+  total: number;
+  correct: number;
+  missed_secrets: number;
+  unanswered: number;
+  headline: string;
+  checked_at?: string | null;
+  cases?: Array<Record<string, any>>;
+}
+
 export interface ProbeVerdict {
   model_id: string;
   state: ReadinessState;
@@ -27,6 +37,21 @@ export interface ProbeVerdict {
   detail: Record<string, any>;
   latency_ms: number;
   probed_at?: string | null;
+  /** Null until someone runs it — not the same as scoring zero. */
+  accuracy?: AccuracyVerdict | null;
+}
+
+/** Tone for the accuracy line.
+ *
+ *  A missed secret is the mistake that matters: raising a harmless
+ *  finding costs a reviewer minutes, dismissing a live credential ends
+ *  up in an incident report. So any miss reads as a warning however
+ *  good the overall count looks. */
+export function accuracyTone(a?: AccuracyVerdict | null): string {
+  if (!a || a.total === 0) return "text-slate-500";
+  if (a.total - a.unanswered === 0) return "text-slate-400";
+  if (a.missed_secrets > 0) return "text-amber-400";
+  return "text-emerald-400";
 }
 
 /** Short word for the badge. Never a token count — that lives in Details.

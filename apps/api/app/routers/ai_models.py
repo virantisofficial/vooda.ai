@@ -408,6 +408,18 @@ class ProbeRequest(StrictModel):
     max_tokens: int = 4096
 
 
+class AccuracyVerdict(BaseModel):
+    total: int
+    correct: int
+    missed_secrets: int
+    unanswered: int
+    headline: str
+    checked_at: Optional[str] = None
+    #: Per-case outcomes for the breakdown. Carries no secret material —
+    #: the corpus snippets stay server-side; only ids and outcomes travel.
+    cases: list = []
+
+
 class ProbeVerdict(BaseModel):
     model_id: str
     state: str
@@ -417,12 +429,28 @@ class ProbeVerdict(BaseModel):
     detail: dict = {}
     latency_ms: float = 0
     probed_at: Optional[str] = None
+    #: Null until someone runs it. An unscored model must not read as
+    #: one that scored zero.
+    accuracy: Optional[AccuracyVerdict] = None
 
 
 class ProbeResponse(BaseModel):
     status: str
     message: str = ""
     results: list[ProbeVerdict] = []
+
+
+def _accuracy_from_row(row) -> Optional[AccuracyVerdict]:
+    if row is None or row.accuracy_total is None:
+        return None
+    return AccuracyVerdict(
+        total=row.accuracy_total, correct=row.accuracy_correct or 0,
+        missed_secrets=row.accuracy_missed_secrets or 0,
+        unanswered=row.accuracy_unanswered or 0,
+        headline=row.accuracy_headline or "",
+        checked_at=row.accuracy_checked_at,
+        cases=(row.accuracy_detail or {}).get("cases", []),
+    )
 
 
 def _probe_to_verdict(r, probed_at: str) -> ProbeVerdict:
@@ -513,6 +541,105 @@ async def probe_models(
     return ProbeResponse(status="success", results=results)
 
 
+class AccuracyRequest(StrictModel):
+    provider: str
+    model_id: str
+    api_key: Optional[str] = None
+    endpoint_url: Optional[str] = None
+    model_config_id: Optional[UUID] = None
+    supports_json_mode: bool = True
+    max_tokens: int = 4096
+
+
+@router.post("/accuracy", response_model=ProbeVerdict)
+async def check_model_accuracy(
+    body: AccuracyRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Score one model against findings whose answer is already known.
+
+    One model per call, deliberately. The probe costs a request per
+    model and can reasonably run across a list; this costs twenty, and
+    running it over a provider offering hundreds would take hours to
+    answer a question about models nobody is going to configure.
+
+    The corpus never leaves the server. Only case ids and outcomes are
+    returned, so the sample secrets stay out of the browser and out of
+    anything a customer can read.
+    """
+    from datetime import datetime, timezone
+    from services.ai_triage.accuracy_check import run_accuracy_check
+
+    provider = body.provider
+    api_key = body.api_key
+    endpoint_url = body.endpoint_url
+    extra_payload = None
+
+    if body.model_config_id:
+        cfg = (await db.execute(
+            select(AIModelConfig).where(
+                AIModelConfig.id == body.model_config_id,
+                AIModelConfig.tenant_id == user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if not cfg:
+            raise HTTPException(status_code=404, detail="Model config not found")
+        provider = cfg.provider
+        api_key = cfg.api_key_encrypted
+        endpoint_url = cfg.endpoint_url
+        extra_payload = cfg.provider_config or None
+
+    local_providers = {"ollama", "lm_studio", "vllm", "localai", "custom"}
+    if not api_key and provider not in local_providers:
+        raise HTTPException(status_code=400, detail="API key is required to score a model")
+
+    result = await run_accuracy_check(
+        provider, api_key, body.model_id, endpoint_url,
+        max_tokens=body.max_tokens, supports_json_mode=body.supports_json_mode,
+        extra_payload=extra_payload,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Stored on the same row as the probe verdict — same model, same
+    # tenant, two halves of one question.
+    row = (await db.execute(
+        select(AIModelProbeResult).where(
+            AIModelProbeResult.tenant_id == user.tenant_id,
+            AIModelProbeResult.provider == provider,
+            AIModelProbeResult.model_id == body.model_id,
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        row = AIModelProbeResult(
+            tenant_id=user.tenant_id, provider=provider,
+            model_id=body.model_id, state="unverified",
+            headline="Not checked.", remedy="",
+        )
+        db.add(row)
+
+    row.accuracy_total = result.total
+    row.accuracy_correct = result.correct
+    row.accuracy_missed_secrets = result.missed_secrets
+    row.accuracy_unanswered = result.unanswered
+    row.accuracy_headline = result.headline[:300]
+    # Ids and outcomes only — the snippets stay server-side.
+    row.accuracy_detail = {"cases": [
+        {"case_id": c.case_id, "expected": c.expected, "answered": c.answered,
+         "correct": c.correct, "missed_secret": c.missed_secret, "note": c.note}
+        for c in result.cases
+    ]}
+    row.accuracy_checked_at = now
+    await db.flush()
+
+    return ProbeVerdict(
+        model_id=body.model_id, state=row.state, headline=row.headline or "",
+        remedy=row.remedy or "", suggested_config=row.suggested_config or {},
+        detail=row.detail or {}, latency_ms=round(result.latency_ms, 1),
+        probed_at=row.probed_at, accuracy=_accuracy_from_row(row),
+    )
+
+
 @router.get("/probe-results", response_model=ProbeResponse)
 async def get_probe_results(
     provider: str,
@@ -531,7 +658,7 @@ async def get_probe_results(
             model_id=r.model_id, state=r.state, headline=r.headline or "",
             remedy=r.remedy or "", suggested_config=r.suggested_config or {},
             detail=r.detail or {}, latency_ms=r.latency_ms or 0,
-            probed_at=r.probed_at,
+            probed_at=r.probed_at, accuracy=_accuracy_from_row(r),
         ) for r in rows
     ])
 

@@ -488,6 +488,14 @@ export const probeModels = (data: {
   supports_json_mode?: boolean; max_tokens?: number;
 }) => api.post("/ai-models/probe", data);
 
+// Scores one model against findings whose answer is already known.
+// One model per call — twenty requests, so never run across a list.
+export const checkModelAccuracy = (data: {
+  provider: string; model_id: string; api_key?: string;
+  endpoint_url?: string; model_config_id?: string;
+  supports_json_mode?: boolean; max_tokens?: number;
+}) => api.post("/ai-models/accuracy", data);
+
 // Verdicts already on record, so badges render without spending a call.
 export const getProbeResults = (provider: string) =>
   api.get("/ai-models/probe-results", { params: { provider } });

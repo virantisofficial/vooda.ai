@@ -77,3 +77,20 @@ class AIModelProbeResult(Base, UUIDMixin, TimestampMixin, TenantMixin):
     detail = Column(JSONB, default=dict)
     latency_ms = Column(Float, default=0.0)
     probed_at = Column(String(50), nullable=True)
+
+    # ── Accuracy, when the operator has asked for it ──
+    #
+    # Lives beside the probe result because it answers the other half
+    # of the same question about the same model: the probe says whether
+    # it answers, this says how often it is right. Null until someone
+    # runs it — an unmeasured model must not read as a scored one.
+    accuracy_total = Column(Integer, nullable=True)
+    accuracy_correct = Column(Integer, nullable=True)
+    #: Real secrets the model called noise. Kept as its own column
+    #: because "17 of 20" hides whether the three misses were harmless.
+    accuracy_missed_secrets = Column(Integer, nullable=True)
+    accuracy_unanswered = Column(Integer, nullable=True)
+    accuracy_headline = Column(String(300), nullable=True)
+    #: Per-case outcomes, for the breakdown behind Details.
+    accuracy_detail = Column(JSONB, nullable=True)
+    accuracy_checked_at = Column(String(50), nullable=True)
