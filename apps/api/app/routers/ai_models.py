@@ -8,7 +8,7 @@ AI Model Configuration API — CRUD + test connection + task routing.
 from uuid import UUID
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from apps.api.app.schemas.strict import StrictModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +116,43 @@ class TaskRoutingResponse(BaseModel):
 
 # ── Helper ────────────────────────────────────────────
 
+#: Fields worth recording when they change. The API key is absent on
+#: purpose — an audit trail that carries the credential it is meant to
+#: protect is worse than none, and "the key was changed" is the fact a
+#: reviewer needs, not its value.
+_AUDITED_FIELDS = (
+    "name", "provider", "model_id", "endpoint_url", "max_tokens",
+    "temperature", "context_window", "supports_json_mode",
+    "use_compact_prompt", "prompt_strategy", "model_size_class",
+    "system_prompt_override", "is_active",
+)
+
+
+def _audit_snapshot(m: AIModelConfig) -> dict:
+    return {f: getattr(m, f, None) for f in _AUDITED_FIELDS}
+
+
+def _describe_changes(before: dict, after: dict) -> tuple[str, dict]:
+    """A sentence for a reader, and the before/after pairs for a query.
+
+    The model itself is called out by name rather than listed among the
+    other fields: "who changed the model that triages our secrets" is
+    the question this exists to answer, and it should be readable
+    without opening the metadata.
+    """
+    changed = {k: {"from": before.get(k), "to": after.get(k)}
+               for k in _AUDITED_FIELDS if before.get(k) != after.get(k)}
+    if not changed:
+        return "No changes", {}
+    if "model_id" in changed:
+        lead = f"Model changed from {changed['model_id']['from']} to {changed['model_id']['to']}"
+        rest = [k for k in changed if k != "model_id"]
+        if rest:
+            lead += f"; also {', '.join(sorted(rest))}"
+        return lead, changed
+    return f"Updated {', '.join(sorted(changed))}", changed
+
+
 def _to_response(m: AIModelConfig) -> dict:
     return {
         "id": m.id,
@@ -198,6 +235,7 @@ async def list_models(
 @router.post("", response_model=AIModelResponse, status_code=201)
 async def create_model(
     body: AIModelCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -232,6 +270,16 @@ async def create_model(
     )
     db.add(model)
     await db.flush()
+
+    from apps.api.app.core.audit import log_audit
+    await log_audit(
+        db, user, "ai_model_created", "ai_model", model.id,
+        f"Configured {model.provider}/{model.model_id} for AI triage",
+        request=request,
+        metadata={"provider": model.provider, "model_id": model.model_id,
+                  "endpoint_url": model.endpoint_url,
+                  "api_key_set": bool(model.api_key_encrypted)},
+    )
 
     await db.refresh(model)
     return _to_response(model)
@@ -294,12 +342,15 @@ async def get_engine_settings(
 @router.put("/engine-settings")
 async def update_engine_settings(
     body: AIEngineSettingsSchema,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     from apps.api.app.models.ai_engine_settings import AIEngineSettings
     result = await db.execute(select(AIEngineSettings).where(AIEngineSettings.tenant_id == user.tenant_id).limit(1))
     s = result.scalar_one_or_none()
+    fields = list(AIEngineSettingsSchema.model_fields.keys())
+    before = {f: getattr(s, f, None) for f in fields} if s else {}
     if s:
         for field, value in body.model_dump().items():
             setattr(s, field, value)
@@ -307,6 +358,20 @@ async def update_engine_settings(
         s = AIEngineSettings(tenant_id=user.tenant_id, **body.model_dump())
         db.add(s)
     await db.flush()
+
+    # These decide what reaches the AI and what a verdict must score to
+    # be accepted — a confidence threshold quietly raised changes which
+    # secrets get shown to a human.
+    after = {f: getattr(s, f, None) for f in fields}
+    changed = {k: {"from": before.get(k), "to": after.get(k)}
+               for k in fields if before.get(k) != after.get(k)}
+    if changed:
+        from apps.api.app.core.audit import log_audit
+        await log_audit(
+            db, user, "ai_engine_settings_updated", "ai_engine_settings", s.id,
+            f"Updated {', '.join(sorted(changed))}",
+            request=request, metadata={"changed": changed},
+        )
     return {"status": "ok", **body.model_dump()}
 
 
@@ -492,6 +557,7 @@ async def get_model(
 async def update_model(
     model_id: UUID,
     body: AIModelUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -505,17 +571,33 @@ async def update_model(
         raise HTTPException(status_code=404, detail="Model not found")
 
     update_data = body.model_dump(exclude_unset=True)
+    before = _audit_snapshot(model)
 
     # Handle api_key separately
+    key_replaced = False
     if "api_key" in update_data:
         api_key = update_data.pop("api_key")
         if api_key:
             model.api_key_encrypted = api_key  # In production, encrypt
+            key_replaced = True
 
     for field, value in update_data.items():
         setattr(model, field, value)
 
     await db.flush()
+
+    summary, changed = _describe_changes(before, _audit_snapshot(model))
+    if key_replaced:
+        summary = f"{summary}; API key replaced" if changed else "API key replaced"
+    if changed or key_replaced:
+        from apps.api.app.core.audit import log_audit
+        await log_audit(
+            db, user, "ai_model_updated", "ai_model", model.id, summary,
+            request=request,
+            metadata={"changed": changed, "api_key_replaced": key_replaced,
+                      "provider": model.provider, "model_id": model.model_id},
+        )
+
     await db.refresh(model)
     return _to_response(model)
 
@@ -523,6 +605,7 @@ async def update_model(
 @router.delete("/{model_id}", status_code=204)
 async def delete_model(
     model_id: UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -534,6 +617,17 @@ async def delete_model(
     model = result.scalar_one_or_none()
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    # Recorded BEFORE the delete — afterwards there is nothing left to
+    # describe, and "which model was removed" is the whole point.
+    removed = _audit_snapshot(model)
+    from apps.api.app.core.audit import log_audit
+    await log_audit(
+        db, user, "ai_model_deleted", "ai_model", model.id,
+        f"Removed {model.provider}/{model.model_id}; AI triage is now unconfigured",
+        request=request, metadata={"removed": removed},
+    )
+
     await db.delete(model)
     await db.flush()
 
