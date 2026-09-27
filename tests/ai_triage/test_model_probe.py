@@ -192,3 +192,33 @@ def test_a_selected_model_is_always_re_checked():
         "the selection check must not skip a model on age")
     assert "setTimeout" in block, "but it must still wait for the selection to settle"
     assert "silent: true" in block, "and fail quietly while someone is browsing"
+
+
+def test_probing_a_batch_runs_concurrently_under_a_ceiling():
+    """Sequential took forty minutes across a provider listing
+    hundreds, which is not a button anyone presses twice. Unbounded
+    would trip rate limits, and a 429 recorded as a verdict marks a
+    working model broken — so it runs together, but with a ceiling."""
+    import inspect
+    from apps.api.app.routers import ai_models as R
+    src = inspect.getsource(R.probe_models)
+    assert "asyncio.gather" in src, "requests must run together"
+    assert "Semaphore(_PROBE_CONCURRENCY)" in src, "and under a ceiling"
+    assert 1 < R._PROBE_CONCURRENCY <= 16, "modest enough not to throttle"
+
+
+def test_the_rows_are_written_after_the_requests_finish():
+    """A shared AsyncSession is not safe to use from several tasks at
+    once; the probes run together and the writes follow on one task."""
+    import inspect
+    from apps.api.app.routers import ai_models as R
+    src = inspect.getsource(R.probe_models)
+    assert src.index("asyncio.gather") < src.index("_store_probe(")
+
+
+def test_a_probe_that_raises_does_not_lose_the_rest_of_the_batch():
+    """return_exceptions keeps one bad model from discarding fifteen
+    good answers the customer just paid for."""
+    import inspect
+    from apps.api.app.routers import ai_models as R
+    assert "return_exceptions=True" in inspect.getsource(R.probe_models)

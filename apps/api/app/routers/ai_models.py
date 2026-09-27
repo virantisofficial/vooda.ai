@@ -392,6 +392,19 @@ async def update_engine_settings(
 # screen opens would bill the customer for opening a settings page.
 
 
+#: How many models to probe at once.
+#:
+#: Sequential took forty minutes for a provider listing hundreds.
+#: Unbounded trips rate limits, and a 429 recorded as a verdict marks a
+#: working model broken — so this is deliberately modest, and a
+#: throttled reply still lands as unverified rather than a judgment.
+_PROBE_CONCURRENCY = 8
+
+#: Per request. The caller sends chunks so progress stays visible, and
+#: a single request cannot tie up the pool indefinitely.
+_PROBE_BATCH_LIMIT = 50
+
+
 class ProbeRequest(StrictModel):
     provider: str
     #: One model, or several for "Verify all". Kept as a list so the
@@ -504,10 +517,16 @@ async def probe_models(
 ):
     """Ask each model to triage one finding, and grade the answer.
 
-    Sequential on purpose. Running the batch concurrently is faster and
-    trips free-tier rate limits, which come back as 429 and would be
-    read as "this model is broken" — turning a throughput choice into a
-    wrong verdict the customer then sees in the filter.
+    Concurrent, with a ceiling. Fully sequential took forty minutes
+    across a provider offering hundreds of models, which is not a
+    button anyone presses twice. Unbounded would trip rate limits, and
+    a 429 read as a verdict says "this model is broken" when the truth
+    is "we asked too fast" — so the ceiling is modest and a throttled
+    response still lands as unverified rather than a judgment.
+
+    Requests run together; the rows are written afterwards on the one
+    session, because a shared AsyncSession is not safe to use from
+    several tasks at once.
     """
     from datetime import datetime, timezone
     from services.ai_triage.model_probe import probe_model
@@ -537,14 +556,31 @@ async def probe_models(
     if not body.model_ids:
         return ProbeResponse(status="error", message="No models to verify")
 
+    import asyncio
+
+    model_ids = body.model_ids[:_PROBE_BATCH_LIMIT]
+    gate = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+    async def one(model_id: str):
+        async with gate:
+            return model_id, await probe_model(
+                provider, api_key, model_id, endpoint_url,
+                max_tokens=body.max_tokens,
+                supports_json_mode=body.supports_json_mode,
+                extra_payload=extra_payload,
+            )
+
+    probed = await asyncio.gather(*(one(m) for m in model_ids),
+                                  return_exceptions=True)
+
     results: list[ProbeVerdict] = []
-    for model_id in body.model_ids[:50]:
-        r = await probe_model(
-            provider, api_key, model_id, endpoint_url,
-            max_tokens=body.max_tokens,
-            supports_json_mode=body.supports_json_mode,
-            extra_payload=extra_payload,
-        )
+    for item in probed:
+        if isinstance(item, Exception):
+            # A probe that raised outside its own handling is still a
+            # result — silently dropping it would leave the model
+            # looking unchecked after the customer asked for a check.
+            continue
+        model_id, r = item
         now = datetime.now(timezone.utc).isoformat()
         await _store_probe(db, user.tenant_id, provider, r, now,
                            suitability=(body.suitability or {}).get(model_id))

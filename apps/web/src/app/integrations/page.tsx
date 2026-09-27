@@ -773,6 +773,38 @@ function AIModelsFullSection() {
     }
   };
 
+  /** Probe several models in one request; the server runs them
+   *  concurrently and the verdicts land together. */
+  const probeMany = async (modelIds: string[]) => {
+    if (modelIds.length === 0) return;
+    try {
+      const payload: any = {
+        provider: form.provider, model_ids: modelIds,
+        max_tokens: form.max_tokens, supports_json_mode: form.supports_json_mode,
+      };
+      const suit: Record<string, any> = {};
+      for (const id of modelIds) {
+        const m = discoveredModels.find((d) => d.model_id === id);
+        if (m?.suitability) {
+          suit[id] = { tier: m.suitability, reason: m.suitability_reason || "",
+                       may_exclude: !!m.suitability_may_exclude };
+        }
+      }
+      if (Object.keys(suit).length) payload.suitability = suit;
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+
+      const r = await probeModels(payload);
+      const byId: Record<string, ProbeVerdict> = {};
+      for (const v of (r.data?.results || [])) byId[v.model_id] = v;
+      if (Object.keys(byId).length) setProbeResults((prev) => ({ ...prev, ...byId }));
+    } catch {
+      // A failed chunk leaves those models unchecked rather than marked
+      // broken — the request failed, not the models.
+    }
+  };
+
   const verifyAll = async () => {
     // Candidates only. Probing a music model costs a request and
     // proves what the provider already told us — one returned 429
@@ -791,17 +823,23 @@ function AIModelsFullSection() {
     verifyAllCancelled.current = false;
     setVerifyingAll({ done: 0, total: ids.length });
     try {
-      // One model per request rather than one request for all of them,
-      // so the grid fills in as answers arrive and the run can be read
-      // as progress instead of a spinner that might be stuck.
-      // Interruptible. A provider offering 458 models takes about
-      // twenty minutes at roughly two seconds each, and a run that long
-      // with no way out is one a customer starts once and never again.
+      // Chunks, not one at a time.
+      //
+      // One request per model was simple and took forty minutes across
+      // a provider listing hundreds — not a button anyone presses
+      // twice. The server probes a chunk concurrently under its own
+      // ceiling, so the wait drops roughly by that factor while the
+      // provider still sees a sane request rate.
+      //
+      // Chunked rather than one request for everything, so the grid
+      // keeps filling in and the run stays interruptible: a long wait
+      // with no progress and no way out is one a customer abandons.
       // Every answer already received is kept.
-      for (let i = 0; i < ids.length; i++) {
+      const CHUNK = 8;
+      for (let i = 0; i < ids.length; i += CHUNK) {
         if (verifyAllCancelled.current) break;
-        await probeOne(ids[i], { silent: true });
-        setVerifyingAll({ done: i + 1, total: ids.length });
+        await probeMany(ids.slice(i, i + CHUNK));
+        setVerifyingAll({ done: Math.min(i + CHUNK, ids.length), total: ids.length });
       }
     } finally {
       setVerifyingAll(null);
