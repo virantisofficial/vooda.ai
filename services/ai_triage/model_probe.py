@@ -268,6 +268,21 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
                                "Couldn't check right now — the provider was busy.",
                                "Try again in a moment.", {}, {"error": msg[:300]}, total, calls)
 
+        # A rejected key says nothing about the model.
+        #
+        # This was condemning the model — "This key cannot use this
+        # model", Won't Work, stored as unusable. Measured, a single bad
+        # key marked 338 models permanently broken when every one of
+        # them might work perfectly with a valid key. Whoever fixes the
+        # key then has to know the verdicts are stale.
+        #
+        # We could not check it, which is what unverified is for.
+        if _is_auth_failure(msg):
+            return ProbeResult(model_id, UNVERIFIED,
+                               "Couldn't check — the provider rejected the key.",
+                               "Check the API key, then try again.",
+                               {}, {"error": msg[:300]}, total, calls)
+
         definitive = _definitive_failure(msg)
         if definitive:
             return ProbeResult(model_id, UNUSABLE, definitive[0], definitive[1],
@@ -315,18 +330,32 @@ async def probe_model(provider_name: str, api_key: str, model_id: str,
     return res
 
 
-def _definitive_failure(err: str) -> Optional[tuple[str, str]]:
-    """Only a failure that cannot be a blip earns "unusable".
+def _is_auth_failure(err: str) -> bool:
+    """Did the provider reject the credential rather than the model?
 
-    Positive evidence the model will never work — it does not exist, or
-    this key may not use it. Everything else stays UNVERIFIED, because
-    guessing "broken" removes the model from the customer's list.
+    Kept apart from the model's own verdict because the two are
+    different facts. A model that does not exist will never work; a key
+    the provider refuses tells you nothing about the model behind it,
+    and treating the two alike marked an entire catalogue broken over
+    one mistyped key.
+    """
+    e = (err or "").lower()
+    return any(k in e for k in (
+        "401", "403", "unauthor", "permission denied", "invalid api key",
+        "invalid_api_key", "authentication",
+    ))
+
+
+def _definitive_failure(err: str) -> Optional[tuple[str, str]]:
+    """Only a failure about the MODEL itself earns "unusable".
+
+    Positive evidence this model will never work — it does not exist
+    under that name. Everything else stays UNVERIFIED, because guessing
+    "broken" removes a model from the customer's list, and a verdict
+    that survives the thing that caused it is worse than none.
     """
     e = err.lower()
     if "404" in e or "not found" in e:
         return ("Vooda could not find this model.",
                 "It isn't available on your plan, or the name has changed.")
-    if any(k in e for k in ("401", "403", "unauthor", "permission denied", "invalid api key")):
-        return ("This key cannot use this model.",
-                "Check the API key has access to it.")
     return None

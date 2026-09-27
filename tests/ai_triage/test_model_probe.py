@@ -141,11 +141,14 @@ def test_an_unrecognised_error_is_not_evidence_of_a_broken_model():
     assert _definitive_failure("unexpected payload shape") is None
 
 
-def test_only_missing_or_forbidden_models_are_called_unusable():
+def test_only_a_missing_model_is_condemned():
+    """A 404 is about the model. A 401 is about the key, and lumping
+    them together let one mistyped credential mark a whole catalogue
+    permanently broken."""
     from services.ai_triage.model_probe import _definitive_failure
     assert _definitive_failure("Google API error 404: model not found") is not None
-    assert _definitive_failure("401 Unauthorized") is not None
-    assert _definitive_failure("403 permission denied") is not None
+    assert _definitive_failure("401 Unauthorized") is None
+    assert _definitive_failure("403 permission denied") is None
 
 
 def test_a_fix_is_never_offered_for_a_setting_already_applied():
