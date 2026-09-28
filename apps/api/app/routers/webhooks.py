@@ -230,6 +230,44 @@ async def update_webhook_config(
     return {"status": "ok", "provider": provider, "enabled": cfg.is_active}
 
 
+@router.delete("/{provider}/config")
+async def delete_webhook_config(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Remove a webhook configuration. Deliberately NOT gated.
+
+    Configuring an inbound webhook is the Enterprise capability, and
+    creating one is refused in Community. Undoing one is not: a tenant
+    that downgrades, or that was set up before the gate existed, would
+    otherwise be left with a stored secret they can neither repair nor
+    clear, and a provider still posting to an endpoint that ignores it.
+
+    The same reasoning as the access-control escape hatch — creating
+    scope is Enterprise, reading and removing it stay open, because a
+    gate that traps someone is not an upsell.
+    """
+    if provider not in ("github", "gitlab", "bitbucket"):
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
+    result = await db.execute(
+        select(IntegrationConfig).where(
+            IntegrationConfig.tenant_id == user.tenant_id,
+            IntegrationConfig.provider == f"webhook_{provider}",
+        ).limit(1)
+    )
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        return {"status": "ok", "provider": provider, "removed": False}
+
+    await db.delete(cfg)
+    await db.flush()
+    invalidate_webhook_cache(str(user.tenant_id), provider)
+    logger.info("webhook_config_removed", provider=provider)
+    return {"status": "ok", "provider": provider, "removed": True}
+
+
 @router.post("/{provider}/test", dependencies=[Depends(require_enterprise("webhooks"))])
 async def test_webhook(
     provider: str,
@@ -386,9 +424,19 @@ async def receive_webhook(provider: str, request: Request, db: AsyncSession = De
 
     matched_repo = None
     try:
+        # Match on every spelling of the same repository, not on the
+        # exact string. Providers send the CLONE url, which ends in
+        # ".git"; the UI stores what the operator pasted, which
+        # usually does not. Equality therefore missed every repository
+        # added through the UI — the delivery verified, a scan job was
+        # created, and it analysed nothing, while the repository's
+        # webhook health stayed blank because nothing was matched to
+        # stamp it.
+        from packages.common.git_url import url_match_candidates
+
         repo_q = await db.execute(
             select(Repository).where(
-                Repository.url == event.repo_url,
+                Repository.url.in_(url_match_candidates(event.repo_url)),
             ).limit(1)
         )
         matched_repo = repo_q.scalar_one_or_none()

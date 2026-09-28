@@ -236,3 +236,25 @@ async def test_disabled_webhook_says_disabled_not_missing_secret(client, admin_j
         "a secret IS configured — reporting it missing sends the operator "
         "to fix the wrong thing"
     )
+
+
+def test_a_clone_url_matches_the_repository_it_names():
+    """Providers send the clone URL; the UI stores what was pasted.
+
+    GitHub's `clone_url` ends in ".git" and a repository added through
+    the UI usually does not, so matching on string equality missed
+    every one of them. The delivery still verified and a scan job was
+    still created — it simply had no repository, so it analysed
+    nothing and the repository's webhook health stayed blank. A
+    silent no-op is the worst shape for this: the provider reports
+    2xx, and nothing scans.
+    """
+    import inspect
+
+    from apps.api.app.routers import webhooks
+
+    src = inspect.getsource(webhooks.receive_webhook)
+    assert "url_match_candidates" in src, (
+        "match every spelling of the same repository, not one string"
+    )
+    assert "Repository.url == event.repo_url" not in src

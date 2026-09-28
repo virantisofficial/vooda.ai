@@ -441,3 +441,21 @@ def test_every_gated_provider_names_a_real_feature():
     """A provider mapped to a key nobody declares would never be gated."""
     for provider, feature in E.ENTERPRISE_PROVIDER_FEATURES.items():
         assert feature in E.ENTERPRISE_FEATURES, (provider, feature)
+
+
+def test_removing_a_webhook_stays_open_in_community():
+    """Creating one is Enterprise; undoing one is not.
+
+    A tenant that downgrades, or that was configured before the gate,
+    would otherwise hold a stored secret they can neither repair nor
+    clear, with the provider still posting to an endpoint that ignores
+    it. The same reasoning as the access-control escape hatch: a gate
+    that traps someone is not an upsell.
+    """
+    from apps.api.app.routers import webhooks
+    src = inspect.getsource(webhooks.delete_webhook_config)
+    assert "require_enterprise" not in src
+
+    # And the gate is still on the half that creates.
+    assert 'require_enterprise("webhooks")' in inspect.getsource(
+        webhooks).split("def delete_webhook_config")[0]
