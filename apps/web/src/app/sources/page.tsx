@@ -11,6 +11,7 @@ import {
   createIntegration, updateIntegration, deleteIntegration, getIntegration,
   testUnsavedSourceConnection, testSourceConnection,
   getRepositories, getBusinessUnits, getScanSourceDeletePreview,
+  getEdition,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -792,7 +793,13 @@ const ALL_CATEGORIES: CategoryMeta[] = [
   // in SOURCES with hidden=true so existing customer instances keep
   // working; this just drops the landing tiles + sub-catalog pages.
 ];
-const CATEGORIES: CategoryMeta[] = ALL_CATEGORIES.filter((c) => !ENTERPRISE_ONLY_CATEGORIES.has(c.key));
+// Every category, including the two that used to be filtered away.
+//
+// Hiding them removed the upsell along with the feature: a Community
+// install showed three categories and no reason to think Enterprise
+// had more. Now all five are listed, and the gate is stated on the
+// tile rather than implied by an absence.
+const CATEGORIES: CategoryMeta[] = ALL_CATEGORIES;
 
 // Stack-aware recommendation graph — given a connected source, the
 // values are source types we should suggest the customer also wire
@@ -1107,6 +1114,26 @@ function SourcesPageInner({ initialCategory }: { initialCategory?: string } = {}
     if (!initialCategory) return null;
     return URL_TO_CATEGORY[initialCategory.toLowerCase()] ?? null;
   });
+
+  // Non-git scanning is Enterprise. The category tile is the gate, so
+  // nothing inside needs edition logic — in Community it is never
+  // reached, and in Enterprise it all works.
+  const [sourcesGated, setSourcesGated] = useState(false);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setSourcesGated((r.data?.gated || []).includes("scan_sources")))
+      .catch(() => setSourcesGated(false));
+  }, []);
+
+  // /sources/<category> must respect the same gate as the tile —
+  // blocking only the click leaves the section one URL away, where
+  // every call would fail against a 402 with nothing to explain it.
+  useEffect(() => {
+    if (sourcesGated && activeCategory) {
+      setActiveCategory(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourcesGated, activeCategory]);
 
   // ── Two-way URL sync ──
   //
@@ -2739,14 +2766,20 @@ function SourcesPageInner({ initialCategory }: { initialCategory?: string } = {}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {/* Real category cards. */}
                   {CATEGORIES.map((cat) => {
-                    const available = sourcesInCategory(cat.key).length;
+                    const available = sourcesInCategory(cat.key).length
+                      || ALL_SOURCES.filter((x) => x.category === cat.key).length;
                     const connected = connectedInCategory(cat.key).length;
                     return (
-                      <div key={cat.key} onClick={() => setActiveCategory(cat.key)}
-                           className="card card-hover cursor-pointer group relative overflow-hidden">
-                        <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
+                      <div key={cat.key}
+                           onClick={() => { if (!sourcesGated) setActiveCategory(cat.key); }}
+                           aria-disabled={sourcesGated}
+                           title={sourcesGated ? `${cat.label} is available in Vooda Enterprise` : undefined}
+                           className={`card group relative overflow-hidden ${
+                             sourcesGated ? "opacity-60 cursor-not-allowed" : "card-hover cursor-pointer"
+                           }`}>
+                        <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${sourcesGated ? "from-slate-700 to-slate-800" : cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
                         <div className="flex items-start gap-4 pt-2">
-                          <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
+                          <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${sourcesGated ? "from-slate-700 to-slate-800" : cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
                             {cat.icon}
                           </div>
                           <div className="flex-1 min-w-0">
@@ -2754,6 +2787,11 @@ function SourcesPageInner({ initialCategory }: { initialCategory?: string } = {}
                             <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{cat.description}</p>
                             <div className="flex items-center gap-3 mt-3">
                               <span className="text-[10px] text-slate-600">{available} available</span>
+                              {sourcesGated && (
+                                <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                                  Enterprise
+                                </span>
+                              )}
                               {connected > 0 && (
                                 <span className="flex items-center gap-1 text-[10px] text-green-400">
                                   <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
@@ -2762,9 +2800,12 @@ function SourcesPageInner({ initialCategory }: { initialCategory?: string } = {}
                               )}
                             </div>
                           </div>
-                          <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                          </svg>
+                          {/* No arrow when the tile leads nowhere. */}
+                          {!sourcesGated && (
+                            <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                          )}
                         </div>
                       </div>
                     );

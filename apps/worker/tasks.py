@@ -1547,6 +1547,17 @@ def run_source_scan(self, scan_job_id: str, scan_source_id: str):
 
 
 async def _run_source_scan(scan_job_id: str, scan_source_id: str):
+    # Non-git scanning is Enterprise, and a gate on configuring
+    # something that still runs is not a gate. Sources written under an
+    # Enterprise licence would otherwise keep scanning forever after a
+    # downgrade — the same hole the detector registry and the scheduler
+    # had. Checked before any work, so nothing is fetched or stored.
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("scan_sources"):
+        logger.info("source_scan_skipped_community_edition",
+                    scan_source_id=str(scan_source_id))
+        return
+
     import apps.api.app.models  # noqa: F401
     import asyncio
     import hashlib

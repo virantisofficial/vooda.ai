@@ -2293,19 +2293,9 @@ function TicketingSection() {
   const { toast } = useToast();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // Ticketing is Enterprise, whole.
-  //
-  // All three tiles stay on screen, greyed and badged, rather than
-  // being hidden: the row shows what the edition includes, not only
-  // what this install can click today.
-  const [gatedFeatures, setGatedFeatures] = useState<string[]>([]);
-  useEffect(() => {
-    getEdition()
-      .then((r) => setGatedFeatures(r.data?.gated || []))
-      .catch(() => setGatedFeatures([]));
-  }, []);
-  const ticketingGated = gatedFeatures.includes("ticketing");
-  const isGatedTool = (_provider: string) => ticketingGated;
+  // No edition logic in here. The category tile on the hub is the
+  // gate, and it does not open in Community — so this section is only
+  // ever rendered where every provider in it works.
   const [configs, setConfigs] = useState<Record<string, any>>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -2936,17 +2926,11 @@ function TicketingSection() {
           constrain it. */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {TICKETING_TOOLS.map((t) => {
-          const gated = isGatedTool(t.provider);
-          const isExpanded = gated ? false : expandedId === t.provider;
+          const isExpanded = expandedId === t.provider;
           const isConfigured = !!configs[t.provider];
 
           return (
-            <button key={t.provider}
-              disabled={gated}
-              aria-disabled={gated}
-              title={gated ? `${t.name} is available in Vooda Enterprise` : undefined}
-              onClick={() => {
-              if (gated) return;
+            <button key={t.provider} onClick={() => {
               setExpandedId(isExpanded ? null : t.provider);
               if (!isExpanded && isConfigured) {
                 // Pre-fill form with existing config. For jira this
@@ -2986,17 +2970,14 @@ function TicketingSection() {
               }
             }}
               className={`relative text-left rounded-xl border p-4 transition-all duration-200 ${
-                gated ? "border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
-                : isExpanded ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
+                isExpanded ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
                 : isConfigured ? "border-green-500/20 bg-white/[0.02] hover:border-green-500/30 hover:bg-white/[0.04]"
                 : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
               }`}>
               <div className="absolute top-3 right-3 pointer-events-none">
-                {gated ? (
-                  <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
-                    Enterprise
-                  </span>
-                ) : isConfigured ? (
+                {/* No badge here. The category tile carries it — one
+                    statement of the boundary, not one per provider. */}
+                {isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />
                     {t.provider === "jira" && jiraBoards.length > 1
@@ -3008,14 +2989,13 @@ function TicketingSection() {
                 )}
               </div>
               <div className="flex items-center gap-3 pr-16">
-                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${gated ? "from-slate-700 to-slate-800" : t.color} flex items-center justify-center text-white shrink-0`}>
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${t.color} flex items-center justify-center text-white shrink-0`}>
                   {t.icon}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white">{t.name}</p>
                   <p className="text-[10px] text-slate-600 mt-0.5">
-                    {gated ? t.description
-                      : t.provider === "jira" && jiraBoards.length > 0
+                    {t.provider === "jira" && jiraBoards.length > 0
                       ? `${jiraBoards.length} board${jiraBoards.length === 1 ? "" : "s"} configured`
                       : isConfigured ? t.description : "Click to configure"}
                   </p>
@@ -3590,21 +3570,9 @@ function WebhooksSection() {
   const [copied, setCopied] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
 
-  // Inbound webhooks are an Enterprise capability: Community triggers
-  // its own scans (UI, CLI, CI key, pre-push hook) rather than having
-  // Vooda listen for pushes on its behalf.
-  //
-  // All three providers stay on screen, greyed and badged, rather than
-  // hidden. A feature nobody can see is a feature nobody asks for —
-  // the tiles are there to show what the edition includes, not only
-  // what this install can click today.
-  const [gatedFeatures, setGatedFeatures] = useState<string[]>([]);
-  useEffect(() => {
-    getEdition()
-      .then((r) => setGatedFeatures(r.data?.gated || []))
-      .catch(() => setGatedFeatures([]));
-  }, []);
-  const webhooksGated = gatedFeatures.includes("webhooks");
+  // No edition logic in here. The category tile on the hub is the
+  // gate, and it does not open in Community — so this section is only
+  // ever rendered where every provider in it works.
 
   // Load webhook config on mount
   useEffect(() => {
@@ -3663,7 +3631,7 @@ function WebhooksSection() {
       {/* 3 tiles side by side */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {WEBHOOK_PROVIDERS.map((wh) => {
-          const isExpanded = webhooksGated ? false : expandedProvider === wh.provider;
+          const isExpanded = expandedProvider === wh.provider;
           const status = webhookStatus[wh.provider];
           const hasSecret = !!webhookSecrets[wh.provider];
           const isConfigured = hasSecret || status?.enabled;
@@ -3671,14 +3639,9 @@ function WebhooksSection() {
           return (
             <button
               key={wh.provider}
-              onClick={() => { if (!webhooksGated) setExpandedProvider(isExpanded ? null : wh.provider); }}
-              disabled={webhooksGated}
-              aria-disabled={webhooksGated}
-              title={webhooksGated ? `${wh.name} inbound webhooks are available in Vooda Enterprise` : undefined}
+              onClick={() => setExpandedProvider(isExpanded ? null : wh.provider)}
               className={`relative text-left rounded-xl border p-4 transition-all duration-200 ${
-                webhooksGated
-                  ? "border-white/[0.06] bg-white/[0.02] opacity-60 cursor-not-allowed"
-                  : isExpanded
+                isExpanded
                   ? "border-red-500/30 bg-red-500/5 ring-1 ring-red-500/20"
                   : isConfigured
                     ? "border-green-500/20 bg-white/[0.02] hover:border-green-500/30 hover:bg-white/[0.04]"
@@ -3687,13 +3650,8 @@ function WebhooksSection() {
             >
               {/* Status badge — top right */}
               <div className="absolute top-3 right-3 pointer-events-none">
-                {webhooksGated ? (
-                  /* Replaces the connection status, which is not the
-                     fact that matters while the feature is gated. */
-                  <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
-                    Enterprise
-                  </span>
-                ) : isConfigured ? (
+                {/* No badge here — the category tile states it once. */}
+                {isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />Active
                   </span>
@@ -3702,14 +3660,12 @@ function WebhooksSection() {
                 )}
               </div>
               <div className="flex items-center gap-3 pr-16">
-                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${webhooksGated ? "from-slate-700 to-slate-800" : wh.color} flex items-center justify-center text-white shrink-0`}>
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${wh.color} flex items-center justify-center text-white shrink-0`}>
                   {wh.icon}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-semibold text-white">{wh.name}</p>
-                  {webhooksGated ? (
-                    <p className="text-[10px] text-slate-600 mt-0.5">Scan on every push</p>
-                  ) : status?.totalEvents ? (
+                  {status?.totalEvents ? (
                     <p className="text-[10px] text-slate-500 mt-0.5">{status.totalEvents} events received</p>
                   ) : (
                     <p className="text-[10px] text-slate-600 mt-0.5">Click to configure</p>
@@ -5068,10 +5024,31 @@ function IntegrationsPageInner() {
   };
   useEffect(() => { loadIntegrations(); }, []);
 
+  const [hubGated, setHubGated] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setHubGated(r.data?.gated || []))
+      .catch(() => setHubGated([]));
+  }, []);
+
   // Sync activeCategory with URL — reacts to sidebar clicks and browser back/forward
   useEffect(() => {
     setActiveCategory(categoryFromUrl);
   }, [categoryFromUrl]);
+
+  // ?category=… must respect the same gate as the tile.
+  //
+  // Blocking only the click would be decoration: the section is one
+  // URL away, and everything in it would then fail against a 402 with
+  // no explanation. Runs as its own effect because the edition arrives
+  // after the first render.
+  useEffect(() => {
+    if (activeCategory && hubGated.includes(activeCategory)) {
+      setActiveCategory(null);
+      window.history.replaceState(null, "", "/integrations");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategory, hubGated]);
 
   const openCategory = (key: HubCategory) => {
     setActiveCategory(key);
@@ -5112,14 +5089,6 @@ function IntegrationsPageInner() {
   // its own ENTERPRISE badge, which is what advertises them. A
   // product choice rather than a technical one: these two are worth
   // looking through, this one is not.
-  const HUB_BLOCKED_CATEGORIES = new Set(["notifications"]);
-  const [hubGated, setHubGated] = useState<string[]>([]);
-  useEffect(() => {
-    getEdition()
-      .then((r) => setHubGated(r.data?.gated || []))
-      .catch(() => setHubGated([]));
-  }, []);
-
   const CATEGORIES: CategoryDef[] = [
     { key: "ai_models", label: "AI Provider", description: "LLM provider for false positive triage", color: "from-purple-500 to-indigo-500", count: AI_PROVIDERS.length,
       icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg> },
@@ -5199,16 +5168,22 @@ function IntegrationsPageInner() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {CATEGORIES.map((cat) => {
               const connected = 0;
-              const gated = HUB_BLOCKED_CATEGORIES.has(cat.key)
-                && hubGated.includes(cat.key);
+              // The tile is the gate. Badged, and it does not open.
+              //
+              // Stopping here rather than inside means the sections
+              // themselves need no edition logic: in Community they are
+              // never reached, and in Enterprise everything in them
+              // works, so their tiles are simply tiles.
+              const gated = hubGated.includes(cat.key);
+              const blocked = gated;
               return (
                 <div
                   key={cat.key}
-                  onClick={() => { if (!gated) openCategory(cat.key); }}
-                  aria-disabled={gated}
+                  onClick={() => { if (!blocked) openCategory(cat.key); }}
+                  aria-disabled={blocked}
                   title={gated ? `${cat.label} is available in Vooda Enterprise` : undefined}
                   className={`card group relative overflow-hidden ${
-                    gated ? "opacity-60 cursor-not-allowed" : "card-hover cursor-pointer"
+                    blocked ? "opacity-60 cursor-not-allowed" : "card-hover cursor-pointer"
                   }`}
                 >
                   {/* Gradient accent line at top */}
@@ -5238,7 +5213,7 @@ function IntegrationsPageInner() {
                     </div>
                     {/* No arrow when the tile leads nowhere — an arrow
                         promising navigation would be a lie. */}
-                    {!gated && (
+                    {!blocked && (
                       <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                       </svg>

@@ -35,6 +35,7 @@ ENTERPRISE_FEATURES: dict[str, str] = {
     "webhooks": "Inbound Webhooks",
     "ticketing": "Ticketing",
     "notifications": "Notification Channels",
+    "scan_sources": "Scan Sources",
 }
 
 #: Which gated feature a provider belongs to, if any.
@@ -112,6 +113,11 @@ def ticketing_provider_enabled(provider: str) -> bool:
 #: Gating those would trap people rather than upsell them.
 GATED_FEATURE_ESCAPE_HATCHES: dict[str, tuple[str, ...]] = {
     "access_control": ("GET", "DELETE"),
+    #: Same reasoning, one step further on. A tenant that downgrades
+    #: keeps sources it can no longer create, so reading them (to see
+    #: what is still configured) and deleting them (to stop) stay open.
+    #: Gating those would leave rows nobody can inspect or remove.
+    "scan_sources": ("GET", "DELETE"),
 }
 
 

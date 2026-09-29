@@ -139,13 +139,43 @@ def test_reading_and_removing_scope_stay_open(method):
     assert E.method_exempt("access_control", method) is True
 
 
+#: A hatch exists only where a downgrade would otherwise trap a tenant
+#: with state they can neither inspect nor undo. Listed explicitly so
+#: adding one is a deliberate act with a reason, not a convenience.
+_FEATURES_WITH_AN_ESCAPE_HATCH = {
+    # Grants keep enforcing after a downgrade, so a user scoped to a
+    # business unit stays scoped. Without a way to read and remove
+    # scope they would be locked out of repositories with no route back.
+    "access_control",
+    # Sources keep existing after a downgrade. Without a way to list
+    # and delete them the tenant holds rows nobody can see or stop.
+    "scan_sources",
+}
+
+
 def test_other_gates_have_no_escape_hatch():
-    """Only access control can strand someone; the rest fully gate."""
+    """Everything else gates fully.
+
+    A hatch is a hole with a justification; one without a reason is
+    just a hole.
+    """
     for feature in E.ENTERPRISE_FEATURES:
-        if feature == "access_control":
+        if feature in _FEATURES_WITH_AN_ESCAPE_HATCH:
             continue
         for method in ("GET", "POST", "DELETE"):
-            assert E.method_exempt(feature, method) is False
+            assert E.method_exempt(feature, method) is False, (feature, method)
+
+
+def test_every_hatch_is_one_we_declared():
+    """The set above must not drift from the module."""
+    assert set(E.GATED_FEATURE_ESCAPE_HATCHES) == _FEATURES_WITH_AN_ESCAPE_HATCH
+
+
+def test_no_hatch_opens_a_write():
+    """Reading and undoing stay open; creating never does."""
+    for feature in E.GATED_FEATURE_ESCAPE_HATCHES:
+        for method in ("POST", "PUT", "PATCH"):
+            assert E.method_exempt(feature, method) is False, (feature, method)
 
 
 def test_users_and_roles_are_never_gated():
@@ -459,3 +489,47 @@ def test_removing_a_webhook_stays_open_in_community():
     # And the gate is still on the half that creates.
     assert 'require_enterprise("webhooks")' in inspect.getsource(
         webhooks).split("def delete_webhook_config")[0]
+
+
+# ── scan sources: non-git scanning ───────────────────────────────────
+
+
+def test_scan_sources_are_gated():
+    settings.EDITION = "community"
+    assert E.feature_enabled("scan_sources") is False
+    settings.EDITION = "enterprise"
+    assert E.feature_enabled("scan_sources") is True
+    settings.EDITION = "community"
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_reading_and_removing_sources_stay_open(method):
+    """A downgrade must not leave rows nobody can inspect or remove.
+
+    The same escape hatch access control has: creating is the
+    Enterprise capability, seeing what is still configured and
+    stopping it are not.
+    """
+    settings.EDITION = "community"
+    assert E.method_exempt("scan_sources", method) is True
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+def test_creating_a_source_is_refused(method):
+    settings.EDITION = "community"
+    assert E.method_exempt("scan_sources", method) is False
+
+
+def test_a_stored_source_stops_scanning_in_community():
+    """Refusing the write is not enough.
+
+    Sources written under an Enterprise licence would otherwise keep
+    being scanned on every schedule tick and every manual trigger —
+    the same hole the detector registry and the scheduler had.
+    """
+    from apps.worker import tasks
+    src = inspect.getsource(tasks._run_source_scan)
+    assert 'feature_enabled("scan_sources")' in src
+    # Checked before any work, so nothing is fetched or stored.
+    head = src[:src.index("import apps.api.app.models")]
+    assert "feature_enabled" in head
