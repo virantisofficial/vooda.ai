@@ -4170,21 +4170,14 @@ function NotificationsFullSection() {
   // (no Add button visible while the create form is open).
   const { setAction } = useContext(SectionActionContext);
 
-  // Notification channels are Enterprise. All five stay on screen,
-  // greyed and badged, so the section shows what the edition includes
-  // rather than an empty list.
+  // No edition logic in here. The Notifications tile on the hub is the
+  // gate and does not open in Community, so this section is only ever
+  // rendered where every channel in it works.
   //
-  // The in-app bell is untouched — it is written straight to the
-  // notifications table rather than through a channel, so the signal
-  // that says triage could not run still reaches the customer. A
-  // licence must not be able to silence that.
-  const [channelsGatedList, setChannelsGatedList] = useState<string[]>([]);
-  useEffect(() => {
-    getEdition()
-      .then((r) => setChannelsGatedList(r.data?.gated || []))
-      .catch(() => setChannelsGatedList([]));
-  }, []);
-  const channelsGated = channelsGatedList.includes("notifications");
+  // The in-app bell is a separate path entirely — written straight to
+  // the notifications table rather than dispatched through a channel —
+  // so gating the channels never touched it. A licence must not be
+  // able to silence the signal that says triage could not run.
 
   const [savedIntegrations, setSavedIntegrations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -4509,23 +4502,10 @@ function NotificationsFullSection() {
           {!selectedProvider ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {NOTIFICATION_CHANNELS.map((ch) => (
-                <button key={ch.provider}
-                  onClick={() => { if (!channelsGated) handleSelectProvider(ch.provider); }}
-                  disabled={channelsGated}
-                  aria-disabled={channelsGated}
-                  title={channelsGated ? `${ch.name} notifications are available in Vooda Enterprise` : undefined}
-                  className={`relative text-left p-4 rounded-xl border transition-all ${
-                    channelsGated
-                      ? "border-white/[0.06] opacity-60 cursor-not-allowed"
-                      : "border-white/[0.06] hover:border-red-500/30 hover:bg-red-500/5"
-                  }`}>
-                  {channelsGated && (
-                    <span className="absolute top-3 right-3 text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
-                      Enterprise
-                    </span>
-                  )}
+                <button key={ch.provider} onClick={() => handleSelectProvider(ch.provider)}
+                  className="text-left p-4 rounded-xl border border-white/[0.06] hover:border-red-500/30 hover:bg-red-500/5 transition-all">
                   <div className="flex items-center gap-3 mb-2">
-                    <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${channelsGated ? "from-slate-700 to-slate-800" : ch.color} flex items-center justify-center text-white`}>
+                    <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${ch.color} flex items-center justify-center text-white`}>
                       {ch.icon}
                     </div>
                     <span className="text-sm font-medium text-slate-200">{ch.name}</span>
