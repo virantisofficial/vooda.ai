@@ -3452,7 +3452,8 @@ function ChangelogContent() {
         These are marked <strong>Enterprise</strong> in the interface and open only under a
         commercial licence: non-git scan sources, scan schedules, inbound webhooks, notification
         channels (Slack, Teams, email, PagerDuty, webhook), ticketing (Jira, ServiceNow, custom),
-        org-specific custom detectors, multi-team scoping, and audit export and retention.
+        org-specific custom detectors, multi-team scoping, the full audit log, and audit export
+        and retention. The dashboard&apos;s Recent Activity panel keeps working in every edition.
       </P>
       <Note>
         Nothing is hidden. A gated feature is shown with an <strong>Enterprise</strong> badge rather

@@ -10,7 +10,7 @@ import {
   getMetricsOverview, getFindingsMetrics,
   getRepositories, getScanSources, getMTTRMetrics, getTrendData, getRotationSummary, getFindings,
   getFindingsByCategory, getTopLeakingRepos,
-  getFindingsBreakdown, getAIAccuracy, getAuditEvents,
+  getFindingsBreakdown, getAIAccuracy, getAuditEvents, getEdition,
 } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { Skeleton, SkeletonKpiTile, SkeletonCard } from "@/components/ui/Skeleton";
@@ -280,6 +280,17 @@ export default function DashboardPage() {
   void user;
 
   const [loading, setLoading] = useState(true);
+
+  // The full audit log is Enterprise. Recent Activity below reads the
+  // audit API directly, which stays open in every edition — so the
+  // panel keeps working, but the link out of it leads to a tile that
+  // does not open, and a link that goes nowhere is worse than none.
+  const [auditGated, setAuditGated] = useState(false);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setAuditGated((r.data?.gated || []).includes("audit")))
+      .catch(() => setAuditGated(false));
+  }, []);
 
   // Time-range state — initialised from ?range= URL param so the view is
   // shareable / bookmarkable.  `days === 0` means "all time".
@@ -1029,9 +1040,16 @@ export default function DashboardPage() {
         <div className="card p-4">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Recent Activity</h3>
-            <Link href="/settings/admin?tab=audit" className="text-[10px] flex items-center gap-1" style={{ color: "#ef4444" }}>
-              View All <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-            </Link>
+            {auditGated ? (
+              <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25"
+                    title="The full audit log is available in Vooda Enterprise">
+                Enterprise
+              </span>
+            ) : (
+              <Link href="/settings/admin?tab=audit" className="text-[10px] flex items-center gap-1" style={{ color: "#ef4444" }}>
+                View All <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+              </Link>
+            )}
           </div>
           {displayEvents.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8">

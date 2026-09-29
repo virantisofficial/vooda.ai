@@ -185,7 +185,8 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 
 > **If you are upgrading from an earlier release.** Some capabilities now
 > require a commercial licence: non-git scan sources, scan schedules, inbound
-> webhooks, notification channels and ticketing. They are shown in the
+> webhooks, notification channels, ticketing and the full audit log. They
+> are shown in the
 > interface with an **Enterprise** badge rather than removed, so you can see
 > what a licence adds. Anything you had already configured stays readable and
 > removable — an edition change never leaves you holding settings you cannot
@@ -203,7 +204,8 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 | Compliance reporting | ✅ | ✅ |
 | Suppressions & rule overrides | ✅ | ✅ |
 | Multi-team scoping — business units, per-user access grants | — | ✅ |
-| Audit log — view & search | ✅ | ✅ |
+| Recent activity on the dashboard | ✅ | ✅ |
+| Audit log — full view & search | — | ✅ |
 | Audit export & retention enforcement | — | ✅ |
 | Org-specific custom detectors | — | ✅ |
 | Migrate from another scanner — import findings **and triage history** | — | ✅ |
