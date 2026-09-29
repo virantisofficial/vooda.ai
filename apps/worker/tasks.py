@@ -2557,10 +2557,24 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             db.add(scan_job)
             await db.commit()
 
-            # Clone repo (reuse existing clone if available)
-            repo_path = f"/app/storage/repos/{repo.id}"
-            if not os.path.exists(repo_path):
-                repo_path = await _clone_repository(repo.url, str(repo.id), branch)
+            # Clone with history, and deepen a clone that lacks it.
+            #
+            # A webhook scan wants the diff between the pushed range,
+            # which needs the BASE commit present locally. The default
+            # clone is --depth 1, and this path used to skip
+            # _clone_repository entirely whenever the directory already
+            # existed — so the base was never reachable, _base_usable
+            # was always false, and the scan_diff branch below could not
+            # run. Every webhook event fell through to a full scan while
+            # the code read as though it were incremental.
+            #
+            # Calling it unconditionally is what deepens an existing
+            # shallow clone: the helper widens the remote refspec and
+            # fetches --unshallow when it finds one, and returns the
+            # existing path otherwise.
+            repo_path = await _clone_repository(
+                repo.url, str(repo.id), branch, full_history=True,
+            )
 
             # Fetch latest commits
             import subprocess
