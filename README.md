@@ -183,6 +183,15 @@ Findings then carry `not_validated` instead of live/inactive. Detection and tria
 
 Both editions are self-hosted — you run Vooda on your own infrastructure either way. **Enterprise** is the same software under a commercial licence, with more: the complete set of source connectors, secret-manager coverage with rotation write-back, fresh signatures the day they ship, and a support line with an SLA.
 
+> **If you are upgrading from an earlier release.** Some capabilities now
+> require a commercial licence: non-git scan sources, scan schedules, inbound
+> webhooks, notification channels and ticketing. They are shown in the
+> interface with an **Enterprise** badge rather than removed, so you can see
+> what a licence adds. Anything you had already configured stays readable and
+> removable — an edition change never leaves you holding settings you cannot
+> inspect or undo — but it stops running until the licence is in place. Set
+> `EDITION=enterprise` in your `.env` to enable them.
+
 | | Community (this repo) | Enterprise ([vooda.ai](https://vooda.ai)) |
 |---|---|---|
 | Full scan engine | ✅ | ✅ |

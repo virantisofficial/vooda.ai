@@ -1123,7 +1123,7 @@ function SourcesContent() {
         ["Cloud Storage", <code key="2">/sources/cloud-storage</code>, "Amazon S3, Azure Blob Storage, Google Cloud Storage"],
         ["DevOps", <code key="3">/sources/devops</code>, "CI/CD Logs, Container Registry, Terraform State"],
       ]} />
-      <Note><strong>Enterprise-only source families.</strong> Team chat (Slack, Microsoft Teams), wikis (Confluence, Notion, SharePoint), and additional ticketing and object-store connectors are part of the Enterprise edition — not the community catalog. GitHub / GitLab / Bitbucket <em>code</em> is always scannable via the repository scan path.</Note>
+      <Note><strong>Non-git sources are Enterprise.</strong> Issue trackers (Jira, ServiceNow, Azure DevOps), cloud storage (Amazon S3, Google Cloud Storage, Azure Blob), CI / build surfaces (container registries, CI/CD logs, container images), team chat (Slack, Microsoft Teams, Mattermost) and wikis (Confluence, Notion, SharePoint) are part of the Enterprise edition. GitHub / GitLab / Bitbucket <em>code</em> is always scannable in the community edition via the repository scan path — the whole engine runs behind it, including every detector, live verification and AI triage.</Note>
 
       <H2>The Connection Wizard — General Flow</H2>
       <Step n={1} title="Open the catalog">
@@ -1685,7 +1685,7 @@ function IntegrationsContent() {
 
       <Note>This section covers <strong>outbound integrations</strong> — destinations Vooda sends data to (alerts, tickets) — plus <strong>inbound non-source connectors</strong> like AI providers and webhook receivers. For <strong>inbound scan sources</strong> (Jira tickets, S3 buckets to be scanned), see <strong>the Connect a scan source guide — Scan Sources</strong>.</Note>
 
-      <Img src="/docs/screenshots/integrations.png" alt="Integrations page" caption="Figure 16.1 — The Integrations hub at /integrations. Four categories in the community edition: AI Provider, Notifications, Webhooks (Inbound), and Ticketing. (Vault & Secret Managers and SIEM forwarding are Enterprise-only.)" />
+      <Img src="/docs/screenshots/integrations.png" alt="Integrations page" caption="Figure 16.1 — The Integrations hub at /integrations. AI Provider is available in the community edition; Notifications, Webhooks (Inbound) and Ticketing carry an Enterprise badge and open only under a commercial licence. (Vault & Secret Managers and SIEM forwarding are Enterprise-only and are not listed here.)" />
 
       <H2>GitHub — Repository Scanner Integration</H2>
       <P><strong>Purpose:</strong> Clone repositories over HTTPS, receive push/PR webhook events, and post commit-status checks.</P>
@@ -3441,6 +3441,25 @@ function ChangelogContent() {
         <code> ./install.sh update</code>, which pulls the new code and rebuilds without touching
         your data (it takes a database backup first).
       </P>
+      <H3>Edition boundary</H3>
+      <P>
+        The community edition scans <strong>git repositories</strong> — the whole engine, every
+        detector, live credential verification, AI triage, suppressions and rule overrides, the CLI,
+        CI gates and the pre-push hook. Findings, the dashboard and the in-app notification bell all
+        work, including the signal that tells you triage could not run.
+      </P>
+      <P>
+        These are marked <strong>Enterprise</strong> in the interface and open only under a
+        commercial licence: non-git scan sources, scan schedules, inbound webhooks, notification
+        channels (Slack, Teams, email, PagerDuty, webhook), ticketing (Jira, ServiceNow, custom),
+        org-specific custom detectors, multi-team scoping, and audit export and retention.
+      </P>
+      <Note>
+        Nothing is hidden. A gated feature is shown with an <strong>Enterprise</strong> badge rather
+        than removed from the interface, so you can see what a licence adds. Reading and removing
+        what you already configured stays available in every edition — a change of licence never
+        leaves you holding settings you cannot inspect or undo.
+      </Note>
       <Note>Enterprise customers receive continuous detector and signature updates ahead of the monthly community cut, with release notes delivered through their support channel.</Note>
     </>
   );
