@@ -14,6 +14,26 @@ import json
 
 import pytest
 
+from apps.api.app.core.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _configurable_webhooks():
+    """Configure webhooks as Enterprise; test the receiver as itself.
+
+    Configuring an inbound webhook is gated — Community triggers its
+    own scans rather than having Vooda listen for pushes. These tests
+    are about whether the RECEIVER can be forged, which has to hold in
+    every edition, and they reach it by setting a secret through the
+    gated config endpoint. Without this the setup calls 402 and the
+    signature checks never run, which would retire five security tests
+    over a licensing change.
+    """
+    previous = settings.EDITION
+    settings.EDITION = "enterprise"
+    yield
+    settings.EDITION = previous
+
 
 async def _set_secret(client, jwt, provider, secret, enable=None):
     """Set the signing secret, and enable the webhook when one is given.
@@ -216,3 +236,25 @@ async def test_disabled_webhook_says_disabled_not_missing_secret(client, admin_j
         "a secret IS configured — reporting it missing sends the operator "
         "to fix the wrong thing"
     )
+
+
+def test_a_clone_url_matches_the_repository_it_names():
+    """Providers send the clone URL; the UI stores what was pasted.
+
+    GitHub's `clone_url` ends in ".git" and a repository added through
+    the UI usually does not, so matching on string equality missed
+    every one of them. The delivery still verified and a scan job was
+    still created — it simply had no repository, so it analysed
+    nothing and the repository's webhook health stayed blank. A
+    silent no-op is the worst shape for this: the provider reports
+    2xx, and nothing scans.
+    """
+    import inspect
+
+    from apps.api.app.routers import webhooks
+
+    src = inspect.getsource(webhooks.receive_webhook)
+    assert "url_match_candidates" in src, (
+        "match every spelling of the same repository, not one string"
+    )
+    assert "Repository.url == event.repo_url" not in src

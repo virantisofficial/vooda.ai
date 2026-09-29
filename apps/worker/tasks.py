@@ -248,7 +248,47 @@ _FAILURE_TYPE_COPY = {
             "timeout, or revoked API key). Check API key validity and rate "
             "limits on the primary model."
         ),
+    },    # The model answered nothing at all — an unreachable endpoint, a
+    # rejected request, or a circuit breaker that stopped trying. The
+    # findings are untriaged, which is not the same as low risk, and
+    # the fix is the customer's to make.
+    # The provider refused the ACCOUNT, before any model was reached.
+    #
+    # These used to fall under upstream_error, whose advice is to switch
+    # model_id or wait for the upstream to recover. Neither can work
+    # here: a refused account is refused for every model, and nothing
+    # recovers on its own. An operator whose overnight scan died was
+    # being sent to do two things that could not help, while the one
+    # thing that would was not mentioned.
+    "payment_required": {
+        "summary": "provider refused — payment required",
+        "body": ("The provider refused these requests for payment. Add "
+                 "credit to the account, then re-run AI analysis on the "
+                 "scan. Changing the model will not help — no model can "
+                 "answer until the account is funded."),
     },
+    "credential_rejected": {
+        "summary": "provider rejected the credential",
+        "body": ("The provider rejected the API key for this provider. "
+                 "Re-enter it on the AI Provider screen, then re-run AI "
+                 "analysis on the scan. Changing the model will not help "
+                 "while the credential is refused."),
+    },
+    "rate_limited": {
+        "summary": "provider rate-limited the account",
+        "body": ("The provider rate-limited this account and the retries "
+                 "did not outlast it. Wait for the limit to reset, or move "
+                 "to a plan with a higher limit, then re-run AI analysis "
+                 "on the scan."),
+    },
+    "no_response": {
+        "summary": "the model returned no answer",
+        "body": ("Vooda could not get a verdict from this model — it may be "
+                 "unreachable, the model name may be wrong, or the provider may "
+                 "have rejected the request. Check it on the AI Provider screen, "
+                 "then re-run AI analysis on the scan."),
+    },
+
 }
 _DEFAULT_FAILURE_COPY = {
     "summary": "triage classifications failing",
@@ -546,9 +586,24 @@ async def _emit_triage_health_signal(
     if not model_cfg:
         return
 
-    if triaged == 0 or parse_failure_rate < _TRIAGE_PARSE_FAILURE_THRESHOLD:
+    failed_calls = sum((failure_summary or {}).values())
+
+    # Zero successes with failures recorded is the WORST case, not a
+    # healthy one. The old guard read `triaged == 0` as nothing to
+    # report and returned early — so a model that answered nothing at
+    # all raised no notification, left no badge, and cleared any
+    # existing warning, while a model that answered badly half the time
+    # raised one. Measured: three findings, three 400s, no notification,
+    # last_error still empty, three secrets left in NEEDS_REVIEW with
+    # nothing on screen to say why.
+    total_failure = failed_calls > 0 and triaged == 0
+    if total_failure:
+        parse_failure_rate = 1.0
+
+    if not total_failure and (triaged == 0 or parse_failure_rate < _TRIAGE_PARSE_FAILURE_THRESHOLD):
         # Healthy run — clear any stale "triage_parse_failure:" warning.
-        if model_cfg.last_error and model_cfg.last_error.startswith("triage_parse_failure:"):
+        if model_cfg.last_error and model_cfg.last_error.startswith(
+                ("triage_parse_failure:", "triage_failed:")):
             model_cfg.last_error = None
             await db.flush()
         return
@@ -557,29 +612,68 @@ async def _emit_triage_health_signal(
     # engine recorded in `failure_summary`. `classified` stays in the
     # notification metadata for context, but must not define failure —
     # a verdict held for human review is triage working, not breaking.
-    failed = sum((failure_summary or {}).values()) or (triaged - classified)
+    failed = failed_calls or (triaged - classified)
     dominant_type, short_summary, full_body = _pick_failure_copy(failure_summary)
 
     # Compact one-liner for the provider-card badge (hovering shows this).
     err_msg = (
+        f"triage_failed: all {failed} findings — {short_summary} "
+        f"(failure_type={dominant_type})."
+        if total_failure else
         f"triage_parse_failure: {failed}/{triaged} findings — {short_summary} "
         f"(failure_type={dominant_type})."
     )
     model_cfg.last_error = err_msg[:500]
 
-    user_q = await db.execute(
-        _select(User.id).where(User.tenant_id == tenant_id).limit(1)
+    # Every active member of the tenant, not one arbitrary row.
+    #
+    # This selected `.limit(1)` with no ordering, so the notification
+    # went to whichever user the database happened to return first —
+    # measured, a dormant test account — while the person actually
+    # watching the screen saw nothing. The row existed, the bell stayed
+    # quiet, and a model that had stopped triaging looked fine.
+    #
+    # There is no role column to prefer an admin by, so it goes to
+    # everyone who could act on it. A model that cannot triage affects
+    # every finding in the tenant.
+    user_rows = await db.execute(
+        _select(User.id).where(
+            User.tenant_id == tenant_id,
+            User.is_active == True,  # noqa: E712
+        )
     )
-    user_id = user_q.scalar_one_or_none()
-    if user_id is None:
+    user_ids = [r for r in user_rows.scalars().all()]
+    if not user_ids:
         await db.flush()
         return
 
-    notif = Notification(
+    if total_failure:
+        title = f"AI triage could not run on {model_cfg.name}"
+        body = (f"Every call failed for {failed} finding"
+                f"{'' if failed == 1 else 's'}, so they are untriaged rather "
+                f"than low risk: {short_summary}. {full_body}")
+    else:
+        title = f"AI triage failing on {model_cfg.name}"
+        body = f"{failed} of {triaged} findings: {short_summary}. {full_body}"
+
+    for _uid in user_ids:
+        db.add(_build_triage_notification(
+            tenant_id, _uid, model_cfg, title, body,
+            scan_job_id, triaged, classified, parse_failure_rate,
+            dominant_type, failure_summary,
+        ))
+    await db.flush()
+
+
+def _build_triage_notification(tenant_id, user_id, model_cfg, title, body,
+                               scan_job_id, triaged, classified,
+                               parse_failure_rate, dominant_type, failure_summary):
+    from apps.api.app.models.notification import Notification
+    return Notification(
         tenant_id=tenant_id,
         user_id=user_id,
-        title=f"AI triage failing on {model_cfg.name}",
-        body=f"{failed} of {triaged} findings: {short_summary}. {full_body}",
+        title=title,
+        body=body,
         notification_type="triage_health",
         resource_type="ai_model",
         resource_id=str(model_cfg.id),
@@ -594,8 +688,6 @@ async def _emit_triage_health_signal(
             "failure_summary": failure_summary or {},
         },
     )
-    db.add(notif)
-    await db.flush()
 
 
 async def _get_db_session():
@@ -1399,6 +1491,28 @@ async def _run_ai_triage_retro(scan_job_id: str):
             _stats["false_positives"] = fp_after
             _stats["true_positives"] = tp_after
             job.stats = _stats
+
+            # Same health signal the full scan raises. Re-running triage
+            # is exactly when a customer is watching for whether the
+            # model works, and this path recorded the failures into
+            # stats and then told nobody: no notification, no badge on
+            # the provider card, findings back at needs-review with
+            # nothing on screen to say why.
+            try:
+                _classified = fp_after + tp_after
+                _failed = sum((failure_summary or {}).values())
+                await _emit_triage_health_signal(
+                    db=db,
+                    tenant_id=job.tenant_id,
+                    scan_job_id=job.id,
+                    triaged=triaged,
+                    classified=_classified,
+                    parse_failure_rate=(_failed / triaged if triaged > 0 else 0.0),
+                    failure_summary=failure_summary,
+                )
+            except Exception as _sig_err:
+                logger.warning("triage_health_signal_failed",
+                               scan_job_id=str(scan_job_id), error=str(_sig_err)[:200])
             job.status = ScanStatus.COMPLETED
             try:
                 job.heartbeat_at = datetime.now(timezone.utc)
@@ -1433,6 +1547,17 @@ def run_source_scan(self, scan_job_id: str, scan_source_id: str):
 
 
 async def _run_source_scan(scan_job_id: str, scan_source_id: str):
+    # Non-git scanning is Enterprise, and a gate on configuring
+    # something that still runs is not a gate. Sources written under an
+    # Enterprise licence would otherwise keep scanning forever after a
+    # downgrade — the same hole the detector registry and the scheduler
+    # had. Checked before any work, so nothing is fetched or stored.
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("scan_sources"):
+        logger.info("source_scan_skipped_community_edition",
+                    scan_source_id=str(scan_source_id))
+        return
+
     import apps.api.app.models  # noqa: F401
     import asyncio
     import hashlib
@@ -2443,10 +2568,24 @@ async def _run_webhook_scan(provider: str, event_type: str, repo_url: str, repo_
             db.add(scan_job)
             await db.commit()
 
-            # Clone repo (reuse existing clone if available)
-            repo_path = f"/app/storage/repos/{repo.id}"
-            if not os.path.exists(repo_path):
-                repo_path = await _clone_repository(repo.url, str(repo.id), branch)
+            # Clone with history, and deepen a clone that lacks it.
+            #
+            # A webhook scan wants the diff between the pushed range,
+            # which needs the BASE commit present locally. The default
+            # clone is --depth 1, and this path used to skip
+            # _clone_repository entirely whenever the directory already
+            # existed — so the base was never reachable, _base_usable
+            # was always false, and the scan_diff branch below could not
+            # run. Every webhook event fell through to a full scan while
+            # the code read as though it were incremental.
+            #
+            # Calling it unconditionally is what deepens an existing
+            # shallow clone: the helper widens the remote refspec and
+            # fetches --unshallow when it finds one, and returns the
+            # existing path otherwise.
+            repo_path = await _clone_repository(
+                repo.url, str(repo.id), branch, full_history=True,
+            )
 
             # Fetch latest commits
             import subprocess
@@ -7450,6 +7589,22 @@ async def _run_ai_triage(db: AsyncSession, job, repo_path: str) -> tuple[int, in
                 )
             except Exception as cache_err:
                 logger.warning("cache_store_failed", finding_id=str(finding.id), error=str(cache_err)[:100])
+
+    # A finding submitted for triage that came back with no usable
+    # result is a failure, whatever the cause.
+    #
+    # The per-result counting above only sees entries the engine
+    # returned a payload for. When the circuit breaker opens it
+    # abandons the remaining calls and returns nothing for them, so
+    # three findings, three 400s and an open breaker recorded an empty
+    # failure_summary — and the health signal read that as a clean run.
+    # Counting the shortfall catches any path that produces no result,
+    # not just this one.
+    _unaccounted = len(finding_map) - triaged - sum(failure_summary.values())
+    if _unaccounted > 0:
+        failure_summary["no_response"] = (
+            failure_summary.get("no_response", 0) + _unaccounted
+        )
 
     await db.commit()
     if below_threshold_count:

@@ -126,8 +126,8 @@ Two things to know:
 
 | Trigger | What it scans |
 |---|---|
-| **Push webhook** | The files changed by the push |
-| **Pull request webhook** | The code changed by the pull request |
+| **Push webhook** | The files changed by the push *(Enterprise)* |
+| **Pull request webhook** | The code changed by the pull request *(Enterprise)* |
 | **CLI / CI gate** | The files or diff you point it at |
 | **Pre-commit hook** | Staged changes, before the commit is created |
 | **Scheduled scans** | Repositories and sources on a recurring schedule *(Enterprise)* |
@@ -147,13 +147,15 @@ your repository**, so no code scan will ever see it, however deep it
 goes.
 
 That content is covered by **Sources**, configured separately from
-repositories:
+repositories. Sources are part of the Enterprise edition — the
+community edition scans git repositories, with the full engine behind
+them:
 
 | Source | Discussion content scanned | Edition |
 |---|---|---|
-| **Jira** | Issue descriptions, comments, custom text fields, attachments | Community |
-| **ServiceNow** | Incident, change and service request descriptions and comments | Community |
-| **Azure DevOps** | Work item descriptions and discussion | Community |
+| **Jira** | Issue descriptions, comments, custom text fields, attachments | Enterprise |
+| **ServiceNow** | Incident, change and service request descriptions and comments | Enterprise |
+| **Azure DevOps** | Work item descriptions and discussion | Enterprise |
 | **GitHub Issues** | Issue descriptions and comments, plus pull request descriptions and comments | Enterprise |
 | **Bitbucket** | Issue and pull request descriptions and comments | Enterprise |
 

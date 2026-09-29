@@ -9,6 +9,7 @@ Includes task-based routing to select the correct model per task.
 
 import json
 import asyncio
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -126,8 +127,49 @@ class AIProvider(ABC):
         ...
 
 
+#: A provider naming a parameter it will not accept, e.g.
+#: "`temperature` is deprecated for this model."
+_REJECTED_PARAM = re.compile(
+    r"[`\"']?([a-z_]{3,30})[`\"']?\s+is\s+(?:deprecated|not supported|unsupported|invalid)",
+    re.I,
+)
+
+
+def openai_compatible_root(base_url: str | None) -> str:
+    """The server root, with any trailing /v1 removed.
+
+    Every OpenAI-compatible provider documents its base URL WITH the
+    version segment — OpenRouter, vLLM, LM Studio and LiteLLM all say
+    ".../v1" — so that is what an operator pastes. Appending "/v1/..."
+    to it produced ".../v1/v1/models", a 404 on a URL copied straight
+    from the provider's own documentation.
+
+    The completion path already allowed for this and discovery did not,
+    so the same endpoint listed nothing and then answered requests
+    perfectly. One rule for both.
+    """
+    base = (base_url or "https://api.openai.com").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")].rstrip("/")
+    return base
+
+
+def rejected_parameter(error_body: str) -> str | None:
+    """Which request parameter did the provider refuse?
+
+    Models outlive the payloads written for them. claude-opus-5-5
+    rejects `temperature` outright — a 400, not a warning — so a field
+    Vooda had always sent made the whole model unusable overnight.
+    Dropping the named field and retrying costs one request and keeps
+    working against a provider that changes under us, which a fixed
+    payload cannot.
+    """
+    m = _REJECTED_PARAM.search(error_body or "")
+    return m.group(1) if m else None
+
+
 class ClaudeProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
+    def __init__(self, api_key: str, model: str,
                  json_strategy: str = JSON_PREFILL,
                  workspace_id: str | None = None):
         self._api_key = api_key
@@ -177,7 +219,38 @@ class ClaudeProvider(AIProvider):
             payload["stop_sequences"] = stop_sequences
 
         async with httpx.AsyncClient(timeout=60) as client:
+            # Adapt to what the provider says it will not accept, and
+            # ask again — bounded, and only while it keeps naming
+            # something new. Models outlive the payloads written for
+            # them: claude-opus-5-5 rejects `temperature` AND assistant
+            # prefill, one after the other, so a single retry fixed the
+            # first refusal and then failed on the second.
             r = await client.post(url, json=payload, headers=headers)
+            for _ in range(3):
+                if r.status_code != 400:
+                    break
+                adapted = False
+
+                bad = rejected_parameter(r.text)
+                if bad and bad in payload:
+                    payload.pop(bad)
+                    adapted = True
+
+                # Prefill is how this adapter asks for JSON — seed the
+                # reply with "{" so the model continues from it. Newer
+                # models refuse an assistant turn at the end. Without it
+                # the prompt still asks for JSON and the engine salvages
+                # an answer wrapped in prose, so dropping it costs
+                # tokens rather than the whole model.
+                if prefilled and "prefill" in r.text.lower():
+                    if payload["messages"] and payload["messages"][-1]["role"] == "assistant":
+                        payload["messages"].pop()
+                    prefilled = False
+                    adapted = True
+
+                if not adapted:
+                    break
+                r = await client.post(url, json=payload, headers=headers)
             # engine.py classifies an upstream failure by catching
             # RuntimeError. Letting httpx.HTTPStatusError escape bypasses
             # that handler, so a 429 becomes an unhandled exception
@@ -222,7 +295,7 @@ class OpenAIProvider(AIProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o",
+        model: str,
         base_url: Optional[str] = None,
         timeout: int = 120,
         extra_payload: Optional[dict] = None,
@@ -378,10 +451,7 @@ class OpenAIProvider(AIProvider):
         return payload
 
     def _chat_url(self) -> str:
-        url = f"{self._base_url}/v1/chat/completions"
-        if self._base_url.endswith("/v1") or "/v1/" in self._base_url:
-            url = f"{self._base_url}/chat/completions" if self._base_url.endswith("/v1") else f"{self._base_url}chat/completions"
-        return url
+        return f"{openai_compatible_root(self._base_url)}/v1/chat/completions"
 
     async def complete(self, system_prompt: str, user_prompt: str, max_tokens: int = 4096, temperature: float = 0.1, stop_sequences: list[str] | None = None, json_mode: bool = False) -> AIResponse:
         """Stream the completion (SSE) with idle-timeout semantics.
@@ -506,7 +576,7 @@ class OpenAIProvider(AIProvider):
 
 
 class GoogleProvider(AIProvider):
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash",
+    def __init__(self, api_key: str, model: str,
                  json_strategy: str = JSON_MIME):
         self.api_key = api_key
         self.model = model
@@ -582,24 +652,40 @@ def create_provider(
     """
     strategy = resolve_json_strategy(provider_name, supports_json_mode)
 
+    # No default model name.
+    #
+    # These used to fall back to a literal per provider —
+    # claude-sonnet-4-20250514, gpt-4o, gemini-2.0-flash, phi3.5 — which
+    # is a maintenance list that ages silently. Two of those four are
+    # already behind: the live Anthropic catalogue lists Sonnet 5 and
+    # Opus 5.5, and Gemini 2.x now returns 404 on a current key. A
+    # config with no model is a configuration error, and substituting a
+    # name Vooda invented turns it into a confusing API failure much
+    # later instead.
+    if not model:
+        raise ValueError(
+            f"No model configured for provider '{provider_name}'. "
+            "Select one on the AI Provider screen."
+        )
+
     if provider_name in ("claude", "anthropic"):
         return ClaudeProvider(
-            api_key=api_key, model=model or "claude-sonnet-4-20250514",
+            api_key=api_key, model=model,
             json_strategy=strategy,
             workspace_id=(extra_payload or {}).get("workspace_id"),
         )
     elif provider_name == "openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key, model=model, extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "azure_openai":
-        return OpenAIProvider(api_key=api_key, model=model or "gpt-4o", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key, model=model, base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name == "google":
-        return GoogleProvider(api_key=api_key, model=model or "gemini-2.0-flash", json_strategy=strategy)
+        return GoogleProvider(api_key=api_key, model=model, json_strategy=strategy)
     elif provider_name == "ollama":
         # Ollama uses OpenAI-compatible API at /v1/chat/completions — no API key needed
-        return OpenAIProvider(api_key=api_key or "ollama", model=model or "phi3.5", base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key or "ollama", model=model, base_url=endpoint_url or "http://localhost:11434", extra_payload=extra_payload, json_strategy=strategy)
     elif provider_name in ("custom", "aws_bedrock", "lm_studio", "vllm", "localai", "huggingface_tgi"):
         # Custom / self-hosted endpoints use OpenAI-compatible API
-        return OpenAIProvider(api_key=api_key or "none", model=model or "default", base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
+        return OpenAIProvider(api_key=api_key or "none", model=model, base_url=endpoint_url, extra_payload=extra_payload, json_strategy=strategy)
     else:
         raise ValueError(f"Unknown AI provider: {provider_name}")
 
@@ -628,8 +714,15 @@ async def get_provider_for_task(task: str, tenant_id: str, db=None) -> Optional[
             m = (await session.execute(query)).scalar_one_or_none()
 
     if m:
+        from packages.common.encryption import decrypt_credential
+        # Decrypted for this call only. If it cannot be read the
+        # exception travels — triage that runs with an unusable
+        # credential produces a scan whose findings are untriaged and
+        # look reviewed, which is the failure mode the health signal
+        # exists to prevent.
         return create_provider(
-            m.provider, m.api_key_encrypted, m.model_id, m.endpoint_url,
+            m.provider, decrypt_credential(m.api_key_encrypted or ""),
+            m.model_id, m.endpoint_url,
             extra_payload=m.provider_config or None,
             # The tenant's legacy flag still steers the NATIVE mechanism
             # (it exists because forcing response_format through

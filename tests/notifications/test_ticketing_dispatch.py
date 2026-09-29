@@ -19,6 +19,25 @@ from services.notifications.dispatcher import NotificationDispatcher, Notificati
 TICKETING_PROVIDERS = ["jira", "servicenow", "linear", "custom_ticketing"]
 
 
+@pytest.fixture(autouse=True)
+def _all_providers_licensed():
+    """Route as Enterprise; whether a provider is LICENSED is elsewhere.
+
+    ServiceNow and custom ticketing are Enterprise, and the dispatcher
+    refuses them in Community before routing. That refusal is the
+    point of the gate and is covered in test_edition_gating.py. What
+    this file asks is different and edition-independent: given the
+    provider is allowed, does the dispatcher have a handler for it, or
+    does it fall through to "Unknown channel" and silently file
+    nothing.
+    """
+    from apps.api.app.core.config import settings
+    previous = settings.EDITION
+    settings.EDITION = "enterprise"
+    yield
+    settings.EDITION = previous
+
+
 @pytest.mark.parametrize("provider", TICKETING_PROVIDERS)
 @pytest.mark.asyncio
 async def test_provider_routes_to_a_handler_not_unknown_channel(provider):

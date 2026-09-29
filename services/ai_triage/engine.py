@@ -28,6 +28,39 @@ from apps.api.app.core.validity import normalize as _validity
 logger = structlog.get_logger()
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Pull a JSON object out of a reply that wrapped it in prose.
+
+    Two shapes, in order of confidence:
+      1. a fenced ```json block anywhere in the text
+      2. the outermost {...} span
+
+    Returns None when nothing parses, so the caller reports a real
+    failure rather than inventing a verdict.
+    """
+    import re as _re
+
+    fenced = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.S)
+    if fenced:
+        candidate = fenced.group(1)
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 class TriageEngine:
     def __init__(self, provider: AIProvider, model_config: dict | None = None):
         self.provider = provider
@@ -304,9 +337,24 @@ class TriageEngine:
             )
         except RuntimeError as upstream_exc:
             err_text = str(upstream_exc)
+            # An account the provider refused is not an upstream hiccup.
+            # Both arrive here as a RuntimeError, and sharing a failure
+            # type made them share advice — "switch the model_id, or
+            # retry once the upstream recovers" — which is wrong for a
+            # refusal that reaches every model equally.
+            from services.ai_triage.account_errors import (
+                PAYMENT_REQUIRED, RATE_LIMITED, UNAUTHORIZED, refusal_reason,
+            )
+            _REFUSAL_FAILURE = {
+                PAYMENT_REQUIRED: "payment_required",
+                UNAUTHORIZED: "credential_rejected",
+                RATE_LIMITED: "rate_limited",
+            }
+            failure_type = _REFUSAL_FAILURE.get(
+                refusal_reason(err_text) or "", "upstream_error")
             logger.warning(
                 "ai_response_upstream_error",
-                failure_type="upstream_error",
+                failure_type=failure_type,
                 error=err_text[:300],
                 model=getattr(self.provider, "model", "unknown"),
             )
@@ -321,7 +369,7 @@ class TriageEngine:
                 "required_human_review": True,
                 "evidence": [],
                 "recommended_next_action": "request_human_review",
-                "_parse_failure": "upstream_error",
+                "_parse_failure": failure_type,
             }
 
         # Parse and validate response
@@ -434,6 +482,7 @@ class TriageEngine:
     def _parse_response(self, response: AIResponse) -> dict:
         """Parse AI response into structured result, with retry-safe fallback."""
         content = response.content.strip()
+        salvaged = None
 
         # Strip markdown code fences if present
         if content.startswith("```"):
@@ -442,6 +491,26 @@ class TriageEngine:
 
         try:
             result = json.loads(content)
+        except json.JSONDecodeError:
+            # The model answered correctly and wrapped it in chatter.
+            # Observed on gemini-3.5-flash: 'Here is the JSON requested:'
+            # followed by a fenced block — the fence check above only
+            # fires when the fence is the FIRST thing, so a single line
+            # of preamble threw away a perfectly good verdict.
+            #
+            # Tried only AFTER a strict parse fails, so a well-behaved
+            # model is never second-guessed, and recorded when used: a
+            # model that needs salvaging every time is a model to
+            # replace, and that should be visible rather than hidden.
+            recovered = _extract_json_object(content)
+            if recovered is not None:
+                salvaged = "wrapped_in_prose"
+                content = recovered
+
+        try:
+            result = json.loads(content)
+            if salvaged:
+                result.setdefault("_salvage", salvaged)
         except json.JSONDecodeError as je:
             # Classify the failure so users/ops can distinguish between
             # an empty response, a truncated response, and a format error.
@@ -466,10 +535,17 @@ class TriageEngine:
                 reason = "AI model returned no content (likely timeout or quota issue)."
             elif content.rstrip().endswith((".", ",", ":", "{", "[", "\"")):
                 failure_type = "truncated_response"
+                # No vendor recommendations here. Naming three families
+                # as reliable was a guess that aged badly — measured
+                # live, one of them wraps every answer in markdown
+                # fences and rejects the prefill this code used to ask
+                # for JSON with. Vooda can now measure the model the
+                # customer actually has, so it points at that instead
+                # of advertising someone else's.
                 reason = (f"AI model truncated output mid-JSON — {type(response).__name__} "
                           f"emitted {response.output_tokens} completion tokens before stopping. "
-                          "Consider switching to a model with more reliable structured output "
-                          "(Claude, Gemini, Llama) or increasing max_tokens.")
+                          "Raise max_tokens, or run Check on the AI Provider screen to see "
+                          "what this model does with a sample finding.")
             else:
                 failure_type = "invalid_json"
                 reason = f"AI response was not valid JSON: {je.msg}"

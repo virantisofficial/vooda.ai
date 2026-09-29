@@ -152,7 +152,18 @@ def get_custom_rules_sync(tenant_id, db_session) -> list[SecretRule]:
     Load enabled custom detectors for a tenant from the DB and convert to SecretRule objects.
     Uses a synchronous DB session (for use inside Celery worker tasks).
     Custom rules are NOT cached in _cached_rules — they are per-tenant and per-scan.
+
+    Returns nothing in the Community edition. The CRUD router is gated,
+    which stops new detectors being written, but a gate on writing
+    something that still executes is not a gate: rows created under an
+    Enterprise licence, or before the gate existed, went on running on
+    every scan. Checked here rather than in the callers so a new caller
+    cannot reintroduce the hole.
     """
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("custom_detectors"):
+        return []
+
     from apps.api.app.models.custom_detector import CustomDetector
     from sqlalchemy import select
 
@@ -186,7 +197,13 @@ async def get_custom_rules_async(tenant_id, db_session) -> list[SecretRule]:
     """
     Async version — load enabled custom detectors for a tenant.
     For use inside async FastAPI/worker contexts.
+
+    Community returns nothing, for the reason given on the sync twin.
     """
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("custom_detectors"):
+        return []
+
     from apps.api.app.models.custom_detector import CustomDetector
     from sqlalchemy import select
 

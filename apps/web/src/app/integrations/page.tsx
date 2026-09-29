@@ -12,10 +12,17 @@ import api, {
   getIntegrations, deleteIntegration, updateIntegration,
   getAIModels, createAIModel, updateAIModel, deleteAIModel, testAIModel, getAITaskRouting,
   getAIEngineSettings, updateAIEngineSettings, discoverModels, getAutoConfig,
+  getEdition,
+  probeModels, getProbeResults, checkModelAccuracy,
   getNotificationRules, updateNotificationRules,
   getProviderSchema, testIntegrationConnection, createIntegration, getBusinessUnits, getRepositories,
 } from "@/lib/api";
 import SearchableSelect from "@/components/ui/SearchableSelect";
+import {
+  READY, NEEDS_SETUP, UNVERIFIED, UNUSABLE, readinessHint,
+  readinessLabel, readinessTone, readinessPanelTone,
+  needsExplanation, accuracyTone, type ProbeVerdict,
+} from "@/lib/modelReadiness";
 import { useToast } from "@/components/ui/Toast";
 
 // ═══════════════════════════════════════════════════════════════
@@ -416,12 +423,29 @@ function AIModelsFullSection() {
   // Model discovery state
   const [discoveredModels, setDiscoveredModels] = useState<any[]>([]);
   const [discovering, setDiscovering] = useState(false);
+  // Readiness verdicts, keyed by model_id. Loaded from cache on open so
+  // badges appear instantly; probing on load would bill the customer
+  // for opening a settings page and trip free-tier rate limits.
+  const [probeResults, setProbeResults] = useState<Record<string, ProbeVerdict>>({});
+  const [probingModel, setProbingModel] = useState<string | null>(null);
+  const [verifyingAll, setVerifyingAll] = useState<{ done: number; total: number } | null>(null);
+  const [showProbeDetail, setShowProbeDetail] = useState(false);
+  const [probeFixApplied, setProbeFixApplied] = useState<string | null>(null);
+  const [showOtherModality, setShowOtherModality] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
+  const [showNeedsSetup, setShowNeedsSetup] = useState(false);
+  const [showUnresolved, setShowUnresolved] = useState(false);
+  const [scoringModel, setScoringModel] = useState<string | null>(null);
+  // A ref, not state: the loop reads it between requests and must see
+  // the current value, not the one captured when the run began.
+  const verifyAllCancelled = useRef(false);
   const [discoverStatus, setDiscoverStatus] = useState<{ status: string; message: string } | null>(null);
   const [keyValidated, setKeyValidated] = useState(false);
   // Track the original model_id when entering edit mode. If the user swaps to
   // a different model, we auto-recompute backend defaults so stale per-model
   // values (max_tokens, context_window, etc.) don't leak across models.
   const [originalModelId, setOriginalModelId] = useState<string>("");
+  const [originalName, setOriginalName] = useState<string>("");
   const [defaultsRecomputedFor, setDefaultsRecomputedFor] = useState<string | null>(null);
 
   const loadModels = () => { getAIModels().then((r) => setModels(r.data || [])).catch(() => {}).finally(() => setLoading(false)); };
@@ -463,10 +487,298 @@ function AIModelsFullSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.model_id, editingId, originalModelId]);
 
+  /** True while the form would change which model does the triaging.
+   *
+   *  Clicking a card only edits the form; the swap happens on save.
+   *  Someone who opened this screen to replace an expired key, and
+   *  clicked a card along the way, saved a different triage model
+   *  without being told — the button says "Update Provider" either
+   *  way, and the display name gets rewritten to the new model id, so
+   *  afterwards nothing on the screen looks out of place.
+   */
+  const modelWouldChange = !!(editingId && form.model_id && originalModelId
+                              && form.model_id !== originalModelId);
+
+  /** Put the saved model back, label and all. */
+  const keepSavedModel = () => {
+    setForm((f) => ({ ...f, model_id: originalModelId, name: originalName || f.name }));
+    setDefaultsRecomputedFor(null);
+  };
+
+  const renderModelChangeNotice = (className = "") => (
+    modelWouldChange ? (
+      <p className={`text-[11px] text-amber-400 ${className}`}>
+        Saving switches triage from{" "}
+        <span className="font-mono text-amber-300">{originalModelId}</span> to{" "}
+        <span className="font-mono text-amber-300">{form.model_id}</span>.
+        <button type="button" onClick={keepSavedModel}
+          className="ml-1.5 underline underline-offset-2 hover:text-amber-200 transition-colors">
+          Keep {originalModelId}
+        </button>
+      </p>
+    ) : null
+  );
+
   const providerFor = (p: string) => AI_PROVIDERS.find((pr) => pr.value === p);
 
-  const handleDiscoverModels = async (opts?: { modelConfigId?: string; preserveSelection?: boolean }) => {
-    const prov = providerFor(form.provider);
+  // One list of models that can triage, and one collapsed section
+  // holding everything set aside — whatever the reason.
+  //
+  // There used to be two mechanisms: a "hiding unusable" toggle for
+  // models the probe rejected, and a separate group for models the
+  // provider describes as producing images or speech. Two controls,
+  // two counts and two ways for the same model to disappear, which
+  // read as a jumble and left an unusable model sitting among the
+  // candidates whenever it happened to be the selected one.
+  //
+  // Now there is one question — can this model triage — and one place
+  // for everything that cannot, each card saying why.
+  const verifiedCount = Object.keys(probeResults).length;
+  const capitalise = (t: string) => t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+
+  const unsuitableReason = (m: any): string => {
+    // The provider's own answer first. A model that does not list the
+    // call Vooda makes cannot serve it — that is definite, while a
+    // probe of the same model reports whatever the API said when asked
+    // anyway, which came back as "isn't available on your plan" for a
+    // model the provider had just listed. Contradictory, and the vaguer
+    // of the two.
+    if (m.suitability === "cannot_serve" && m.suitability_reason) {
+      return capitalise(m.suitability_reason);
+    }
+    const verdict = probeResults[m.model_id];
+    if (verdict?.state === UNUSABLE) return verdict.headline || "Won't work";
+    if (m.suitability_reason) return capitalise(m.suitability_reason);
+    return "Not suitable for triage";
+  };
+  const isUnsuitable = (m: any) =>
+    m.suitability_may_exclude
+    || m.suitability === "other_modality"
+    || probeResults[m.model_id]?.state === UNUSABLE;
+
+  const candidateModels = discoveredModels.filter((m) => !isUnsuitable(m));
+  const unsuitableModels = discoveredModels.filter(isUnsuitable);
+  // If their own selection ended up in here, open the section so they
+  // can see it rather than wondering where it went.
+  const selectedIsUnsuitable = unsuitableModels.some((m) => m.model_id === form.model_id);
+
+  // Three shelves out of what is left, best first. Ready is what you
+  // can pick right now; Needs Setup is a third of the list and one
+  // click from working, so it gets its own section rather than being
+  // filed with the failures; everything else is unresolved — either
+  // never asked, or asked and the provider gave nothing back.
+  const stateOf = (m: any) => probeResults[m.model_id]?.state;
+
+  // Name and identifier, not the description — searching prose across
+  // several hundred models matches almost everything and ranks nothing.
+  const modelQ = modelQuery.trim().toLowerCase();
+  const searching = modelQ.length > 0;
+  const matchesQuery = (m: any) =>
+    !searching
+    || String(m.model_id || "").toLowerCase().includes(modelQ)
+    || String(m.name || "").toLowerCase().includes(modelQ);
+
+  const readyModels = candidateModels.filter((m) => stateOf(m) === READY && matchesQuery(m));
+  const needsSetupModels = candidateModels.filter((m) => stateOf(m) === NEEDS_SETUP && matchesQuery(m));
+  const unresolvedModels = candidateModels.filter(
+    (m) => stateOf(m) !== READY && stateOf(m) !== NEEDS_SETUP && matchesQuery(m));
+  const shownUnsuitable = unsuitableModels.filter(matchesQuery);
+  const matchCount = readyModels.length + needsSetupModels.length
+    + unresolvedModels.length + shownUnsuitable.length;
+
+  // Before anything is checked every model is unresolved, and grouping
+  // would open on an empty shelf. A flat list and the Check All prompt
+  // is the honest first screen.
+  // Judged on the whole inventory, never on what a search left behind:
+  // a query matching nothing Ready must not silently drop the screen
+  // back to an ungrouped list of everything.
+  const grouped = candidateModels.some(
+    (m) => stateOf(m) === READY || stateOf(m) === NEEDS_SETUP);
+  const holdsSelection = (list: any[]) =>
+    !!form.model_id && list.some((m) => m.model_id === form.model_id);
+
+  const selectedVerdict: ProbeVerdict | undefined = probeResults[form.model_id];
+
+  // Selecting a model always re-checks it.
+  //
+  // Reachability is the volatile part: a provider retires a model, a
+  // key is revoked, a quota runs out. Reusing a verdict from last week
+  // saves one request and risks showing "Ready" for a model that
+  // stopped working days ago — and the moment someone is choosing is
+  // exactly when a stale answer costs most.
+  //
+  // Browsing stays cheap because the probe waits for the selection to
+  // settle rather than firing on every click, and it fails silently: a
+  // background check should not throw a banner at someone still
+  // looking around.
+  const RECHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+  useEffect(() => {
+    const id = form.model_id;
+    if (!id || !(keyValidated || editingId)) return;
+    if (verifyingAll || probingModel) return;
+    const t = setTimeout(() => { probeOne(id, { silent: true }); }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.model_id, keyValidated, editingId]);
+
+  /** One model card. Shared so both groups look identical. */
+  /** What a suggested fix would actually change, given the current
+   *  form. A suggestion matching what is already set is not a fix, and
+   *  a button that changes nothing and then reports success is the
+   *  same false confidence this screen exists to remove. */
+  const pendingFix = (v?: ProbeVerdict): Record<string, any> => {
+    const cfg = v?.suggested_config || {};
+    return Object.fromEntries(
+      Object.entries(cfg).filter(([k, val]) => (form as any)[k] !== val));
+  };
+
+  /** Score the selected model against findings we know the answer to.
+   *  Twenty requests, so it is never run across a list — the probe
+   *  answers "does it work", this answers "is it right", and only the
+   *  second is worth spending twenty calls on for a model somebody is
+   *  actually considering. */
+  const runAccuracyCheck = async (modelId: string) => {
+    if (!modelId) return;
+    const startedAt = Date.now();
+    setScoringModel(modelId);
+    try {
+      const payload: any = {
+        provider: form.provider, model_id: modelId,
+        max_tokens: form.max_tokens, supports_json_mode: form.supports_json_mode,
+      };
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+      const r = await checkModelAccuracy(payload);
+      const v: ProbeVerdict | undefined = r.data;
+      if (v) setProbeResults((prev) => ({ ...prev, [modelId]: { ...prev[modelId], ...v } }));
+    } catch (e: any) {
+      // A connection that drops is not a run that failed. The score is
+      // written server-side as soon as it finishes, so before reporting
+      // failure, go and look: a result stored since this run began is
+      // this run's, and "couldn't score" over it would be a lie.
+      if (!e.response) {
+        try {
+          const stored = await getProbeResults(form.provider);
+          const mine = (stored.data || []).find((v: any) => v.model_id === modelId);
+          const at = mine?.accuracy?.checked_at ? Date.parse(mine.accuracy.checked_at) : 0;
+          if (mine?.accuracy && at >= startedAt) {
+            setProbeResults((prev) => ({ ...prev, [modelId]: { ...prev[modelId], ...mine } }));
+            return;
+          }
+        } catch {
+          // Fall through to the failure verdict below.
+        }
+      }
+      setProbeResults((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...prev[modelId],
+          accuracy: {
+            total: 0, correct: 0, missed_secrets: 0, unanswered: 0,
+            headline: e.response?.data?.detail || "Couldn't score this model.",
+          },
+        } as ProbeVerdict,
+      }));
+    } finally {
+      setScoringModel(null);
+    }
+  };
+
+  /** A collapsed shelf of models, with the count and the reason on the
+   *  header. Always opens when it holds the current selection: a model
+   *  that disappears on being picked is the complaint this grouping
+   *  exists to answer. */
+  const renderModelSection = (
+    label: string, models: any[], open: boolean,
+    setOpen: (v: boolean) => void, hint: string, action?: React.ReactNode,
+  ) => {
+    if (models.length === 0) return null;
+    const mine = holdsSelection(models);
+    // A match hidden inside a collapsed section reads as "no results",
+    // which is the one answer a search must never give wrongly.
+    const shown = open || mine || searching;
+    return (
+      <div className="mt-2.5">
+        <div className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
+          <button type="button" onClick={() => setOpen(!open)}
+            className="flex items-center gap-2 min-w-0 flex-1 text-left">
+            <span className="text-[11px] text-slate-400 flex items-center gap-1.5 shrink-0">
+              <svg className={`w-3 h-3 transition-transform ${shown ? "rotate-90" : ""}`}
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+              {label} ({models.length})
+            </span>
+            <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
+              {mine ? "Includes your current choice" : hint}
+            </span>
+          </button>
+          {action}
+        </div>
+        {shown && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
+            {models.map(renderModelCard)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /** Settings the provider stated outright, applied on selection.
+   *  Only ever fills in what the provider declared — it does not
+   *  override a value the user typed. */
+  const applyDeclaredConfig = (m: any) => {
+    const declared = m?.declared_config;
+    if (declared && Object.keys(declared).length > 0) {
+      setForm((f) => ({ ...f, ...declared }));
+    }
+  };
+
+  const renderModelCard = (m: any) => (
+                    <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); applyDeclaredConfig(m); }}
+                      className={`w-full text-left p-3 rounded-lg border transition-all ${
+                        form.model_id === m.model_id
+                          ? "border-red-500/30 bg-red-500/5"
+                          : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.02]"
+                      }`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${form.model_id === m.model_id ? "bg-red-400" : "bg-slate-600"}`} />
+                        <span className="text-sm font-medium text-slate-200 truncate flex-1">{m.name || m.model_id}</span>
+                        {probingModel === m.model_id ? (
+                          <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin shrink-0" />
+                        ) : (
+                          /* Every card carries a status. Leaving the
+                             never-checked ones blank meant the only
+                             cards saying "Not checked" were the ones
+                             Vooda had checked and failed to reach. */
+                          <span title={readinessHint(probeResults[m.model_id]?.state)}
+                            className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${readinessTone(probeResults[m.model_id]?.state)}`}>
+                            {readinessLabel(probeResults[m.model_id]?.state)}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
+                      {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}
+                      {(m.context_window || m.max_output) && (
+                        <div className="flex gap-2 mt-1.5 text-[9px] text-slate-600">
+                          {m.context_window && <span>{(m.context_window / 1000).toFixed(0)}K context</span>}
+                          {m.max_output && <span>{(m.max_output / 1000).toFixed(0)}K output</span>}
+                        </div>
+                      )}
+                    </button>
+  );
+
+
+  const handleDiscoverModels = async (opts?: {
+    modelConfigId?: string; preserveSelection?: boolean; provider?: string;
+  }) => {
+    // Takes the provider explicitly when the caller knows it. setForm
+    // is applied on the next render, so a caller that sets the
+    // provider and discovers in the same handler reads the PREVIOUS
+    // one — which is how opening a Google config queried Anthropic.
+    const providerId = opts?.provider || form.provider;
+    const prov = providerFor(providerId);
     const needsKey = prov?.requiresKey ?? true;
     const usingStoredKey = !!opts?.modelConfigId;
     if (!usingStoredKey) {
@@ -478,7 +790,13 @@ function AIModelsFullSection() {
     setDiscoveredModels([]);
     setKeyValidated(false);
     try {
-      const payload: any = { provider: form.provider };
+      const payload: any = { provider: providerId };
+      // Send what the operator typed, even before a config exists to
+      // store it on — otherwise the retry repeats the same failure.
+      try {
+        const pc = JSON.parse(form.provider_config_json?.trim() || "{}");
+        if (pc && Object.keys(pc).length > 0) payload.provider_config = pc;
+      } catch { /* the save path reports invalid JSON; do not block discovery */ }
       if (form.api_key) payload.api_key = form.api_key;
       if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
       if (opts?.modelConfigId) payload.model_config_id = opts.modelConfigId;
@@ -488,11 +806,21 @@ function AIModelsFullSection() {
       if (data.status === "success" && data.models?.length > 0) {
         setDiscoveredModels(data.models);
         setKeyValidated(true);
+        // Verdicts already on record — free, and the badges are there
+        // before the customer has finished reading the list.
+        loadCachedProbes(providerId);
         if (!opts?.preserveSelection) {
-          const firstModel = data.models[0];
+          // First model that can actually triage, not first in the list.
+          // Rows come back sorted by id, so whichever name happens to
+          // sort first was being selected — which put a video model in
+          // the form, red-ringed as the current choice, while sitting
+          // in the section for models that cannot be used.
+          const firstModel =
+            data.models.find((m: any) => m.suitability === "candidate")
+            || data.models[0];
           setForm((f) => ({ ...f, model_id: firstModel.model_id, name: f.name || firstModel.model_id }));
           setSelectedModelParam(firstModel.parameter_size || null);
-          applyAutoConfig(form.provider, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
+          applyAutoConfig(providerId, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
         }
       }
     } catch (e: any) {
@@ -502,6 +830,182 @@ function AIModelsFullSection() {
     }
   };
 
+  // ── Model readiness ─────────────────────────────────
+  //
+  // Discovery tells us which models exist. Whether one can actually
+  // triage is a different question, and the only way to know is to ask
+  // it — so this is deliberately never automatic.
+
+  const loadCachedProbes = async (provider: string) => {
+    try {
+      const r = await getProbeResults(provider);
+      const byId: Record<string, ProbeVerdict> = {};
+      for (const v of r.data?.results || []) byId[v.model_id] = v;
+      setProbeResults(byId);
+    } catch {
+      // A missing cache is not an error worth interrupting anyone for;
+      // every model simply shows "Not checked" until verified.
+      setProbeResults({});
+    }
+  };
+
+  const probeOne = async (modelId: string, opts?: { silent?: boolean }) => {
+    if (!modelId) return;
+    setProbingModel(modelId);
+    try {
+      const payload: any = {
+        provider: form.provider,
+        model_ids: [modelId],
+        // Verify against the settings this model will actually run
+        // with. Probing at a different budget tests a request Vooda
+        // never makes, and it is how the Fix button's change stayed
+        // invisible to the re-check that was meant to confirm it.
+        max_tokens: form.max_tokens,
+        supports_json_mode: form.supports_json_mode,
+      };
+      // What discovery concluded about this model, so the verdict is
+      // kept with the probe result instead of living only in the
+      // response that produced it.
+      const m = discoveredModels.find((d) => d.model_id === modelId);
+      if (m?.suitability) {
+        payload.suitability = {
+          [modelId]: {
+            tier: m.suitability,
+            reason: m.suitability_reason || "",
+            may_exclude: !!m.suitability_may_exclude,
+          },
+        };
+      }
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+
+      const r = await probeModels(payload);
+      const v: ProbeVerdict | undefined = r.data?.results?.[0];
+      if (v) setProbeResults((prev) => ({ ...prev, [v.model_id]: v }));
+      return v;
+    } catch (e: any) {
+      // Report it as a verdict rather than an alert: an unreachable
+      // check is itself information about the model, and it belongs on
+      // the card with everything else we know.
+      if (!opts?.silent) {
+        setProbeResults((prev) => ({
+          ...prev,
+          [modelId]: {
+            model_id: modelId, state: UNVERIFIED,
+            headline: "Couldn't check this model.",
+            remedy: e.response?.data?.message || "Try again in a moment.",
+            suggested_config: {}, detail: {}, latency_ms: 0,
+          } as ProbeVerdict,
+        }));
+      }
+    } finally {
+      setProbingModel(null);
+    }
+  };
+
+  /** Probe several models in one request; the server runs them
+   *  concurrently and the verdicts land together. */
+  const probeMany = async (modelIds: string[]) => {
+    if (modelIds.length === 0) return;
+    try {
+      const payload: any = {
+        provider: form.provider, model_ids: modelIds,
+        max_tokens: form.max_tokens, supports_json_mode: form.supports_json_mode,
+      };
+      const suit: Record<string, any> = {};
+      for (const id of modelIds) {
+        const m = discoveredModels.find((d) => d.model_id === id);
+        if (m?.suitability) {
+          suit[id] = { tier: m.suitability, reason: m.suitability_reason || "",
+                       may_exclude: !!m.suitability_may_exclude };
+        }
+      }
+      if (Object.keys(suit).length) payload.suitability = suit;
+      if (editingId) payload.model_config_id = editingId;
+      else if (form.api_key) payload.api_key = form.api_key;
+      if (form.endpoint_url) payload.endpoint_url = form.endpoint_url;
+
+      const r = await probeModels(payload);
+      const byId: Record<string, ProbeVerdict> = {};
+      for (const v of (r.data?.results || [])) byId[v.model_id] = v;
+      if (Object.keys(byId).length) setProbeResults((prev) => ({ ...prev, ...byId }));
+    } catch {
+      // A failed chunk leaves those models unchecked rather than marked
+      // broken — the request failed, not the models.
+    }
+  };
+
+  /** Probe a set of models in chunks, with progress and a way out.
+   *
+   *  Chunks, not one at a time. One request per model was simple and
+   *  took forty minutes across a provider listing hundreds — not a
+   *  button anyone presses twice. The server probes a chunk
+   *  concurrently under its own ceiling, so the wait drops roughly by
+   *  that factor while the provider still sees a sane request rate.
+   *
+   *  Chunked rather than one request for everything, so the grid keeps
+   *  filling in and the run stays interruptible: a long wait with no
+   *  progress and no way out is one a customer abandons. Every answer
+   *  already received is kept. The chunk also stays under the server's
+   *  own batch ceiling, which a whole section sent at once would not.
+   */
+  const probeInChunks = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    verifyAllCancelled.current = false;
+    setVerifyingAll({ done: 0, total: ids.length });
+    try {
+      const CHUNK = 8;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        if (verifyAllCancelled.current) break;
+        await probeMany(ids.slice(i, i + CHUNK));
+        setVerifyingAll({ done: Math.min(i + CHUNK, ids.length), total: ids.length });
+      }
+    } finally {
+      setVerifyingAll(null);
+      verifyAllCancelled.current = false;
+    }
+  };
+
+  const verifyAll = async () => {
+    // Candidates only. Probing a music model costs a request and
+    // proves what the provider already told us — one returned 429
+    // quota exceeded during testing.
+    // Skip what is already known. Re-running this re-probed every
+    // candidate including the ones checked minutes earlier, so a second
+    // run cost as much as the first for no new information.
+    const ids = candidateModels
+      .filter((m) => {
+        const v = probeResults[m.model_id];
+        if (!v?.probed_at) return true;
+        return Date.now() - new Date(v.probed_at).getTime() >= RECHECK_AFTER_MS;
+      })
+      .map((m) => m.model_id).filter(Boolean);
+    await probeInChunks(ids);
+  };
+
+  /** Rough wall-clock for a full run, from measured probe latency. */
+  const estimatedCheckMinutes = Math.round((candidateModels.length * 2.5) / 60);
+
+  /** Apply what the probe proved works. */
+  const applyProbeFix = async (v: ProbeVerdict) => {
+    // Writes to the form, not to the saved configuration — the user
+    // still presses Update Provider. Saying only "Setting applied"
+    // left that ambiguous on a screen whose whole point is not
+    // overstating what has happened.
+    const cfg = pendingFix(v);
+    setForm((f) => ({ ...f, ...cfg }));
+    setProbeFixApplied(v.model_id);
+    // Re-verify with the change in place. The button claims the setting
+    // fixes it, so prove it again rather than leaving a stale warning
+    // sitting under a model that now works. The verdict above reports
+    // the outcome — this notice only says the setting was applied,
+    // because saying more before the check returns would be the same
+    // premature success this whole screen exists to stop.
+    await probeOne(v.model_id, { silent: true });
+    setTimeout(() => setProbeFixApplied(null), 4000);
+  };
+
   const resetForm = () => {
     // Tasks default to triage (the only keyword the worker dispatches
     // on).
@@ -509,10 +1013,13 @@ function AIModelsFullSection() {
     setDiscoveredModels([]);
     setDiscoverStatus(null);
     setKeyValidated(false);
+    setProbeResults({});
+    setShowProbeDetail(false);
     setEditingId(null);
     setShowAdvanced(false);
     setSelectedModelParam(null);
     setOriginalModelId("");
+    setOriginalName("");
     setDefaultsRecomputedFor(null);
     setProviderConfigError(null);
   };
@@ -520,6 +1027,7 @@ function AIModelsFullSection() {
   const handleEditModel = (model: any) => {
     setEditingId(model.id);
     setOriginalModelId(model.model_id || "");
+    setOriginalName(model.name || "");
     setDefaultsRecomputedFor(null);
     setForm({
       name: model.name || "",
@@ -549,7 +1057,7 @@ function AIModelsFullSection() {
     // Auto-load available models using stored credentials so the user can switch
     // without re-entering their API key.
     if (model.api_key_set || !providerFor(model.provider)?.requiresKey) {
-      handleDiscoverModels({ modelConfigId: model.id, preserveSelection: true });
+      handleDiscoverModels({ modelConfigId: model.id, preserveSelection: true, provider: model.provider });
     }
     // Scroll to form
     setTimeout(() => document.getElementById("ai-model-form")?.scrollIntoView({ behavior: "smooth" }), 100);
@@ -559,7 +1067,17 @@ function AIModelsFullSection() {
     if (!modelId) return;
     try {
       const paramSize = selectedModelParam || sizeOverride || undefined;
-      const r = await getAutoConfig({ provider, model_id: modelId, prompt_strategy: strategy, parameter_size: paramSize });
+      // Hand back what discovery learned from the provider. These were
+      // being collected and then dropped, so every model fell through
+      // to a generic default window — a 262K model was budgeted as if
+      // it had 1M, which is the prompt sizing being wrong by 4x on the
+      // one number that decides how much context a triage can carry.
+      const discovered = discoveredModels.find((m) => m.model_id === modelId);
+      const r = await getAutoConfig({
+        provider, model_id: modelId, prompt_strategy: strategy, parameter_size: paramSize,
+        context_window: discovered?.context_window ?? null,
+        max_output: discovered?.max_output ?? null,
+      });
       const cfg = r.data?.config;
       if (cfg) {
         setForm((f) => ({
@@ -736,6 +1254,24 @@ function AIModelsFullSection() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium text-slate-200">{model.name}</span>
                       {!model.is_active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-500">Disabled</span>}
+                      {/* Two failure shapes, two labels. The badge
+                          matched only "triage_parse_failure:", so when
+                          the backend began recording total failure
+                          under its own prefix the card showed nothing
+                          at all — the worst case stayed invisible on
+                          the very screen meant to report it. A model
+                          that answered badly and a model that answered
+                          nothing also need different words: one is a
+                          parsing problem, the other is not reachable. */}
+                      {model.last_error && String(model.last_error).startsWith("triage_failed:") && (
+                        <span
+                          title={String(model.last_error).replace(/^triage_failed:\s*/, "")}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/25 flex items-center gap-1 cursor-help"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                          Triage failed
+                        </span>
+                      )}
                       {model.last_error && String(model.last_error).startsWith("triage_parse_failure:") && (
                         <span
                           title={String(model.last_error).replace(/^triage_parse_failure:\s*/, "")}
@@ -800,7 +1336,7 @@ function AIModelsFullSection() {
                         Local
                       </span>
                     ) : (
-                      <span className="text-xs text-yellow-400">Key needed</span>
+                      <span className="text-xs text-yellow-400">Key Needed</span>
                     )}
                     {/* Actions menu */}
                     <div className="relative">
@@ -912,7 +1448,7 @@ function AIModelsFullSection() {
                     <button onClick={() => handleDiscoverModels()} disabled={!canDiscover || discovering}
                       className="btn-secondary shrink-0 flex items-center gap-2 whitespace-nowrap">
                       {discovering ? (
-                        <><div className="w-3.5 h-3.5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin" />Connecting...</>
+                        <><div className="w-3.5 h-3.5 border-2 border-red-400/30 border-t-violet-400 rounded-full animate-spin" />Connecting…</>
                       ) : keyValidated ? (
                         <><svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>Connected</>
                       ) : (
@@ -942,13 +1478,51 @@ function AIModelsFullSection() {
             </div>
           )}
 
-          {/* Auto-recompute notice — shown when user swaps model_id in edit mode */}
-          {defaultsRecomputedFor && editingId && (
-            <div className="flex items-center gap-2 p-3 rounded-lg mb-5 text-xs bg-cyan-500/5 border border-cyan-500/15 text-cyan-400">
-              <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-              <span>Defaults recomputed for <span className="font-mono">{defaultsRecomputedFor}</span> — fine-tune parameters refreshed.</span>
+          {/* Provider Config, reachable when validation FAILED.
+              It normally lives in Advanced Settings, which only renders
+              once a key has validated — but some providers cannot
+              validate without a value from here. An organisation-level
+              Anthropic key is refused on every request, listing
+              included, until it names a workspace, so the field that
+              fixes the error was only reachable after the error stopped
+              happening. */}
+          {discoverStatus?.status === "error" && !keyValidated && (
+            <div className="mb-5 p-4 rounded-lg bg-white/[0.02] border border-white/[0.06]">
+              <label className="text-xs text-slate-400 mb-1 block">Provider Config</label>
+              <p className="text-[10px] text-slate-600 mb-2">
+                Settings some providers require before they will answer at all — an Anthropic
+                organisation-level key needs <span className="font-mono">{"{\"workspace_id\": \"wrkspc_…\"}"}</span>.
+                Leave empty if the message above does not ask for one.
+              </p>
+              <textarea value={form.provider_config_json}
+                onChange={(e) => { setForm((f) => ({ ...f, provider_config_json: e.target.value })); setProviderConfigError(null); }}
+                placeholder={"{}"}
+                className="input-dark h-20 resize-y font-mono text-xs w-full" />
+              {providerConfigError && <p className="text-[10px] text-red-400 mt-1">{providerConfigError}</p>}
+              <button type="button" className="btn-secondary text-xs mt-2"
+                onClick={() => {
+                  try {
+                    JSON.parse(form.provider_config_json.trim() || "{}");
+                    setProviderConfigError(null);
+                  } catch (err: any) {
+                    setProviderConfigError(`Invalid JSON: ${err.message}`); return;
+                  }
+                  handleDiscoverModels(editingId
+                    ? { modelConfigId: editingId, preserveSelection: true, provider: form.provider }
+                    : { provider: form.provider });
+                }}>
+                Retry with This Config
+              </button>
             </div>
           )}
+
+          {/* The "Defaults recomputed" banner used to sit here.
+              It announced that settings had changed without saying WHAT
+              changed, in a full-width panel with a tick — which meant a
+              guess derived from a model's name outranked the probe
+              verdict beside it, and read as an endorsement even for a
+              music model. The values now appear next to the fields they
+              belong to. */}
 
           {/* Step 2: Model Selection (appears after validation) */}
           {(keyValidated || editingId) && discoveredModels.length === 0 && !discovering && (
@@ -966,9 +1540,9 @@ function AIModelsFullSection() {
                   <button onClick={() => handleDiscoverModels({ modelConfigId: editingId, preserveSelection: true })}
                     className="btn-secondary text-xs flex items-center gap-1.5">
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                    Retry with stored key
+                    Retry with Stored Key
                   </button>
-                  <span className="text-[10px] text-slate-600">or enter a new API key above</span>
+                  <span className="text-[10px] text-slate-600">Or enter a new API key above</span>
                 </div>
               )}
             </div>
@@ -982,30 +1556,240 @@ function AIModelsFullSection() {
           {(keyValidated || editingId) && discoveredModels.length > 0 && (
             <div className="space-y-4 mb-5">
               <div>
-                <label className="text-xs text-slate-500 mb-1.5 block">Select Model ({discoveredModels.length} available)</label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {discoveredModels.map((m) => (
-                    <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); }}
-                      className={`text-left p-3 rounded-lg border transition-all ${
-                        form.model_id === m.model_id
-                          ? "border-red-500/30 bg-red-500/5"
-                          : "border-white/[0.06] hover:border-white/[0.12] bg-white/[0.02]"
-                      }`}>
-                      <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${form.model_id === m.model_id ? "bg-red-400" : "bg-slate-600"}`} />
-                        <span className="text-sm font-medium text-slate-200 truncate">{m.name || m.model_id}</span>
-                      </div>
-                      <p className="text-[10px] text-slate-600 font-mono mt-1 truncate">{m.model_id}</p>
-                      {m.description && <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">{m.description}</p>}
-                      {(m.context_window || m.max_output) && (
-                        <div className="flex gap-2 mt-1.5 text-[9px] text-slate-600">
-                          {m.context_window && <span>{(m.context_window / 1000).toFixed(0)}K context</span>}
-                          {m.max_output && <span>{(m.max_output / 1000).toFixed(0)}K output</span>}
-                        </div>
-                      )}
-                    </button>
-                  ))}
+                {/* Header: what to do on the left, the one action on
+                    the right. A single row, so the grid below starts
+                    from an even baseline. */}
+                {/* Wraps rather than squeezing. In a narrow window the
+                    three items shared one row and the search box gave
+                    up its width first, collapsing to about sixty pixels
+                    — wide enough to show "Fi" of its own placeholder. */}
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-1 min-h-[28px]">
+                  <label className="text-sm text-slate-300 shrink-0">Choose a Model for AI Triage</label>
+                  {/* Grouping shortens the list; it does not help someone
+                      who already knows the name they want. Several hundred
+                      cards is a scroll either way. */}
+                  <div className="relative flex-1 min-w-[150px] max-w-[220px] ml-auto">
+                    <svg className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-slate-600 pointer-events-none"
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+                    </svg>
+                    <input type="text" value={modelQuery}
+                      onChange={(e) => setModelQuery(e.target.value)}
+                      placeholder="Find a model by name"
+                      className="input-dark text-[11px] w-full pl-6 pr-6 py-1" />
+                    {searching && (
+                      <button type="button" onClick={() => setModelQuery("")}
+                        title="Clear"
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-300 transition-colors text-[13px] leading-none">
+                        ×
+                      </button>
+                    )}
+                  </div>
+                  <button type="button"
+                    onClick={() => { if (verifyingAll) { verifyAllCancelled.current = true; } else { verifyAll(); } }}
+                    className="btn-secondary text-[11px] px-2.5 py-1 flex items-center gap-1.5 shrink-0">
+                    {verifyingAll ? (
+                      <>
+                        <div className="w-3 h-3 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin" />
+                        Stop ({verifyingAll.done} of {verifyingAll.total})
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        Check All {candidateModels.length}
+                      </>
+                    )}
+                  </button>
                 </div>
+                {/* One line for the inventory, one for what the
+                    button costs. The badge definitions that used to
+                    follow are on the badges now: every reader paid for
+                    them, and only the reader looking at a badge needs
+                    them. */}
+                <p className="text-[11px] text-slate-500 mb-2">
+                  {candidateModels.length} of {discoveredModels.length} models support text triage
+                  {unsuitableModels.length > 0 && `; the other ${unsuitableModels.length} are listed below with reasons`}.
+                  <span className="text-slate-600">
+                    {" "}Checking sends one short request per model
+                    {estimatedCheckMinutes >= 2 ? `, about ${estimatedCheckMinutes} minutes for all ${candidateModels.length}` : ""}.
+                    {estimatedCheckMinutes >= 2 && " You can stop at any point; answers already received are kept."}
+                  </span>
+                </p>
+                {/* The selected model, pinned above the list.
+                    Carries the verdict, the accuracy line and both
+                    actions in one place, so a click on any card
+                    reports back where the reader already is rather
+                    than somewhere below several hundred cards. */}
+                {form.model_id && (
+                  // Opaque base under the tone, or the cards it is
+                  // meant to float above read straight through it.
+                  <div className={`sticky top-2 z-20 mb-2 rounded-lg border px-3 py-2 bg-[#07091a] shadow-lg shadow-black/40 ${readinessPanelTone(selectedVerdict?.state)}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        {/* Which model this is about. Scrolled away
+                            from the card you clicked, a verdict with
+                            no subject is a verdict about nothing. */}
+                        <p className="text-[11px] text-slate-300 font-medium truncate">
+                          <span className="text-slate-600 font-normal">Selected: </span>
+                          {form.model_id}
+                        </p>
+                        {renderModelChangeNotice("mt-0.5")}
+                        <p className="text-xs leading-relaxed">
+                          <span className={
+                            selectedVerdict?.state === READY ? "text-emerald-400"
+                            : selectedVerdict?.state === NEEDS_SETUP ? "text-amber-400"
+                            : selectedVerdict?.state === UNUSABLE ? "text-rose-400" : "text-slate-400"}>
+                            {selectedVerdict ? selectedVerdict.headline : "Not Checked Yet."}
+                          </span>
+                          <span className="text-slate-500">
+                            {" "}
+                            {selectedVerdict ? selectedVerdict.remedy : "Check to confirm this model can triage."}
+                          </span>
+                          {selectedVerdict && needsExplanation(selectedVerdict) && (
+                            <button type="button" onClick={() => setShowProbeDetail((v) => !v)}
+                              className="ml-1.5 text-[10px] text-slate-600 hover:text-slate-400 transition-colors underline underline-offset-2">
+                              {showProbeDetail ? "Hide Details" : "Details"}
+                            </button>
+                          )}
+                          {probeFixApplied === form.model_id && (
+                            <span className="ml-1.5 text-[11px] text-emerald-400">
+                              Applied below — save with Update Provider.
+                            </span>
+                          )}
+                        </p>
+                        {/* How often it is RIGHT, which the badge does
+                            not answer. On its own line because a model
+                            can be Ready and still dismiss real secrets. */}
+                        {scoringModel === form.model_id ? (
+                          <p className="text-[11px] mt-1 text-violet-300 flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 border-2 border-white/20 border-t-violet-400 rounded-full animate-spin inline-block" />
+                            Scoring against sample findings whose answer is already known…
+                          </p>
+                        ) : selectedVerdict?.accuracy && (
+                          <p className={`text-[11px] mt-1 ${accuracyTone(selectedVerdict.accuracy)}`}>
+                            {selectedVerdict.accuracy.headline}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {selectedVerdict && Object.keys(pendingFix(selectedVerdict)).length > 0 && (
+                          <button type="button" onClick={() => applyProbeFix(selectedVerdict)}
+                            className="text-[11px] px-2.5 py-1 rounded-md border bg-amber-500/10 border-amber-500/25 text-amber-400 hover:bg-amber-500/15 transition-colors">
+                            Fix
+                          </button>
+                        )}
+                        {/* Opt-in, one model at a time. Never part of
+                            Check All — across a provider's whole list
+                            that is hours and real money to answer a
+                            question about models nobody will configure. */}
+                        <button type="button" onClick={() => runAccuracyCheck(form.model_id)}
+                          disabled={!!scoringModel || probingModel === form.model_id || !!verifyingAll}
+                          title="Score this model against findings whose answer is already known"
+                          className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
+                          {scoringModel === form.model_id ? "Scoring…" : "Accuracy Check"}
+                        </button>
+                        <button type="button" onClick={() => probeOne(form.model_id)}
+                          disabled={probingModel === form.model_id || !!verifyingAll}
+                          className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50">
+                          {probingModel === form.model_id ? "Checking…" : selectedVerdict ? "Check Again" : "Check"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {showProbeDetail && selectedVerdict && (
+                      <pre className="mt-2 text-[10px] text-slate-500 font-mono bg-black/20 rounded p-2 overflow-x-auto max-h-40">
+{JSON.stringify(selectedVerdict.detail, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                {searching && matchCount === 0 && (
+                  <p className="text-[11px] text-slate-500 py-3">
+                    No model matches &ldquo;{modelQuery.trim()}&rdquo;.
+                    <button type="button" onClick={() => setModelQuery("")}
+                      className="ml-1.5 text-slate-400 hover:text-slate-200 underline underline-offset-2">
+                      Clear the search
+                    </button>
+                  </p>
+                )}
+                {searching && matchCount > 0 && (
+                  <p className="text-[11px] text-slate-500 mb-1.5">
+                    {matchCount} {matchCount === 1 ? "model matches" : "models match"} &ldquo;{modelQuery.trim()}&rdquo;,
+                    across every group.
+                  </p>
+                )}
+                {grouped ? (
+                  <>
+                    {readyModels.length > 0 && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {readyModels.map(renderModelCard)}
+                      </div>
+                    )}
+                    {readyModels.length === 0 && !searching && (
+                      <p className="text-[11px] text-slate-500 py-2">
+                        No model answered cleanly yet. The sections below hold the rest.
+                      </p>
+                    )}
+                    {renderModelSection(
+                      "Works After One Fix", needsSetupModels,
+                      showNeedsSetup, setShowNeedsSetup,
+                      "Usable once a setting is changed — the Fix button applies it")}
+                    {renderModelSection(
+                      "Not Checked or Unresolved", unresolvedModels,
+                      showUnresolved, setShowUnresolved,
+                      "Never asked, or the provider gave nothing back",
+                      <button type="button"
+                        onClick={(e) => { e.stopPropagation(); probeInChunks(unresolvedModels.map((m) => m.model_id).filter(Boolean)); }}
+                        disabled={!!verifyingAll || !!probingModel}
+                        title="Ask these again — an unresolved verdict is usually a temporary provider outage"
+                        className="btn-secondary text-[10px] px-2 py-0.5 shrink-0 disabled:opacity-50">
+                        Check Again
+                      </button>)}
+                  </>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {candidateModels.filter(matchesQuery).map(renderModelCard)}
+                  </div>
+                )}
+
+                {/* Everything set aside, in one place, each card
+                    saying why. Collapsed, never removed: a provider's
+                    description can be wrong, and a model the customer's
+                    organisation has standardised on must be reachable
+                    rather than silently absent. */}
+                {(searching ? shownUnsuitable.length > 0 : unsuitableModels.length > 0) && (
+                  <div className="mt-2.5">
+                    <button type="button" onClick={() => setShowOtherModality((v) => !v)}
+                      className="w-full flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] transition-colors">
+                      <span className="flex items-center gap-2 text-xs text-slate-400 whitespace-nowrap">
+                        <svg className={`w-3 h-3 transition-transform ${(showOtherModality || selectedIsUnsuitable || searching) ? "rotate-90" : ""}`}
+                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        </svg>
+                        Can&apos;t Be Used for Triage ({searching ? shownUnsuitable.length : unsuitableModels.length})
+                      </span>
+                      <span className="text-[10px] text-slate-600 truncate hidden sm:inline">
+                        {selectedIsUnsuitable ? "Includes your current choice" : "Image, speech, music, unsupported"}
+                      </span>
+                    </button>
+                    {(showOtherModality || selectedIsUnsuitable || searching) && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mt-2">
+                        {shownUnsuitable.map((m) => (
+                          <div key={m.model_id} className="relative">
+                            {renderModelCard(m)}
+                            {/* The reason, on the card. Answers "what is
+                                in here?" without anyone having to ask. */}
+                            <p className="text-[9px] text-slate-600 mt-0.5 ml-3 truncate">
+                              {unsuitableReason(m)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
               </div>
 
             </div>
@@ -1059,6 +1843,21 @@ function AIModelsFullSection() {
                 </div>
               )}
 
+              {/* What was configured for you, stated as values.
+                  This replaces a banner that said settings had been
+                  "refreshed" without saying to what — a notice about
+                  invisible changes to fields hidden one click below. */}
+              {(keyValidated || editingId) && form.model_id && (
+                <p className="text-[10px] text-slate-600 -mt-2">
+                  {[
+                    form.context_window ? `${(form.context_window / 1000).toFixed(0)}K context` : null,
+                    form.max_tokens ? `${form.max_tokens} output` : null,
+                    form.supports_json_mode ? "JSON mode on" : null,
+                  ].filter(Boolean).join(" · ")}
+                  <span className="text-slate-700"> — set automatically</span>
+                </p>
+              )}
+
               {/* ── Advanced settings (collapsed by default) ── */}
               <div>
                 <button onClick={() => setShowAdvanced(!showAdvanced)}
@@ -1066,7 +1865,7 @@ function AIModelsFullSection() {
                   <svg className={`w-3 h-3 transition-transform ${showAdvanced ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                   </svg>
-                  Advanced settings
+                  Advanced Settings
                 </button>
 
                 {showAdvanced && (
@@ -1212,6 +2011,7 @@ function AIModelsFullSection() {
           )}
 
           {/* Actions */}
+          {renderModelChangeNotice("mb-2")}
           <div className="flex gap-3 items-center">
             {((editingId && form.model_id) || (keyValidated && form.model_id && form.name)) && (
               <button onClick={handleSave} disabled={saving || !form.model_id || !form.name} className="btn-primary">
@@ -1492,6 +2292,10 @@ function SSOSection() {
 function TicketingSection() {
   const { toast } = useToast();
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // No edition logic in here. The category tile on the hub is the
+  // gate, and it does not open in Community — so this section is only
+  // ever rendered where every provider in it works.
   const [configs, setConfigs] = useState<Record<string, any>>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -2171,6 +2975,8 @@ function TicketingSection() {
                 : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12] hover:bg-white/[0.04]"
               }`}>
               <div className="absolute top-3 right-3 pointer-events-none">
+                {/* No badge here. The category tile carries it — one
+                    statement of the boundary, not one per provider. */}
                 {isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />
@@ -2764,6 +3570,10 @@ function WebhooksSection() {
   const [copied, setCopied] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
 
+  // No edition logic in here. The category tile on the hub is the
+  // gate, and it does not open in Community — so this section is only
+  // ever rendered where every provider in it works.
+
   // Load webhook config on mount
   useEffect(() => {
     api.get("/webhooks/config").then((r) => {
@@ -2840,6 +3650,7 @@ function WebhooksSection() {
             >
               {/* Status badge — top right */}
               <div className="absolute top-3 right-3 pointer-events-none">
+                {/* No badge here — the category tile states it once. */}
                 {isConfigured ? (
                   <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400 border border-green-500/20 flex items-center gap-1">
                     <span className="w-1 h-1 rounded-full bg-green-400" />Active
@@ -3358,6 +4169,16 @@ function NotificationsFullSection() {
   // breadcrumb's identity.  Cleared on unmount / when showForm flips
   // (no Add button visible while the create form is open).
   const { setAction } = useContext(SectionActionContext);
+
+  // No edition logic in here. The Notifications tile on the hub is the
+  // gate and does not open in Community, so this section is only ever
+  // rendered where every channel in it works.
+  //
+  // The in-app bell is a separate path entirely — written straight to
+  // the notifications table rather than dispatched through a channel —
+  // so gating the channels never touched it. A licence must not be
+  // able to silence the signal that says triage could not run.
+
   const [savedIntegrations, setSavedIntegrations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -4183,10 +5004,31 @@ function IntegrationsPageInner() {
   };
   useEffect(() => { loadIntegrations(); }, []);
 
+  const [hubGated, setHubGated] = useState<string[]>([]);
+  useEffect(() => {
+    getEdition()
+      .then((r) => setHubGated(r.data?.gated || []))
+      .catch(() => setHubGated([]));
+  }, []);
+
   // Sync activeCategory with URL — reacts to sidebar clicks and browser back/forward
   useEffect(() => {
     setActiveCategory(categoryFromUrl);
   }, [categoryFromUrl]);
+
+  // ?category=… must respect the same gate as the tile.
+  //
+  // Blocking only the click would be decoration: the section is one
+  // URL away, and everything in it would then fail against a 402 with
+  // no explanation. Runs as its own effect because the edition arrives
+  // after the first render.
+  useEffect(() => {
+    if (activeCategory && hubGated.includes(activeCategory)) {
+      setActiveCategory(null);
+      window.history.replaceState(null, "", "/integrations");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategory, hubGated]);
 
   const openCategory = (key: HubCategory) => {
     setActiveCategory(key);
@@ -4215,6 +5057,18 @@ function IntegrationsPageInner() {
     loadIntegrations();
   };
 
+  // The hub tiles say which categories the edition includes.
+  //
+  // A category key here is the same string as its feature key in
+  // ENTERPRISE_FEATURES, so a badge cannot describe a different thing
+  // from the endpoint's refusal.
+  //
+  // Only the categories below are stopped at the hub. Webhooks and
+  // Ticketing are gated just as firmly, but stay open and unbadged
+  // here so the providers inside can be browsed — each one carries
+  // its own ENTERPRISE badge, which is what advertises them. A
+  // product choice rather than a technical one: these two are worth
+  // looking through, this one is not.
   const CATEGORIES: CategoryDef[] = [
     { key: "ai_models", label: "AI Provider", description: "LLM provider for false positive triage", color: "from-purple-500 to-indigo-500", count: AI_PROVIDERS.length,
       icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg> },
@@ -4294,17 +5148,29 @@ function IntegrationsPageInner() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {CATEGORIES.map((cat) => {
               const connected = 0;
+              // The tile is the gate. Badged, and it does not open.
+              //
+              // Stopping here rather than inside means the sections
+              // themselves need no edition logic: in Community they are
+              // never reached, and in Enterprise everything in them
+              // works, so their tiles are simply tiles.
+              const gated = hubGated.includes(cat.key);
+              const blocked = gated;
               return (
                 <div
                   key={cat.key}
-                  onClick={() => openCategory(cat.key)}
-                  className="card card-hover cursor-pointer group relative overflow-hidden"
+                  onClick={() => { if (!blocked) openCategory(cat.key); }}
+                  aria-disabled={blocked}
+                  title={gated ? `${cat.label} is available in Vooda Enterprise` : undefined}
+                  className={`card group relative overflow-hidden ${
+                    blocked ? "opacity-60 cursor-not-allowed" : "card-hover cursor-pointer"
+                  }`}
                 >
                   {/* Gradient accent line at top */}
-                  <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
+                  <div className={`absolute top-0 left-0 right-0 h-[2px] bg-gradient-to-r ${gated ? "from-slate-700 to-slate-800" : cat.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
 
                   <div className="flex items-start gap-4 pt-2">
-                    <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
+                    <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${gated ? "from-slate-700 to-slate-800" : cat.color} flex items-center justify-center shrink-0 text-white opacity-90 group-hover:opacity-100 transition-opacity`}>
                       {cat.icon}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -4312,6 +5178,11 @@ function IntegrationsPageInner() {
                       <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{cat.description}</p>
                       <div className="flex items-center gap-3 mt-3">
                         <span className="text-[10px] text-slate-600">{cat.count} available</span>
+                        {gated && (
+                          <span className="text-[8px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">
+                            Enterprise
+                          </span>
+                        )}
                         {connected > 0 && (
                           <span className="flex items-center gap-1 text-[10px] text-green-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
@@ -4320,9 +5191,13 @@ function IntegrationsPageInner() {
                         )}
                       </div>
                     </div>
-                    <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                    </svg>
+                    {/* No arrow when the tile leads nowhere — an arrow
+                        promising navigation would be a lie. */}
+                    {!blocked && (
+                      <svg className="w-4 h-4 text-slate-700 group-hover:text-slate-400 shrink-0 mt-1 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                      </svg>
+                    )}
                   </div>
                 </div>
               );

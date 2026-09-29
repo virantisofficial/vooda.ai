@@ -54,6 +54,46 @@ def decrypt_value(ciphertext: str) -> str:
         return ciphertext  # If decryption fails, return as-is
 
 
+class CredentialUnreadable(Exception):
+    """A stored credential could not be decrypted.
+
+    Raised instead of returning the ciphertext, because the caller is
+    about to send this value somewhere as a credential.
+    """
+
+
+def decrypt_credential(stored: str) -> str:
+    """Decrypt a stored credential, or refuse.
+
+    ``decrypt_value`` returns the ciphertext unchanged when Fernet
+    cannot read it. That is harmless for a column still holding
+    plaintext, and a trap once the column is genuinely encrypted: with
+    a wrong or rotated SECRET_KEY the caller would send "enc:gAAAAA..."
+    to a provider as a bearer token. Every model then answers 401 and
+    it looks exactly like a revoked key — an operator would go and
+    rotate a credential that was never the problem.
+
+    "I cannot read this" and "the provider rejected this" are different
+    facts and have different fixes, so they must not share a symptom.
+
+    Plaintext is still returned as-is: rows written before encryption
+    have to keep working, and a value with no "enc:" prefix was never
+    encrypted rather than failing to decrypt.
+    """
+    if not stored:
+        return stored
+    if not stored.startswith("enc:"):
+        return stored
+    f = _get_fernet()
+    try:
+        return f.decrypt(stored[4:].encode("utf-8")).decode("utf-8")
+    except InvalidToken as exc:
+        raise CredentialUnreadable(
+            "Stored credential could not be decrypted. This usually means "
+            "SECRET_KEY changed since the credential was saved — re-enter it."
+        ) from exc
+
+
 # Suffix patterns that indicate a sensitive field — used in addition
 # to the explicit ``_EXPLICIT_SENSITIVE_KEYS`` set below.  Pattern-
 # matching catches new provider integrations whose credential fields

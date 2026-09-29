@@ -282,7 +282,13 @@ app.include_router(
 )
 app.include_router(
     scan_sources.router, prefix="/api/v1/scan-sources", tags=["scan-sources"],
-    dependencies=[Depends(require_scope("scan"))],
+    dependencies=[
+        Depends(require_scope("scan")),
+        # Non-git scanning is Enterprise. GET and DELETE stay open so a
+        # tenant that downgrades can see and remove what it already has
+        # rather than being left with rows it cannot touch.
+        Depends(require_enterprise("scan_sources")),
+    ],
 )
 app.include_router(
     rotation_events.router, prefix="/api/v1", tags=["rotation-events"],

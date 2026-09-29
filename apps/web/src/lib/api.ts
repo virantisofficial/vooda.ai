@@ -27,6 +27,25 @@ api.interceptors.response.use(
       localStorage.removeItem("vooda_token");
       window.location.href = "/login";
     }
+    // An edition refusal, surfaced once, here.
+    //
+    // The API answers 402 with a sentence written for the customer —
+    // which feature, and what the Community edition still includes.
+    // Nothing read it: callers catch and fall back to an empty list,
+    // so a gated tenant saw "no custom detectors" rather than a gate,
+    // and a refused schedule change reverted the select in silence.
+    //
+    // Done in the interceptor rather than at each call site because
+    // there are dozens of them and the ones that swallow the error are
+    // exactly the ones that would never be updated.
+    if (err.response?.status === 402 && typeof window !== "undefined") {
+      const detail = err.response?.data?.detail;
+      window.dispatchEvent(new CustomEvent("vooda:edition-gated", {
+        detail: typeof detail === "string" && detail
+          ? detail
+          : "This feature is available in Vooda Enterprise.",
+      }));
+    }
     return Promise.reject(err);
   }
 );
@@ -470,8 +489,38 @@ export const getAIEngineSettings = () => api.get("/ai-models/engine-settings");
 export const updateAIEngineSettings = (data: Record<string, any>) => api.put("/ai-models/engine-settings", data);
 export const discoverModels = (data: { provider: string; api_key?: string; endpoint_url?: string }) =>
   api.post("/ai-models/discover-models", data);
-export const getAutoConfig = (data: { provider: string; model_id: string; prompt_strategy?: string; parameter_size?: string }) =>
+export const getAutoConfig = (data: {
+  provider: string; model_id: string; prompt_strategy?: string; parameter_size?: string;
+  // What the PROVIDER reported. Without these the backend falls back to
+  // a generic default, so a model's real window is discovered and then
+  // thrown away one call later.
+  context_window?: number | null; max_output?: number | null;
+}) =>
   api.post("/ai-models/auto-config", data);
+
+// Readiness probe — asks a model to triage one finding and grades the
+// answer. Separate from discovery because listing models is free and
+// unlimited, while this costs a request per model.
+export const probeModels = (data: {
+  provider: string; model_ids: string[]; api_key?: string;
+  endpoint_url?: string; model_config_id?: string;
+  supports_json_mode?: boolean; max_tokens?: number;
+  // What discovery concluded, keyed by model id — stored with the
+  // probe verdict so it outlives the response that produced it.
+  suitability?: Record<string, { tier: string; reason: string; may_exclude: boolean }>;
+}) => api.post("/ai-models/probe", data);
+
+// Scores one model against findings whose answer is already known.
+// One model per call — twenty requests, so never run across a list.
+export const checkModelAccuracy = (data: {
+  provider: string; model_id: string; api_key?: string;
+  endpoint_url?: string; model_config_id?: string;
+  supports_json_mode?: boolean; max_tokens?: number;
+}) => api.post("/ai-models/accuracy", data);
+
+// Verdicts already on record, so badges render without spending a call.
+export const getProbeResults = (provider: string) =>
+  api.get("/ai-models/probe-results", { params: { provider } });
 
 // Governance API clients (policies, NHI, agents, supply-chain, quantum,
 // federation, migrations, universal governance, gates) removed 2026-05-16 —

@@ -435,6 +435,17 @@ class NotificationDispatcher:
         from packages.common.encryption import decrypt_config_dict
         config = decrypt_config_dict(dict(channel.config or {}))
 
+        # A gate on configuring something that still sends is not a
+        # gate. Rows written under an Enterprise licence, or before the
+        # split existed, would otherwise keep filing tickets forever —
+        # the same hole the custom-detector registry had.
+        from apps.api.app.core.edition import provider_enabled
+        if not provider_enabled(provider):
+            return DispatchResult(
+                channel=provider, success=False,
+                error=f"{provider} is available in Vooda Enterprise",
+            )
+
         if provider == "slack":
             return await self._send_slack(config, payload)
         elif provider == "teams":

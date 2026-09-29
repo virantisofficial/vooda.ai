@@ -139,13 +139,43 @@ def test_reading_and_removing_scope_stay_open(method):
     assert E.method_exempt("access_control", method) is True
 
 
+#: A hatch exists only where a downgrade would otherwise trap a tenant
+#: with state they can neither inspect nor undo. Listed explicitly so
+#: adding one is a deliberate act with a reason, not a convenience.
+_FEATURES_WITH_AN_ESCAPE_HATCH = {
+    # Grants keep enforcing after a downgrade, so a user scoped to a
+    # business unit stays scoped. Without a way to read and remove
+    # scope they would be locked out of repositories with no route back.
+    "access_control",
+    # Sources keep existing after a downgrade. Without a way to list
+    # and delete them the tenant holds rows nobody can see or stop.
+    "scan_sources",
+}
+
+
 def test_other_gates_have_no_escape_hatch():
-    """Only access control can strand someone; the rest fully gate."""
+    """Everything else gates fully.
+
+    A hatch is a hole with a justification; one without a reason is
+    just a hole.
+    """
     for feature in E.ENTERPRISE_FEATURES:
-        if feature == "access_control":
+        if feature in _FEATURES_WITH_AN_ESCAPE_HATCH:
             continue
         for method in ("GET", "POST", "DELETE"):
-            assert E.method_exempt(feature, method) is False
+            assert E.method_exempt(feature, method) is False, (feature, method)
+
+
+def test_every_hatch_is_one_we_declared():
+    """The set above must not drift from the module."""
+    assert set(E.GATED_FEATURE_ESCAPE_HATCHES) == _FEATURES_WITH_AN_ESCAPE_HATCH
+
+
+def test_no_hatch_opens_a_write():
+    """Reading and undoing stay open; creating never does."""
+    for feature in E.GATED_FEATURE_ESCAPE_HATCHES:
+        for method in ("POST", "PUT", "PATCH"):
+            assert E.method_exempt(feature, method) is False, (feature, method)
 
 
 def test_users_and_roles_are_never_gated():
@@ -211,3 +241,295 @@ def test_unchanged_schedule_is_not_refused():
         "blocking every save that merely echoes the stored schedule would "
         "break editing any repository that already had one"
     )
+
+
+# ── a gate on writing something that still runs is not a gate ────────
+#
+# Three holes, found by surveying the whole application against this
+# list. Each had the same shape: the capability was refused at one
+# door and granted at another, or refused on write while the thing
+# written went on executing.
+
+
+def test_scheduling_is_gated_on_scan_sources_too():
+    """Repositories were not the only way to get a recurring scan.
+
+    `scan_sources` owns its own `scan_schedule` column, and the whole
+    capability could be had by pointing a source at S3 instead of a
+    git repository.
+    """
+    from apps.api.app.routers import scan_sources
+    for fn in (scan_sources.create_scan_source, scan_sources.update_scan_source):
+        assert 'feature_enabled("schedules")' in inspect.getsource(fn), fn.__name__
+
+
+def test_a_smart_default_does_not_hand_out_a_gated_feature():
+    """Every new source was given a recurring schedule automatically.
+
+    jira landed on daily, s3 on weekly, from DEFAULT_SCHEDULE_BY_SOURCE_TYPE
+    — so Community got scheduled scanning without asking for it. An
+    explicit request is refused because it is a request; a default the
+    customer never typed resolves to on_demand instead, because
+    refusing there would block source creation over a value they did
+    not choose.
+    """
+    from apps.api.app.routers import scan_sources
+    src = inspect.getsource(scan_sources.create_scan_source)
+    assert 'resolved_schedule = "on_demand"' in src
+    assert "if data.scan_schedule:" in src, (
+        "an explicit ask and an implicit default must not be treated alike"
+    )
+
+
+def test_stored_schedules_stop_firing_in_community():
+    """Refusing the write is not enough.
+
+    Rows written under an Enterprise licence, or before the gate
+    existed, kept being dispatched by the beat loop forever. The
+    scheduler is one of only two edition checks outside the API layer.
+    """
+    import asyncio
+
+    from services.scheduler.engine import run_scheduled_scans
+
+    settings.EDITION = "community"
+    # A None session is deliberate: if it returns 0 without raising,
+    # it refused before touching the database.
+    assert asyncio.run(run_scheduled_scans(None)) == 0
+
+
+@pytest.mark.parametrize("edition,expected", [("community", []), ("enterprise", None)])
+def test_custom_detectors_do_not_execute_in_community(edition, expected):
+    """CRUD was gated; execution was not.
+
+    `get_all_rules_with_custom` runs on every scan, so any enabled
+    detector row kept matching after a downgrade. Checked in the two
+    loaders rather than their callers, so a new caller cannot
+    reintroduce it — which is why a None session is safe here.
+    """
+    import asyncio
+
+    from services.secret_scan.detectors import registry
+
+    settings.EDITION = edition
+    if expected == []:
+        assert registry.get_custom_rules_sync("t", None) == []
+        assert asyncio.run(registry.get_custom_rules_async("t", None)) == []
+    else:
+        # Enterprise must actually reach the database — with no session
+        # to reach it with, that is an error rather than a quiet [].
+        with pytest.raises(Exception):
+            registry.get_custom_rules_sync("t", None)
+    settings.EDITION = "community"
+
+
+# ── inbound webhooks: Vooda listening on your behalf ─────────────────
+
+
+def test_configuring_an_inbound_webhook_is_gated():
+    """Schedules and inbound webhooks are one capability in two hats.
+
+    Both are Vooda starting a scan nobody asked for at that moment, so
+    gating one and not the other made the boundary arbitrary. Community
+    still automates through the CLI, a CI pipeline key and the pre-push
+    hook — what it does not get is Vooda listening for pushes.
+    """
+    from apps.api.app.routers import webhooks
+    src = inspect.getsource(webhooks)
+    assert src.count('require_enterprise("webhooks")') >= 2, (
+        "both the config write and the test-ping should carry the guard"
+    )
+
+
+def test_the_receiver_itself_is_never_gated():
+    """A 402 to GitHub is a silent outage.
+
+    The receiver authenticates by HMAC signature, not a bearer token,
+    so a guard there would answer the provider with 402 until it
+    disabled the hook — and nobody would be told. Already-connected
+    repositories keep being scanned; only NEW configuration is refused.
+    """
+    from apps.api.app.routers import webhooks
+    src = inspect.getsource(webhooks.receive_webhook)
+    assert "require_enterprise" not in src
+
+
+def test_reading_webhook_config_stays_open():
+    """An operator has to be able to see what is still in force."""
+    from apps.api.app.routers import webhooks
+    src = inspect.getsource(webhooks.get_webhook_config)
+    assert "require_enterprise" not in src
+
+
+# ── ticketing: the whole category ────────────────────────────────────
+
+
+@pytest.mark.parametrize("provider",
+                         ["jira", "servicenow", "custom_ticketing", "linear"])
+def test_every_ticketing_provider_is_gated(provider):
+    """Filing into a tracker is workflow automation, not detection.
+
+    Started as a split with Jira left in Community. Seen on screen, one
+    unbadged tile in a row of three read as a missing badge rather than
+    a decision, and the boundary was hard to state. Taken whole it is
+    one sentence: Community finds, verifies and triages; Enterprise
+    pushes the result into the tools a team already runs.
+    """
+    settings.EDITION = "community"
+    assert E.ticketing_provider_enabled(provider) is False
+    settings.EDITION = "enterprise"
+    assert E.ticketing_provider_enabled(provider) is True
+    settings.EDITION = "community"
+
+
+def test_linear_is_covered_even_though_it_is_not_advertised():
+    """It is absent from PROVIDER_SCHEMAS but the dispatcher routes it.
+
+    A provider gated everywhere except the one path that actually
+    sends is not gated.
+    """
+    settings.EDITION = "community"
+    assert "linear" in E.ENTERPRISE_TICKETING_PROVIDERS
+    assert E.ticketing_provider_enabled("linear") is False
+
+
+@pytest.mark.parametrize("provider", ["slack", "teams", "email", "webhook", "pagerduty"])
+def test_notification_channels_are_untouched_by_the_ticketing_gate(provider):
+    """Being told about a finding is not the same as filing it.
+
+    Gating the channels would leave a scanner that cannot tell anyone
+    what it found, which is a different product.
+    """
+    settings.EDITION = "community"
+    assert E.ticketing_provider_enabled(provider) is True
+
+
+def test_gated_ticketing_cannot_be_configured_or_dispatched():
+    """A gate on configuring something that still sends is not a gate.
+
+    Rows written under an Enterprise licence, or before the gate
+    existed, would otherwise keep filing tickets — the same hole the
+    custom-detector registry had.
+    """
+    from apps.api.app.routers import integrations
+    assert "provider_enabled" in inspect.getsource(
+        integrations.create_integration)
+
+    from services.notifications import dispatcher
+    src = inspect.getsource(dispatcher.NotificationDispatcher)
+    assert "provider_enabled" in src, (
+        "the dispatcher must refuse a gated provider at send time too"
+    )
+
+
+# ── notification channels: telling a system outside Vooda ────────────
+
+
+@pytest.mark.parametrize("provider", ["slack", "teams", "email", "webhook",
+                                      "pagerduty", "splunk", "sentinel", "datadog"])
+def test_notification_channels_are_gated(provider):
+    settings.EDITION = "community"
+    assert E.provider_enabled(provider) is False
+    settings.EDITION = "enterprise"
+    assert E.provider_enabled(provider) is True
+    settings.EDITION = "community"
+
+
+def test_the_in_app_bell_is_never_a_channel():
+    """A licence must not be able to silence "triage could not run".
+
+    In-app notifications are written straight to the notifications
+    table, not dispatched through a channel, so gating the channels
+    cannot reach them. That matters: the health signal that tells a
+    customer their findings are untriaged rather than low risk arrives
+    that way, and a scan that stops silently is the failure this
+    product exists to prevent.
+    """
+    assert "in_app" not in E.ENTERPRISE_PROVIDER_FEATURES
+    assert "notification" not in E.ENTERPRISE_PROVIDER_FEATURES
+
+    from services.notifications import dispatcher
+    import inspect as _i
+    src = _i.getsource(dispatcher.NotificationDispatcher._send_to_channel)
+    assert "provider_enabled" in src
+    # The in-app path is a different method, so the guard above cannot
+    # reach it.
+    assert "_send_to_channel" not in _i.getsource(
+        dispatcher.NotificationDispatcher._create_in_app_notifications
+    ) if hasattr(dispatcher.NotificationDispatcher,
+                 "_create_in_app_notifications") else True
+
+
+def test_a_provider_outside_both_sets_is_untouched():
+    """Scanners, sources and vaults are not notification channels."""
+    settings.EDITION = "community"
+    for provider in ("github", "s3", "jira_source", "container_registry"):
+        assert E.provider_enabled(provider) is True
+
+
+def test_every_gated_provider_names_a_real_feature():
+    """A provider mapped to a key nobody declares would never be gated."""
+    for provider, feature in E.ENTERPRISE_PROVIDER_FEATURES.items():
+        assert feature in E.ENTERPRISE_FEATURES, (provider, feature)
+
+
+def test_removing_a_webhook_stays_open_in_community():
+    """Creating one is Enterprise; undoing one is not.
+
+    A tenant that downgrades, or that was configured before the gate,
+    would otherwise hold a stored secret they can neither repair nor
+    clear, with the provider still posting to an endpoint that ignores
+    it. The same reasoning as the access-control escape hatch: a gate
+    that traps someone is not an upsell.
+    """
+    from apps.api.app.routers import webhooks
+    src = inspect.getsource(webhooks.delete_webhook_config)
+    assert "require_enterprise" not in src
+
+    # And the gate is still on the half that creates.
+    assert 'require_enterprise("webhooks")' in inspect.getsource(
+        webhooks).split("def delete_webhook_config")[0]
+
+
+# ── scan sources: non-git scanning ───────────────────────────────────
+
+
+def test_scan_sources_are_gated():
+    settings.EDITION = "community"
+    assert E.feature_enabled("scan_sources") is False
+    settings.EDITION = "enterprise"
+    assert E.feature_enabled("scan_sources") is True
+    settings.EDITION = "community"
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_reading_and_removing_sources_stay_open(method):
+    """A downgrade must not leave rows nobody can inspect or remove.
+
+    The same escape hatch access control has: creating is the
+    Enterprise capability, seeing what is still configured and
+    stopping it are not.
+    """
+    settings.EDITION = "community"
+    assert E.method_exempt("scan_sources", method) is True
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+def test_creating_a_source_is_refused(method):
+    settings.EDITION = "community"
+    assert E.method_exempt("scan_sources", method) is False
+
+
+def test_a_stored_source_stops_scanning_in_community():
+    """Refusing the write is not enough.
+
+    Sources written under an Enterprise licence would otherwise keep
+    being scanned on every schedule tick and every manual trigger —
+    the same hole the detector registry and the scheduler had.
+    """
+    from apps.worker import tasks
+    src = inspect.getsource(tasks._run_source_scan)
+    assert 'feature_enabled("scan_sources")' in src
+    # Checked before any work, so nothing is fetched or stored.
+    head = src[:src.index("import apps.api.app.models")]
+    assert "feature_enabled" in head

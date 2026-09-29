@@ -54,12 +54,13 @@ Credentials don't stay in source code. They get attached to a Jira ticket, dumpe
 
 > **the adapter pulls the content → detection rules and regex flag credential candidates → live verification checks whether they still work → an AI model triages out the false positives.**
 
-| Category | Sources |
-|---|---|
-| **Code & history** | Git working tree and full commit history — GitHub, GitLab, Bitbucket |
-| **Tickets & issues** | Jira, ServiceNow, Azure DevOps — descriptions and comments |
-| **Cloud storage** | Amazon S3, Google Cloud Storage, Azure Blob |
-| **Pipelines & artifacts** | Container registries, CI/CD logs, container images |
+| Category | Sources | Edition |
+|---|---|---|
+| **Code & history** | Git working tree and full commit history — GitHub, GitLab, Bitbucket | Community |
+| **Tickets & issues** | Jira, ServiceNow, Azure DevOps — descriptions and comments | Enterprise |
+| **Cloud storage** | Amazon S3, Google Cloud Storage, Azure Blob | Enterprise |
+| **Pipelines & artifacts** | Container registries, CI/CD logs, container images | Enterprise |
+| **Chat & wikis** | Slack, Teams, Mattermost, Confluence, Notion, SharePoint | Enterprise |
 
 A repository scan reads your files, your commit history and your commit
 messages. Ticket and pull request discussion lives outside the repository, so
@@ -178,14 +179,24 @@ Findings then carry `not_validated` instead of live/inactive. Detection and tria
 
 ## Community vs Enterprise
 
-**The whole scan engine is in this repository.** The full detection engine, every detector module, verification, and AI triage — no `ee/` directory, nothing held back from the scanner itself. Suppressions and rule overrides come with it, because living with a false positive is part of running a scanner, not an upgrade. What Enterprise adds is organisational scale: multi-team scoping, compliance tooling, org-specific detectors and scheduling. What you self-host is a real, production-grade secret scanner: **free for non-commercial use**, and available to businesses under a commercial licence.
+**The whole scan engine is in this repository.** The full detection engine, every detector module, verification, and AI triage — no `ee/` directory, nothing held back from the scanner itself. Suppressions and rule overrides come with it, because living with a false positive is part of running a scanner, not an upgrade. What Enterprise adds is everything around the scanner: the connectors that reach beyond your code, the automation that runs it for you, the routes that carry a finding into the tools your team already uses, and organisational scale — multi-team scoping, compliance tooling and org-specific detectors. What you self-host is a real, production-grade secret scanner: **free for non-commercial use**, and available to businesses under a commercial licence.
 
 Both editions are self-hosted — you run Vooda on your own infrastructure either way. **Enterprise** is the same software under a commercial licence, with more: the complete set of source connectors, secret-manager coverage with rotation write-back, fresh signatures the day they ship, and a support line with an SLA.
+
+> **If you are upgrading from an earlier release.** Some capabilities now
+> require a commercial licence: non-git scan sources, scan schedules, inbound
+> webhooks, notification channels, ticketing and the full audit log. They
+> are shown in the
+> interface with an **Enterprise** badge rather than removed, so you can see
+> what a licence adds. Anything you had already configured stays readable and
+> removable — an edition change never leaves you holding settings you cannot
+> inspect or undo — but it stops running until the licence is in place. Set
+> `EDITION=enterprise` in your `.env` to enable them.
 
 | | Community (this repo) | Enterprise ([vooda.ai](https://vooda.ai)) |
 |---|---|---|
 | Full scan engine | ✅ | ✅ |
-| Scan sources | Code + issue tracking, cloud storage, CI/CD | ✅ Adds team chat, wikis & more connectors |
+| Scan sources | Git repositories | ✅ Adds issue trackers, cloud storage, CI/CD surfaces, team chat and wikis |
 | Secret verification | ✅ | ✅ |
 | AI triage | ✅ bring your own model or API key | ✅ included — no key, no GPU to run |
 | Local-model triage ($0 AI cost) | ✅ | ✅ |
@@ -193,11 +204,15 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 | Compliance reporting | ✅ | ✅ |
 | Suppressions & rule overrides | ✅ | ✅ |
 | Multi-team scoping — business units, per-user access grants | — | ✅ |
-| Audit log — view & search | ✅ | ✅ |
+| Recent activity on the dashboard | ✅ | ✅ |
+| Audit log — full view & search | — | ✅ |
 | Audit export & retention enforcement | — | ✅ |
 | Org-specific custom detectors | — | ✅ |
 | Migrate from another scanner — import findings **and triage history** | — | ✅ |
-| Scheduled scans | on demand, CLI, CI & webhooks | ✅ adds scheduling |
+| Scan triggers | on demand, CLI, CI, pre-push hook | ✅ adds schedules and inbound webhooks |
+| In-app notifications | ✅ | ✅ |
+| Alerts out — Slack, Teams, email, PagerDuty, webhook | — | ✅ |
+| Tickets — Jira, ServiceNow, custom tracker | — | ✅ |
 | Secret-manager coverage & rotation write-back — Vault, AWS, Azure, GCP, CyberArk | — | ✅ |
 | **Detection & signature updates** | published here **monthly** (~30 days behind) | **continuous** — new detectors the day they ship |
 | Hosting | ✅ self-hosted (on-prem) | ✅ self-hosted (on-prem) |
@@ -209,7 +224,9 @@ Three honest asterisks on the community edition:
 
 - **Free for non-commercial use.** The community edition is free for individuals, non-commercial research and education, and non-profits. Business or for-profit use — including internal production use — needs a commercial licence (see [License](#license)).
 - **Migrating from another scanner is an Enterprise service.** Community imports findings from your own CI and CLI runs. Bringing a *different* scanner's history across — GitHub Advanced Security, GitGuardian, GitLab Secret Detection, TruffleHog — including every verdict your team recorded there, is Enterprise. Keeping those decisions is what stops a migration re-opening thousands of findings your team already settled.
-- **A curated set of sources.** Community scans your code plus the primary connector in each category — issue tracking (Jira, ServiceNow, Azure DevOps), cloud storage (Amazon S3, Azure Blob, Google Cloud Storage), and CI / build surfaces (container registries, CI/CD logs, container images). Enterprise unlocks the rest: team chat (Slack, Teams, Mattermost), wikis (Confluence, Notion, SharePoint), additional ticketing and object-store connectors, and secret-manager coverage with rotation write-back (HashiCorp Vault, AWS, Azure, GCP, CyberArk).
+- **Community scans your code.** Git repositories, with the whole engine behind it — every detector, live verification and AI triage. The connectors that reach anywhere else are Enterprise: issue tracking (Jira, ServiceNow, Azure DevOps), cloud storage (Amazon S3, Azure Blob, Google Cloud Storage), CI / build surfaces (container registries, CI/CD logs, container images), team chat (Slack, Teams, Mattermost), wikis (Confluence, Notion, SharePoint), and secret-manager coverage with rotation write-back (HashiCorp Vault, AWS, Azure, GCP, CyberArk).
+
+- **Community tells you in the app.** Findings, the dashboard and the notification bell all work, including the signal that says triage could not run. Carrying an alert *out* of Vooda — into Slack, Teams, email, PagerDuty, a webhook, or a ticket in Jira or ServiceNow — is Enterprise.
 - **Detection updates land monthly.** You get the same rules and signatures Enterprise gets — just on a ~30-day lag, not the continuous feed. A `git pull` always brings you to the latest community release; the engine itself never lags.
 - **Support is the community forum.** [Discussions](../../discussions) and [Issues](../../issues), answered best-effort by us and other users — no guaranteed response time, no phone number. That's what Enterprise is for.
 

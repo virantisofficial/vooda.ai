@@ -69,6 +69,16 @@ from apps.api.app.schemas.scan_source import (
 
 router = APIRouter()
 
+#: One wording for both doors into scheduling, so the refusal a
+#: customer sees does not depend on which one they walked through.
+_SCHEDULES_GATED = (
+    "Scan Schedules is available in Vooda Enterprise. "
+    "Sources can still be scanned on demand, from the CLI, or "
+    "from CI. See https://vooda.ai/"
+)
+
+
+
 
 async def _validate_target_scope(
     db: AsyncSession,
@@ -166,6 +176,24 @@ async def create_scan_source(
         if data.scan_schedule
         else get_default_schedule(data.source_type)
     )
+
+    # The same gate repositories carry, on the other door into it.
+    #
+    # Scheduling was refused on a repository and granted on a scan
+    # source, so the whole capability could be had by pointing a source
+    # at S3 instead — and worse, the smart default above handed it out
+    # unasked: every new jira source landed on daily, every s3 source on
+    # weekly, and the beat loop dispatched them.
+    #
+    # An explicit ask is refused, because it is an ask. A default the
+    # customer never typed is quietly resolved to on_demand instead —
+    # refusing there would block source creation over a value they did
+    # not choose.
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("schedules") and resolved_schedule != "on_demand":
+        if data.scan_schedule:
+            raise HTTPException(status_code=402, detail=_SCHEDULES_GATED)
+        resolved_schedule = "on_demand"
 
     source = ScanSource(
         name=data.name,
@@ -330,6 +358,13 @@ async def update_scan_source(
     if data.is_active is not None:
         source.is_active = data.is_active
     if data.scan_schedule is not None:
+        # Only a CHANGE is refused, as on repositories: a tenant that
+        # downgrades can still read and re-send what it already has
+        # instead of failing every save.
+        from apps.api.app.core.edition import feature_enabled
+        if (not feature_enabled("schedules")
+                and data.scan_schedule != source.scan_schedule):
+            raise HTTPException(status_code=402, detail=_SCHEDULES_GATED)
         source.scan_schedule = data.scan_schedule
     if data.config is not None:
         source.config = data.config

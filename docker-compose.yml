@@ -38,6 +38,15 @@ x-api-base: &api-base
     DATABASE_URL_SYNC: 'postgresql://${POSTGRES_USER:-vooda}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vooda}'
     REDIS_URL: 'redis://redis:6379/0'
     SECRET_KEY: '${SECRET_KEY}'
+    # Which edition this install runs. Defaults to community, so an
+    # operator who sets nothing keeps exactly what they have.
+    #
+    # It belongs in this shared block rather than on the api service:
+    # two of the gates live in the worker (the scheduler, and the
+    # custom-detector registry), so an install where only the API knew
+    # it was Enterprise would refuse to dispatch its own scheduled
+    # scans — a split brain that reads as a bug, not a licence.
+    EDITION: '${EDITION:-community}'
     AI_PROVIDER: '${AI_PROVIDER:-claude}'
     ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY:-}'
     OPENAI_API_KEY: '${OPENAI_API_KEY:-}'

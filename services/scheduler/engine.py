@@ -93,6 +93,23 @@ async def run_scheduled_scans(db: AsyncSession) -> int:
     use the `scan_schedule` column. Both go through `_is_due` for the
     overdue check so we tune cadence in one place.
     """
+    # Recurring dispatch is the Enterprise capability itself.
+    #
+    # The API refuses a schedule CHANGE, which is right for a tenant
+    # that downgrades — they keep their stored value and are not made
+    # to fail every save. But a stored value nothing acts on is the
+    # point: without this check the rows written under an Enterprise
+    # licence keep firing forever afterwards, and rows written before
+    # the gate existed never stop.
+    #
+    # This is the only edition check outside the API layer besides the
+    # detector registry, and it is here for the same reason: a gate on
+    # writing something that still executes is not a gate.
+    from apps.api.app.core.edition import feature_enabled
+    if not feature_enabled("schedules"):
+        logger.debug("scheduled_scans_skipped_community_edition")
+        return 0
+
     repo_count = await _trigger_due_repositories(db)
     source_count = await _trigger_due_sources(db)
     if repo_count or source_count:
