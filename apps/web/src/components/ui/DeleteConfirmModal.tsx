@@ -219,8 +219,18 @@ export default function DeleteConfirmModal({
 
               {/* Typed confirmation — the friction gate. */}
               <div className="space-y-1.5 pt-1">
+                {/* `normal-case` on the name, deliberately.
+                    The label is styled uppercase, which also uppercased
+                    the interpolated name — so a repository called
+                    "MCPGoat" was displayed as "MCPGOAT" while the gate
+                    below still compared against the real one. Typing
+                    what the screen asked for left the button disabled
+                    with nothing to explain why.
+                    The comparison stays case-sensitive: the friction is
+                    the point of a type-to-confirm, and it is the label
+                    that was lying, not the check that was too strict. */}
                 <label className="text-[10px] uppercase tracking-wider text-slate-500 font-medium">
-                  Type <span className="text-slate-300 font-mono">{preview.name}</span> to confirm
+                  Type <span className="text-slate-300 font-mono normal-case">{preview.name}</span> to confirm
                 </label>
                 <input
                   value={typed}
