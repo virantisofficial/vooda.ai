@@ -1,6 +1,7 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { statusLabel, statusShort, statusDetail, statusTone } from "@/lib/findingState";
+import { statusShort, statusDetail, statusTone,
+         STATUS_CHOICES, REASON_LABELS } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -44,12 +45,12 @@ const INCIDENT_BULK_ACTIONS: ReadonlyArray<{
   color: string;
   confirm?: boolean;
 }> = [
-  { action: "mark_tp",      label: "True Positive",       color: "bg-red-500/15 text-red-300 hover:bg-red-500/25 border-red-500/30" },
-  { action: "mark_fp",      label: "False Positive",      color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
-  { action: "mark_test",    label: "Test Credential",     color: "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 border-blue-500/30" },
-  { action: "accept_risk",  label: "Accepted Risk",       color: "bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 border-orange-500/30" },
-  { action: "mark_rotated", label: "Rotated / Revoked",   color: "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border-emerald-500/30", confirm: true },
-  { action: "reopen",       label: "Re-open",             color: "bg-yellow-500/15 text-yellow-300 hover:bg-yellow-500/25 border-yellow-500/30", confirm: true },
+  { action: "mark_tp",      label: "Triaging",            color: "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 border-blue-500/30" },
+  { action: "mark_rotated", label: "Resolved — Rotated",  color: "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border-emerald-500/30", confirm: true },
+  { action: "mark_fp",      label: "Dismissed — FP",      color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
+  { action: "mark_test",    label: "Dismissed — Test",    color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
+  { action: "accept_risk",  label: "Dismissed — Accepted", color: "bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 border-orange-500/30" },
+  { action: "reopen",       label: "Open",                color: "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border-amber-500/30", confirm: true },
 ];
 
 interface Incident {
@@ -61,6 +62,10 @@ interface Incident {
   occurrence_count: number;
   classification: string;
   review_status: string;
+  //: The lifecycle pair the badges and the filter read.
+  status?: string | null;
+  resolution_reason?: string | null;
+  ai_verdict?: string | null;
   validation_status: string | null;
   rotation_status: string | null;
   rotated_at: string | null;
@@ -75,6 +80,7 @@ interface Props {
    *  bar is Findings-specific and lives below the gate). */
   filters: {
     severity?: string;
+    status?: string;
     classification?: string;
     validation_status?: string;
     search?: string;
@@ -160,7 +166,11 @@ export function IncidentsView({
   // and would otherwise hide while Incidents is active).
   const [search, setSearch] = useState(seedFilters.search || "");
   const [severity, setSeverity] = useState(seedFilters.severity || "");
-  const [classification, setClassification] = useState(seedFilters.classification || "");
+  const [status, setStatus] = useState(seedFilters.status || "");
+  // Deep-link only, no control: a link from elsewhere may still carry
+  // a legacy classification, and dropping it would silently widen the
+  // list the user was sent to.
+  const [classification] = useState(seedFilters.classification || "");
   const [validation, setValidation] = useState(seedFilters.validation_status || "");
   const [rotation, setRotation] = useState<string>("");
   // "Show dead credentials" — when off (default), the server hides incidents
@@ -194,6 +204,7 @@ export function IncidentsView({
         page_size: pageSize,
       };
       if (severity) params.severity_max = severity;
+      if (status) params.status = status;
       if (classification) params.classification = classification;
       if (validation) params.validation_status = validation;
       if (rotation) params.rotation_status = rotation;
@@ -216,7 +227,7 @@ export function IncidentsView({
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, severity, classification, validation, rotation, search, includeArchivedSources, showDead]);
+  }, [page, pageSize, severity, status, classification, validation, rotation, search, includeArchivedSources, showDead]);
 
   useEffect(() => {
     fetchItems();
@@ -228,7 +239,7 @@ export function IncidentsView({
     setSelected(new Set());
     setBulkComment("");
     setPendingBulk(null);
-  }, [severity, classification, validation, rotation, search]);
+  }, [severity, status, classification, validation, rotation, search]);
 
   // Also reset the pending-confirm state when the selection itself
   // empties out (user clicked Clear or finished a successful action)
@@ -327,7 +338,7 @@ export function IncidentsView({
   const startIdx = total > 0 ? (page - 1) * pageSize + 1 : 0;
   const endIdx = Math.min(page * pageSize, total);
 
-  const anyFilterActive = !!(search || severity || classification || validation || rotation);
+  const anyFilterActive = !!(search || severity || status || classification || validation || rotation);
 
   return (
     <div className="space-y-3">
@@ -368,7 +379,7 @@ export function IncidentsView({
               onClick={() => {
                 setSearch("");
                 setSeverity("");
-                setClassification("");
+                setStatus("");
                 setValidation("");
                 setRotation("");
               }}
@@ -409,12 +420,11 @@ export function IncidentsView({
           <option value="low">Low</option>
           <option value="info">Info</option>
         </select>
-        <select value={classification} onChange={(e) => setClassification(e.target.value)} className="select-dark">
+        <select value={status} onChange={(e) => setStatus(e.target.value)} className="select-dark">
           <option value="">All Statuses</option>
-          <option value="needs_review">Needs Review</option>
-          <option value="true_positive">True Positive</option>
-          <option value="false_positive">False Positive</option>
-          <option value="accepted_risk">Accepted Risk</option>
+          {STATUS_CHOICES.map((c) => (
+            <option key={c.status} value={c.status}>{c.label}</option>
+          ))}
         </select>
         <select value={validation} onChange={(e) => setValidation(e.target.value)} className="select-dark">
           <option value="">All Validity</option>
@@ -438,6 +448,7 @@ export function IncidentsView({
             kind="incidents"
             filters={{
               severity_max: severity,
+              status,
               classification,
               validation_status: validation,
               rotation_status: rotation,
@@ -602,7 +613,7 @@ export function IncidentsView({
                     )}
                     {cols.status && (
                       <td className="py-2.5 px-3">
-                        <div className="flex items-center gap-1.5 min-w-0" title={statusLabel(inc)}>
+                        <div className="flex items-center gap-1.5 min-w-0" title={statusShort(inc) + (inc.resolution_reason ? ` — ${REASON_LABELS[inc.resolution_reason] || inc.resolution_reason}` : "")}>
                           <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${statusTone(inc).badge}`}>
                             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusTone(inc).dot}`} />
                             {statusShort(inc)}

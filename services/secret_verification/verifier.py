@@ -10,6 +10,7 @@ Only regex-detected findings with known providers are verified.
 Entropy-only findings with provider="unknown" are skipped.
 """
 
+import re
 import structlog
 from typing import Optional
 from dataclasses import dataclass
@@ -30,6 +31,17 @@ class VerificationResult:
     permissions: Optional[str] = None  # Back-compat free-text summary (UI fallback)
     transient: bool = False  # True when the error is a network blip worth retrying
                              # (DNS, TCP reset, timeout). Only meaningful when status=="error".
+    # True when an "inactive" verdict is attributable to the credential
+    # Vooda actually found, rather than to a value guessed alongside it.
+    #
+    # Paired verifiers send two or three values, and all but one are
+    # read out of the file by regex. A provider that rejects the whole
+    # request usually cannot say which value it disliked — so unless the
+    # verifier can prove it was the detected secret (Azure's AADSTS
+    # codes can), "inactive" would be claiming a live credential is
+    # dead on the strength of a guess. `apply_pairing_attribution`
+    # downgrades those to check_failed.
+    attributed: bool = False
     permissions_detail: Optional[dict] = None
     # Structured permission data the UI / Blast Radius panel can render
     # richly. Shape is per-provider but common keys include:
@@ -3935,6 +3947,24 @@ async def verify_render_token(token: str) -> VerificationResult:
 # ── Stage 3: Multi-credential verifiers ───────────────────────
 
 
+#: AADSTS codes that mean the SECRET was rejected — the one case where
+#: "inactive" is a statement about the credential we were asked about.
+_AZURE_SECRET_REJECTED = {
+    "7000215",  # Invalid client secret provided
+    "7000222",  # The provided client secret keys are expired
+    "7000218",  # Request body must contain client_secret or assertion
+}
+
+#: AADSTS codes that mean the client id or tenant was not recognised.
+#: Those two come from pairing — read out of the file near the secret —
+#: so this says nothing about whether the secret still works.
+_AZURE_IDENTIFIER_NOT_FOUND = {
+    "700016",  # Application with identifier X was not found in the directory
+    "90002",   # Tenant not found
+    "900023",  # Specified tenant identifier is not valid
+}
+
+
 async def verify_azure_ad(client_id: str, client_secret: str, tenant_id: str) -> VerificationResult:
     """POST /{tenant}/oauth2/v2.0/token — client credentials grant.
     Azure AD verifies by requesting an access token for Microsoft Graph."""
@@ -3960,9 +3990,46 @@ async def verify_azure_ad(client_id: str, client_secret: str, tenant_id: str) ->
                 provider="azure",
                 permissions=f"scope: {body.get('scope','')[:40]}, exp={body.get('expires_in','?')}s")
         elif r.status_code in (400, 401, 403):
-            detail = r.json().get("error_description", "")[:120] if r.headers.get("content-type","").startswith("application/json") else "auth rejected"
-            return VerificationResult(status="inactive",
-                details=f"Azure AD: {detail}", provider="azure")
+            body_is_json = r.headers.get("content-type", "").startswith("application/json")
+            description = r.json().get("error_description", "") if body_is_json else ""
+            code_match = re.search(r"AADSTS(\d+)", description or "")
+            code = code_match.group(1) if code_match else ""
+
+            # Azure rejects the whole client-credentials request with a
+            # 400 whether the secret is wrong or the client id is. Only
+            # the AADSTS code says which, and the difference is the
+            # difference between "this credential is dead" and "we
+            # could not tell" — the first is a claim of safety, and
+            # making it wrongly is how a live key gets closed.
+            #
+            # A client id or tenant that came from pairing is a guess:
+            # it was read out of the file near the secret. When Azure
+            # says that is what it did not recognise, the secret's own
+            # status is simply unknown.
+            if code in _AZURE_SECRET_REJECTED:
+                # Attributable: Azure only reaches "invalid client
+                # secret" once it has found the application, so the
+                # client id and tenant were right and the secret is
+                # genuinely the thing it rejected.
+                return VerificationResult(
+                    status="inactive",
+                    details=f"Azure AD: {description[:120] or 'client secret rejected'}",
+                    provider="azure",
+                    attributed=True)
+            if code in _AZURE_IDENTIFIER_NOT_FOUND:
+                return VerificationResult(
+                    status="check_failed",
+                    details=(
+                        f"Azure AD did not recognise the client id or tenant "
+                        f"(AADSTS{code}); the secret itself was never tested."
+                    ),
+                    provider="azure")
+            # Unrecognised rejection. Not "dead" — the codebase's own
+            # rule is that absence of evidence never reads as safe.
+            return VerificationResult(
+                status="check_failed",
+                details=f"Azure AD rejected the request: {description[:120] or 'auth rejected'}",
+                provider="azure")
         return VerificationResult(status="error",
             details=f"Azure AD HTTP {r.status_code}", provider="azure")
     except Exception as e:
@@ -4127,10 +4194,20 @@ async def verify_snowflake_paired(account: str, user: str, password: str) -> Ver
             msg = body.get("message", "?")[:100]
             return VerificationResult(status="inactive",
                 details=f"Snowflake rejected: {msg}", provider="snowflake")
-        elif r.status_code in (401, 403, 400, 404):
-            # 404 = account subdomain doesn't exist (equivalent to creds invalid)
+        elif r.status_code == 404:
+            # The account subdomain does not exist. That is a statement
+            # about the account name — which pairing read off a nearby
+            # line — and none at all about the password. It was being
+            # reported as "creds invalid", which closed the finding.
+            return VerificationResult(status="check_failed",
+                details=(
+                    "Snowflake account not found; the password was never "
+                    "tested."
+                ),
+                provider="snowflake")
+        elif r.status_code in (401, 403, 400):
             return VerificationResult(status="inactive",
-                details="Snowflake creds rejected or account not found", provider="snowflake")
+                details="Snowflake credentials rejected", provider="snowflake")
         return VerificationResult(status="error",
             details=f"Snowflake HTTP {r.status_code}", provider="snowflake")
     except Exception as e:
@@ -7185,31 +7262,46 @@ VERIFIERS = {
     # source_metadata populated by credential_pairing.
     "aws_paired": lambda sm: verify_aws_access_key(
         sm.get("_raw_value", ""),                      # access_key_id
-        sm.get("aws_secret") or sm.get("aws_secret_access_key", ""),
+        # The partner arrives under whichever spelling found it: the
+        # inline regex writes `aws_secret`, the contextual and
+        # credentials-file rules `aws_secret_access_key`, and the two
+        # SDK rules `aws_secret_key`. Missing the last one meant a pair
+        # could be found and still verified with an empty secret.
+        sm.get("aws_secret")
+        or sm.get("aws_secret_access_key")
+        or sm.get("aws_secret_key", ""),
     ),
     "twilio_paired": lambda sm: verify_twilio_key(
         sm.get("_raw_value", ""),                      # account_sid
         sm.get("twilio_auth_token", ""),
     ),
+    # Inverted in 2026-10: the rule that fires is VOODA-SEC-AZ-002,
+    # "Azure AD Client Secret", so `_raw_value` is the secret. It was
+    # being passed as the client_id, which no rule detects — and the
+    # pairing was keyed on a client id too, so this never ran at all.
     "azure_ad_paired": lambda sm: verify_azure_ad(
-        sm.get("_raw_value", ""),                      # client_id
-        sm.get("azure_client_secret", ""),
-        sm.get("azure_tenant_id", ""),
+        sm.get("azure_client_id", ""),                 # found beside it
+        sm.get("_raw_value", ""),                      # client_secret
+        sm.get("azure_tenant_id", ""),                 # found beside it
     ),
+    # The three below were inverted in 2026-10 for the same reason as
+    # azure_ad_paired: the half Vooda detects is the secret, and the
+    # identifier beside it is read out of the file. `_raw_value` is
+    # therefore the secret in each, not the id.
     "paypal_paired": lambda sm: verify_paypal_oauth(
-        sm.get("_raw_value", ""),                      # client_id
-        sm.get("paypal_client_secret", ""),
+        sm.get("paypal_client_id", ""),
+        sm.get("_raw_value", ""),                      # client_secret
         live=bool(sm.get("paypal_live", False)),
     ),
     "mongodb_atlas_paired": lambda sm: verify_mongodb_atlas_paired(
-        sm.get("_raw_value", ""),                      # public_key
-        sm.get("mongodb_atlas_private_key", ""),
+        sm.get("mongodb_atlas_public_key", ""),
+        sm.get("_raw_value", ""),                      # private_key
         sm.get("mongodb_group_id", ""),
     ),
     "snowflake_paired": lambda sm: verify_snowflake_paired(
-        sm.get("_raw_value", ""),                      # account
+        sm.get("snowflake_account", ""),
         sm.get("snowflake_user", ""),
-        sm.get("snowflake_password", ""),
+        sm.get("_raw_value", ""),                      # password
     ),
     "stripe_connect_paired": lambda sm: verify_stripe_connect_paired(
         sm.get("stripe_secret_key") or sm.get("_raw_value", ""),
@@ -7408,6 +7500,204 @@ VERIFIERS = {
 
 SUPPORTED_PROVIDERS = set(VERIFIERS.keys())
 
+#: Detection methods whose findings carry a provider worth asking about.
+#: Named rather than inlined because `can_verify` below has to answer
+#: the same question `verify_finding` does, and two copies of a tuple
+#: is how the UI ends up offering a button the API will refuse.
+VERIFIABLE_DETECTION_METHODS = (
+    "regex", "regex_base64", "config_key", "entropy", "structured_parse",
+)
+
+
+#: Verifier keys for credentials whose provider name covers more than
+#: one product. Checked before the provider, because the provider alone
+#: routes them to the wrong API — a Google Gemini key and a Google OAuth
+#: client secret are both `provider: google`, and a Dropbox Sign key and
+#: a Dropbox token are both `provider: dropbox`.
+#:
+#: Keyed on secret_type, which is the only field that distinguishes
+#: them. Anything not listed falls through to the provider, so adding a
+#: product here is the one place that has to change.
+_VERIFIER_BY_SECRET_TYPE: dict[str, str] = {
+    # Google Gemini. `provider: google` has no verifier of its own —
+    # there is no single API that answers for OAuth client secrets,
+    # Chat webhooks and Gemini keys alike — so these two were detected
+    # and never checked, while a working Gemini verifier sat unreachable.
+    "google_gemini_key": "gemini",
+    "google_ai_studio_key": "gemini",
+    # Dropbox Sign (formerly HelloSign) is a different API from Dropbox.
+    # Routed by provider, these keys went to the Dropbox verifier, which
+    # rejects them — reporting a live credential as inactive.
+    "dropbox_sign_key": "dropbox_sign",
+}
+
+#: Providers whose verifier is registered under a different spelling.
+#: The rule names the vendor one way and whoever wrote the verifier
+#: named it another; both are reasonable, and the finding simply never
+#: reached the check.
+_PROVIDER_ALIASES: dict[str, str] = {
+    "crates": "cratesio",                 # crates.io/api/v1/me
+    "openexchange": "openexchangerates",  # openexchangerates.org/api/usage.json
+    "tomorrow": "tomorrow_io",            # api.tomorrow.io/v4/weather/realtime
+}
+
+
+def resolve_verifier_key(source_metadata: dict) -> Optional[str]:
+    """The VERIFIERS key for a finding, or None if nothing can check it.
+
+    Three steps, narrowest first: the credential's own type, then the
+    provider under any name it is registered as, then the provider
+    itself. Everything that dispatches a verifier goes through here, so
+    the UI's "is this checkable" answer and the endpoint's behaviour
+    cannot drift apart.
+    """
+    sm = source_metadata or {}
+    secret_type = (sm.get("secret_type") or "").lower()
+    if secret_type in _VERIFIER_BY_SECRET_TYPE:
+        return _VERIFIER_BY_SECRET_TYPE[secret_type]
+    provider = (sm.get("provider") or "").lower()
+    aliased = _PROVIDER_ALIASES.get(provider, provider)
+    return aliased if aliased in VERIFIERS else None
+
+
+def paired_verifier_key(source_metadata: dict) -> Optional[str]:
+    """The paired verifier for this finding's credential type, if any.
+
+    Eight credential families are only verifiable as a pair — an AWS
+    access key id says nothing without its secret key, an Azure client
+    id without its client secret and tenant. ``VERIFIERS`` holds them
+    under keys like ``aws_paired`` which no finding ever carries as its
+    provider; they are reached by matching the finding's *secret type*
+    against the pairing table.
+
+    The scan pipeline has always done that. The manual re-verify path
+    never did: it looked up the provider alone, found no ``aws``, and
+    answered "unsupported" for a credential it had verified minutes
+    earlier during the scan.
+    """
+    from services.secret_verification.credential_pairing import KNOWN_PAIRS
+    secret_type = (source_metadata or {}).get("secret_type") or ""
+    for pair in KNOWN_PAIRS:
+        if pair.primary_secret_type == secret_type.lower():
+            return pair.verifier_key
+    return None
+
+
+def apply_pairing_attribution(result, enriched: dict):
+    """Refuse to call a credential dead on the strength of a guess.
+
+    A paired verification sends values Vooda never detected — a secret
+    key, a client id, an account name — found by scanning the file
+    around the credential. When the provider rejects the request, it
+    almost never says which value was wrong. Reporting "inactive"
+    then means telling someone their exposed credential is harmless
+    because a regex picked up the wrong line.
+
+    So an inactive verdict survives only when the verifier could
+    attribute it (``attributed``) or when nothing was guessed. The rest
+    become check_failed, which is unhelpful and honest, and which the
+    validity vocabulary already forbids anyone from reading as safe.
+    """
+    if result is None or result.status != "inactive" or result.attributed:
+        return result
+    inferred = [k for k in (enriched or {}).get("_inferred_partners", []) if k]
+    if not inferred:
+        return result
+    from dataclasses import replace
+    return replace(
+        result,
+        status="check_failed",
+        details=(
+            f"{result.details} — but {', '.join(sorted(inferred))} was read "
+            "from the file rather than detected, so the rejection cannot be "
+            "pinned on this credential."
+        ),
+    )
+
+
+async def verify_finding_with_pairing(
+    source_metadata: dict,
+    *,
+    repo_root: str = "",
+    file_path: str = "",
+    line_start: int = 0,
+) -> Optional["VerificationResult"]:
+    """Verify a finding, pairing it with its partner first where needed.
+
+    What ``_verify_scan_findings`` does during a scan, for the manual
+    re-verify endpoints. The partner is found by scanning the file on
+    disk around the finding's line — the sibling-finding lookup inside
+    ``find_partner_credential`` cannot help here, because stored rows no
+    longer carry their raw values.
+
+    Falls through to the single-value path when the credential is not
+    half of a pair, or when the partner cannot be found: half a pair is
+    not verifiable, and saying so beats sending a request that can only
+    be rejected.
+    """
+    if not _verification_enabled():
+        return None
+
+    pair_key = paired_verifier_key(source_metadata)
+    if not pair_key:
+        return await verify_finding(source_metadata)
+
+    verifier_fn = VERIFIERS.get(pair_key)
+    if verifier_fn is None:
+        return await verify_finding(source_metadata)
+
+    from services.secret_verification.credential_pairing import (
+        find_partner_credential, enrich_source_metadata_with_pair,
+    )
+    partners = find_partner_credential(
+        primary_secret_type=(source_metadata.get("secret_type") or "").lower(),
+        primary_file_path=file_path,
+        primary_line=line_start or 0,
+        # Stored rows carry no raw values, so only the file scan inside
+        # can contribute; passing siblings would add nothing.
+        all_findings=[],
+        repo_root=repo_root,
+    )
+    if not partners:
+        return VerificationResult(
+            status="unsupported",
+            details=(
+                "This credential can only be verified together with its "
+                "partner value, which is not in the file any more."
+            ),
+            provider=(source_metadata.get("provider") or "").lower(),
+        )
+
+    enriched = enrich_source_metadata_with_pair(source_metadata, partners)
+    return apply_pairing_attribution(await verifier_fn(enriched), enriched)
+
+
+def can_verify(source_metadata: dict) -> bool:
+    """Whether a verification could reach a provider for this finding.
+
+    Answers only the questions that no amount of retrying will change:
+    is verification switched on at all, did this finding come from a
+    detection method that identifies a provider, and does a verifier
+    exist for that provider.
+
+    It deliberately says nothing about whether the secret's value can
+    still be recovered — that depends on the file on disk, changes
+    between scans, and is the kind of failure worth letting someone try
+    again after a re-scan. The UI uses this to decide whether to offer
+    the button at all; the endpoint reports the rest.
+    """
+    sm = source_metadata or {}
+    if not _verification_enabled():
+        return False
+    if (sm.get("detection_method") or "") not in VERIFIABLE_DETECTION_METHODS:
+        return False
+    if resolve_verifier_key(sm) is not None:
+        return True
+    # Half of a pair. Whether the partner is still in the file is a
+    # per-call answer, like whether the value itself can be recovered,
+    # so the button is offered and the attempt reports the rest.
+    return paired_verifier_key(sm) is not None
+
 
 def _verification_enabled() -> bool:
     """Global kill-switch (``settings.VERIFICATION_ENABLED``).
@@ -7446,11 +7736,15 @@ async def verify_finding(source_metadata: dict) -> Optional[VerificationResult]:
     # Verify findings from all detection methods that have a known provider
     # (regex, regex_base64, config_key always; entropy and structured_parse
     # when the provider is identified — e.g., a GitHub token caught by entropy)
-    if detection_method not in ("regex", "regex_base64", "config_key", "entropy", "structured_parse"):
+    if detection_method not in VERIFIABLE_DETECTION_METHODS:
         return None
 
-    # Only verify if we have a verifier for this provider
-    if provider not in VERIFIERS:
+    # Only verify if we have a verifier for this credential. Resolved
+    # rather than looked up directly: the provider name is sometimes
+    # coarser than the API (google, dropbox) and sometimes spelled
+    # differently from the verifier's registration (crates, tomorrow).
+    verifier_key = resolve_verifier_key(source_metadata)
+    if verifier_key is None:
         return VerificationResult(
             status="unsupported",
             details=f"No verifier available for provider: {provider}",
@@ -7466,7 +7760,7 @@ async def verify_finding(source_metadata: dict) -> Optional[VerificationResult]:
             provider=provider,
         )
 
-    verifier_fn = VERIFIERS[provider]
+    verifier_fn = VERIFIERS[verifier_key]
     result = await verifier_fn(source_metadata)
 
     logger.info(

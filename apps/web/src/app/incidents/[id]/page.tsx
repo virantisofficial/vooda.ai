@@ -1,5 +1,5 @@
 "use client";
-import { validityOf } from "@/lib/validity";
+import { validityOf, validityLabel } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -341,21 +341,17 @@ export default function IncidentDetailPage() {
   const severity = (data?.severity_max || "info").toLowerCase();
   const rotated = (data?.rotation_status || "").toLowerCase() === "rotated";
   const valStatus = validityOf(data);
+  // Keyed on the five canonical states `validityOf` returns. `revoked`,
+  // `error` and `not_validated` were legacy spellings that `validity()`
+  // already folds into `inactive`, `check_failed` and `unknown` — so
+  // those three keys could never be hit, while the two states that
+  // replaced them had no entry and fell through to the default.
   const valStyles: Record<string, string> = {
     active: "bg-red-500/15 text-red-400",
     inactive: "bg-green-500/15 text-green-400",
-    revoked: "bg-green-500/15 text-green-400",
-    error: "bg-slate-500/15 text-slate-400",
     unknown: "bg-slate-500/15 text-slate-400",
-    not_validated: "bg-slate-500/10 text-slate-500",
-  };
-  const valLabels: Record<string, string> = {
-    active: "Active (Exposed!)",
-    inactive: "Inactive",
-    revoked: "Revoked",
-    error: "Error",
-    unknown: "Unknown",
-    not_validated: "Not Validated",
+    unsupported: "bg-slate-500/10 text-slate-500",
+    check_failed: "bg-amber-500/15 text-amber-400",
   };
 
   const cls = (data?.classification || "").toLowerCase();
@@ -521,8 +517,11 @@ export default function IncidentDetailPage() {
               </button>
             </div>
             <div className="mt-1">
-              <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${valStyles[valStatus] || valStyles.not_validated}`}>
-                {valLabels[valStatus] || valStatus}
+              <span className={`text-xs px-2 py-0.5 rounded-md font-medium ${valStyles[valStatus] || valStyles.unknown}`}>
+                {/* lib/validity.ts, not a private map. The one that
+                    was here had no entry for `unsupported` or
+                    `check_failed`, so both printed the raw enum. */}
+                {validityLabel(valStatus)}
               </span>
               {data.last_validated_at && (
                 <p className="text-[10px] text-slate-500 mt-1">verified {fmtAge(data.last_validated_at)}</p>

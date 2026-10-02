@@ -97,6 +97,19 @@ export interface FindingListItem {
   line_start: number | null;
   confidence: number;
   ai_confidence: number | null;
+  //: What the model thought, advisory only — never the finding's state.
+  //: The API has returned it since the lifecycle split; the type simply
+  //: never declared it, so every reader reached it through `any`.
+  ai_verdict?: string | null;
+  //: Why a finding left the open states. Paired with `status` by a
+  //: CHECK constraint, so the two are only ever read together.
+  resolution_reason?: string | null;
+  //: The terms of an acceptable-risk dismissal: who is accountable,
+  //: and when the acceptance lapses. Nothing re-opens the finding on
+  //: that date — the next scan stops honouring the acceptance — so a
+  //: reader needs the date to tell a live sign-off from a stale one.
+  risk_owner?: string | null;
+  risk_accepted_until?: string | null;
   code_snippet: string | null;
   assigned_to: string | null;
   tags: string[];

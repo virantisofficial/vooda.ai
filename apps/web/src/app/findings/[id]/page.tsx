@@ -1,6 +1,9 @@
 "use client";
 import { validityOf } from "@/lib/validity";
-import { statusLabel, statusTextTone, classificationTextTone, classificationLabel } from "@/lib/findingState";
+import { statusShort, statusDetail, statusTextTone, statusTone, lifecycleOf,
+         classificationTextTone, classificationLabel,
+         STATUS_CHOICES, REASONS_FOR, REASON_LABELS, RESOLVED_IMPLIES,
+         verdictLabel, verdictTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -17,6 +20,9 @@ export default function FindingDetailPage() {
   const [finding, setFinding] = useState<FindingDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState("");
+  // Which closing status has its reason buttons expanded. Closing a
+  // finding needs a reason, so the status alone is never submittable.
+  const [reasonFor, setReasonFor] = useState<string | null>(null);
 
   const id = params?.id as string;
 
@@ -30,13 +36,19 @@ export default function FindingDetailPage() {
     try { await triageFinding(id, { action }); load(); } finally { setActionLoading(""); }
   };
 
-  const handleTriageWithComment = async (action: string, comment?: string) => {
-    setActionLoading(action);
+  const handleTriageWithComment = async (action: string, comment?: string, reason?: string) => {
+    setActionLoading(reason || action);
     try {
-      await triageFinding(id, { action, comment: comment || undefined });
+      await triageFinding(id, {
+        action,
+        comment: comment || undefined,
+        // resolve and dismiss require one; every other action rejects it.
+        resolution_reason: reason || undefined,
+      });
       // Clear the comment input after successful action
       const commentInput = document.getElementById("triage-comment") as HTMLInputElement;
       if (commentInput) commentInput.value = "";
+      setReasonFor(null);
       load();
     } finally { setActionLoading(""); }
   };
@@ -96,9 +108,18 @@ export default function FindingDetailPage() {
           {finding.ai_explanation ? (
             <div className="space-y-4">
               <p className="text-sm text-slate-300 leading-relaxed">{finding.ai_explanation}</p>
-              <div className="flex gap-6 text-sm">
+              <div className="flex gap-6 text-sm flex-wrap">
+                {/* The verdict sits with the confidence that
+                    qualifies it, and nowhere near the status control
+                    below, which records what a person decided. */}
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-500">Confidence:</span>
+                  <span className="text-slate-500">Verdict:</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${verdictTone((finding as any).ai_verdict)}`}>
+                    {verdictLabel((finding as any).ai_verdict)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500">Verdict confidence:</span>
                   <span className="font-semibold text-red-400">{finding.ai_confidence != null ? `${(finding.ai_confidence * 100).toFixed(0)}%` : "N/A"}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -171,7 +192,10 @@ export default function FindingDetailPage() {
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Actions</h3>
             <span className="text-[10px] text-slate-600">
-              Current: <span className={`font-medium ${statusTextTone(finding)}`}>{statusLabel(finding)}</span>
+              Current: <span className={`font-medium ${statusTextTone(finding)}`}>
+                {statusShort(finding)}
+                {statusDetail(finding) && ` — ${statusDetail(finding)}`}
+              </span>
             </span>
           </div>
 
@@ -192,90 +216,94 @@ export default function FindingDetailPage() {
             />
           </div>
 
-          {/* Classification actions — kept in lockstep with the
-              FindingPanel dropdown (the sliding panel opened from
-              the Secrets list).  Both surfaces should expose the
-              same set of triage states, in the same order, with
-              the same labels/colors, so the analyst's mental model
-              doesn't fork between the two views.  See
-              components/findings/FindingPanel.tsx (line ~1627) for
-              the canonical option list.  Updated 2026-05-14. */}
-          <div className="flex gap-2.5 flex-wrap">
-            {(() => {
-              // Same option set as FindingPanel's status dropdown.
-              // "Needs Review" only shows when not already in that
-              // state — mirrors the panel's conditional rendering.
-              const opts: Array<{ action: string; label: string; color: string; border: string; activeBg: string; match: (cls: string) => boolean }> = [
-                ...(finding.classification !== "needs_review" ? [{
-                  action: "reopen",
-                  label: "Needs Review",
-                  color: "text-yellow-400",
-                  border: "border-yellow-400/20",
-                  activeBg: "bg-yellow-500/20 border-yellow-500/30",
-                  match: (c: string) => c === "needs_review",
-                }] : []),
-                {
-                  action: "mark_tp",
-                  label: "True Positive",
-                  color: "text-red-400",
-                  border: "border-red-400/20",
-                  activeBg: "bg-red-500/20 border-red-500/30",
-                  match: (c: string) => c.includes("true_positive"),
-                },
-                {
-                  action: "mark_rotated",
-                  label: "Rotated / Revoked",
-                  color: "text-green-400",
-                  border: "border-green-400/20",
-                  activeBg: "bg-green-500/20 border-green-500/30",
-                  match: (c: string) => c === "rotated" || c === "revoked" || c === "resolved",
-                },
-                {
-                  action: "mark_fp",
-                  label: "False Positive",
-                  color: "text-slate-300",
-                  border: "border-slate-400/20",
-                  activeBg: "bg-slate-500/20 border-slate-500/30",
-                  match: (c: string) => c.includes("false_positive"),
-                },
-                {
-                  action: "mark_test",
-                  label: "Test Credential",
-                  color: "text-blue-400",
-                  border: "border-blue-400/20",
-                  activeBg: "bg-blue-500/20 border-blue-500/30",
-                  match: (c: string) => c === "test_credential",
-                },
-                {
-                  action: "accept_risk",
-                  label: "Accepted Risk",
-                  color: "text-orange-400",
-                  border: "border-orange-400/20",
-                  activeBg: "bg-orange-500/20 border-orange-500/30",
-                  match: (c: string) => c === "accepted_risk",
-                },
-              ];
-              return opts.map((opt) => {
-                const isActive = opt.match(finding.classification);
+          {/* Status actions — the same four statuses the sliding
+              panel offers, in the same order, so the analyst's
+              mental model doesn't fork between the two views. See
+              lib/findingState.ts::STATUS_CHOICES for the one list
+              both read from.
+
+              These used to be five verdict buttons — True Positive,
+              False Positive and so on — which asked the operator to
+              record a judgement in the model's vocabulary. A verdict
+              is evidence; a status is a decision. The model's own
+              verdict is shown with the AI analysis above. */}
+          <div className="space-y-2.5">
+            <div className="flex gap-2.5 flex-wrap">
+              {STATUS_CHOICES.map((opt) => {
+                const savedStatus =
+                  ((finding as any).status || "").toLowerCase()
+                  || lifecycleOf(finding.classification).status;
+                const isActive = savedStatus === opt.status;
+                const expanded = reasonFor === opt.action;
+                const tone = statusTone({ status: opt.status, resolution_reason: null });
                 return (
                   <button
                     key={opt.action}
                     onClick={() => {
+                      if (opt.needsReason) {
+                        setReasonFor(expanded ? null : opt.action);
+                        return;
+                      }
+                      setReasonFor(null);
                       const comment = (document.getElementById("triage-comment") as HTMLInputElement)?.value || undefined;
-                      handleTriageWithComment(opt.action, comment);
+                      // Resolving sends the implied reason: the column
+                      // pairing is a database constraint, not a prompt.
+                      handleTriageWithComment(
+                        opt.action, comment,
+                        opt.action === "resolve" ? RESOLVED_IMPLIES : undefined);
                     }}
                     disabled={!!actionLoading}
-                    className={`px-3.5 py-2 rounded-lg font-medium text-sm transition-all border ${
-                      isActive
-                        ? opt.activeBg + " " + opt.color
-                        : `${opt.color} ${opt.border} bg-transparent hover:bg-white/[0.04]`
+                    title={opt.desc}
+                    className={`px-3.5 py-2 rounded-lg font-medium text-sm transition-all border inline-flex items-center gap-2 ${
+                      expanded
+                        ? "bg-white/[0.07] border-white/20 text-white"
+                        : isActive
+                          ? `${tone.badge} border-white/15`
+                          : "text-slate-300 border-white/[0.1] bg-transparent hover:bg-white/[0.04]"
                     }`}
                   >
+                    <span className={`w-2 h-2 rounded-full ${tone.dot}`} />
                     {actionLoading === opt.action ? "..." : opt.label}
+                    {opt.needsReason && (
+                      <svg className={`w-3 h-3 transition-transform ${expanded ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    )}
                   </button>
                 );
-              });
-            })()}
+              })}
+            </div>
+
+            {/* Step two. A close is only submitted once a reason is
+                picked, because the pairing is a database constraint
+                and not merely a convention. */}
+            {reasonFor && (
+              <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] p-2.5">
+                <p className="text-[10px] text-slate-500 uppercase tracking-wide mb-2">
+                  Why dismissed?
+                </p>
+                <div className="flex gap-2 flex-wrap">
+                  {(REASONS_FOR.dismissed || []).map((r) => (
+                    <button
+                      key={r.reason}
+                      onClick={() => {
+                        const comment = (document.getElementById("triage-comment") as HTMLInputElement)?.value || undefined;
+                        handleTriageWithComment(reasonFor, comment, r.reason);
+                      }}
+                      disabled={!!actionLoading}
+                      title={r.desc}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                        (finding as any).resolution_reason === r.reason
+                          ? "bg-white/[0.07] border-white/20 text-white"
+                          : "text-slate-300 border-white/[0.1] hover:bg-white/[0.04]"
+                      }`}
+                    >
+                      {actionLoading === r.reason ? "..." : REASON_LABELS[r.reason]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

@@ -126,8 +126,8 @@ Two things to know:
 
 | Trigger | What it scans |
 |---|---|
-| **Push webhook** | The files changed by the push *(Enterprise)* |
-| **Pull request webhook** | The code changed by the pull request *(Enterprise)* |
+| **Push webhook** | The files changed by the push |
+| **Pull request webhook** | The code changed by the pull request |
 | **CLI / CI gate** | The files or diff you point it at |
 | **Pre-commit hook** | Staged changes, before the commit is created |
 | **Scheduled scans** | Repositories and sources on a recurring schedule *(Enterprise)* |

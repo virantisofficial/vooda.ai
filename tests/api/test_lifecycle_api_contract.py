@@ -16,6 +16,10 @@ import re
 ROUTER = pathlib.Path("apps/api/app/routers/findings.py")
 SCHEMA = pathlib.Path("apps/api/app/schemas/finding.py")
 WEB = pathlib.Path("apps/web/src/app/findings/page.tsx")
+# The one place the UI's status and reason vocabulary is written down.
+# The screens build their controls from it, so these tests check the
+# table rather than every screen's markup.
+LIB = pathlib.Path("apps/web/src/lib/findingState.ts")
 
 
 def test_close_actions_require_a_reason():
@@ -52,11 +56,13 @@ def test_every_reason_is_reachable_through_the_api():
         assert f'"{reason.value}"' in mapping, (
             f"{reason.value} has no route to a stored classification"
         )
-    # and each is offered by the UI
-    web = WEB.read_text(encoding="utf-8")
+    # and each is spelled by the UI's own vocabulary. The filter builds
+    # its options from these tables rather than listing them inline, so
+    # the check is on the table and not on the markup.
+    lib = LIB.read_text(encoding="utf-8")
     for reason in ResolutionReason:
-        assert f'value="{reason.value}"' in web, (
-            f"{reason.value} is not offered in the findings filter"
+        assert f'{reason.value}:' in lib or f'"{reason.value}"' in lib, (
+            f"{reason.value} has no label in findingState.ts"
         )
     assert set(REASONS_FOR[FindingStatus.RESOLVED]) | set(
         REASONS_FOR[FindingStatus.DISMISSED]) == set(ResolutionReason)
@@ -89,8 +95,9 @@ def test_the_ui_no_longer_offers_the_thirteen_value_list():
     web = WEB.read_text(encoding="utf-8")
     assert 'value="confirmed_false_positive"' not in web
     assert 'value="likely_false_positive"' not in web
+    lib = LIB.read_text(encoding="utf-8")
     for st in ("open", "triaging", "resolved", "dismissed"):
-        assert f'value="{st}"' in web, st
+        assert f'status: "{st}"' in lib, st
 
 
 def test_reason_filter_is_scoped_to_closing_statuses():
@@ -185,8 +192,15 @@ def test_the_filter_still_offers_every_reason():
     be findable even when no person may assign it."""
     from apps.api.app.core.finding_status import ResolutionReason
     web = WEB.read_text(encoding="utf-8")
+    lib = LIB.read_text(encoding="utf-8")
     for reason in ResolutionReason:
-        assert f'value="{reason.value}"' in web, reason.value
+        # FILTERABLE_REASONS_FOR is the filter's list and is deliberately
+        # wider than the triage control's: a person can no longer pick
+        # how a credential was neutralised, and never could set
+        # `no_longer_present`, but rows carry all of them.
+        assert f'"{reason.value}"' in lib or f'value="{reason.value}"' in web, (
+            reason.value
+        )
 
 
 def test_no_surface_derives_a_status_colour_from_the_legacy_field():
@@ -233,7 +247,10 @@ def test_the_optimistic_preview_survives_the_migration():
     assert "export function previewOf" in lib.read_text(encoding="utf-8")
     for f in ("apps/web/src/components/findings/FindingPanel.tsx",
               "apps/web/src/components/incidents/IncidentDetailDrawer.tsx"):
-        assert "previewOf(" in pathlib.Path(f).read_text(encoding="utf-8"), f
+        src = pathlib.Path(f).read_text(encoding="utf-8")
+        # Either preview helper satisfies this: one takes the pending
+        # classification, the other the pending status and reason.
+        assert "previewOf(" in src or "previewLifecycle(" in src, f
 
 
 def test_delete_paths_never_reference_a_table_that_does_not_exist():
@@ -266,3 +283,102 @@ def test_delete_paths_never_reference_a_table_that_does_not_exist():
         "these delete from tables no model defines; route them through "
         "_existing_tables() or remove them:\n" + "\n".join(offenders)
     )
+
+
+def test_resolving_does_not_ask_which_way_the_credential_died():
+    """Rotated, revoked and provider_disabled all collapse onto the
+    same legacy Classification, nothing branches on which was chosen,
+    and REMEDIATED_REASONS has no production reader — so the question
+    cost a click and bought nothing.
+
+    No comparable product asks it either: GitLab's Resolved takes no
+    reason, GitGuardian's takes no reason, and GitHub has one flat
+    close list where "revoked" is a single entry.
+    """
+    lib = LIB.read_text(encoding="utf-8")
+    assert 'status: "resolved", action: "resolve", label: "Resolved", needsReason: false' in lib
+    assert "export const RESOLVED_IMPLIES" in lib
+
+
+def test_dismissing_still_does():
+    """The asymmetry. Each dismissal reason maps to a DIFFERENT
+    classification, and those drive the false-positive rate in reports,
+    the suppression rules the pattern learner proposes, and three
+    separate ticketing exclusions. Picking the wrong one changes what
+    the product does."""
+    lib = LIB.read_text(encoding="utf-8")
+    assert 'status: "dismissed", action: "dismiss", label: "Dismissed", needsReason: true' in lib
+    for reason in ("false_positive", "test_credential",
+                   "acceptable_risk", "mitigating_control"):
+        assert f'reason: "{reason}"' in lib, reason
+
+
+def test_the_three_resolve_reasons_are_still_understood():
+    """Dropping the prompt must not drop the vocabulary: rows carry
+    these values, the filter offers them, and API clients may send
+    them."""
+    from apps.api.app.core.finding_status import ResolutionReason, REASONS_FOR, FindingStatus
+    lib = LIB.read_text(encoding="utf-8")
+    for reason in ("rotated", "revoked", "provider_disabled"):
+        assert f"{reason}:" in lib, f"{reason} has no label"
+        assert ResolutionReason(reason) in REASONS_FOR[FindingStatus.RESOLVED]
+
+
+def test_the_api_still_accepts_every_resolve_reason():
+    """The UI stopped asking; the endpoint did not stop listening."""
+    src = ROUTER.read_text(encoding="utf-8")
+    for reason in ("rotated", "revoked", "provider_disabled"):
+        assert f'"{reason}"' in src, reason
+
+
+def test_the_filter_is_wider_than_the_triage_control():
+    """They answer different questions. Narrowing the filter to what a
+    person may set would hide every row Vooda closed itself, and every
+    row closed before the control changed."""
+    lib = LIB.read_text(encoding="utf-8")
+    assert "export const FILTERABLE_REASONS_FOR" in lib
+    block = lib[lib.index("FILTERABLE_REASONS_FOR"):]
+    block = block[:block.index("};")]
+    for reason in ("rotated", "revoked", "provider_disabled",
+                   "no_longer_present"):
+        assert f'"{reason}"' in block, reason
+
+
+def test_the_filter_bar_was_trimmed_to_the_axes_that_get_used():
+    """Validity and risk-acceptance controls were removed from this
+    page. Both filters still exist on the API — the dashboard, the
+    rotation page and the command palette all deep-link
+    ?validation_status=active — but neither is started from here.
+
+    The "More" popover went with them: once the risk-acceptance select
+    was gone it held one control, and a button you press to reveal one
+    dropdown is worse than the dropdown."""
+    web = WEB.read_text(encoding="utf-8")
+    for gone in (">Any Validity<", ">Lapsed acceptances<",
+                 "secondaryFilterCount", "showMoreFilters"):
+        assert gone not in web, gone
+    # No dead client state left behind by the removals.
+    assert "filters.risk_expired" not in web
+    assert "risk_expired: \"\"" not in web
+
+
+def test_the_primary_row_keeps_the_triage_axes():
+    """Severity and status — the two questions asked of every row."""
+    web = WEB.read_text(encoding="utf-8")
+    bar = web[web.index("{/* Filters + Bulk actions bar */}"):]
+    bar = bar[:bar.index("{/* Project filter")]
+    for label in ("All Severities", "All Statuses"):
+        assert f'>{label}<' in bar, label
+
+
+def test_removing_the_validity_control_did_not_strand_its_deep_links():
+    """Three places link in with ?validation_status=active — the
+    dashboard card, the rotation page and the command palette. The
+    dropdown is gone, so the chip is the only thing left that shows the
+    filter is on and lets it be cleared. Losing it would leave those
+    users on a filtered list with no way back."""
+    web = WEB.read_text(encoding="utf-8")
+    assert "Validity: {validityLabel(filters.validation_status)}" in web
+    assert "validationStatusFromUrl" in web, "the URL seed must survive"
+    assert "params.validation_status = filters.validation_status" in web, (
+        "the filter itself must still reach the API")

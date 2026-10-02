@@ -431,11 +431,6 @@ function RepoRow({ repo, stats, trendSeries, selected, onSelect, onDelete, onEdi
         <LangChips items={repo.languages || []} color="blue" />
       </td>
 
-      {/* Framework */}
-      <td className="px-3 py-3">
-        <LangChips items={repo.frameworks || []} color="purple" />
-      </td>
-
       {/* Secrets */}
       <td className="px-3 py-3 text-center">
         {stats ? (
@@ -683,6 +678,11 @@ export default function RepositoriesPage() {
     if (search) params.search = search;
     if (filterLang) params.language = filterLang;
     if (filterFramework) params.framework = filterFramework;
+    // Risk and scan status used to be applied in the browser, to
+    // whichever page happened to be loaded — so past 50 repositories
+    // "Critical" quietly missed the critical repos on page 2.
+    if (filterRisk) params.risk = filterRisk;
+    if (filterScanStatus) params.scan_status = filterScanStatus;
     if (archiveView === "archived") params.archived_only = "true";
 
     getRepositories(params)
@@ -709,7 +709,8 @@ export default function RepositoriesPage() {
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [page, serverSortBy, serverSortDir, search, filterLang, filterFramework, archiveView]);
+  }, [page, serverSortBy, serverSortDir, search, filterLang, filterFramework,
+      filterRisk, filterScanStatus, archiveView]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -718,11 +719,13 @@ export default function RepositoriesPage() {
     if (typeof window !== "undefined") localStorage.setItem("vooda_repo_view", viewMode);
   }, [viewMode]);
 
-  // ── Client-side risk/status filter + stats-based sort ────────
+  // ── Stats-based sort ─────────────────────────────────────────
+  // Risk and scan status are filtered by the server now. Sorting by a
+  // stat still happens here, so it orders the current page rather than
+  // the whole list — visible only past one page, and it misorders
+  // rather than hiding them.
   const displayRepos = useMemo(() => {
     let items = [...repos];
-    if (filterRisk) items = items.filter((r) => getRisk(repoStats[r.id]).level === filterRisk);
-    if (filterScanStatus) items = items.filter((r) => repoStats[r.id]?.last_scan_status === filterScanStatus);
     if (["findings", "criticals", "last_scan"].includes(sortField)) {
       items.sort((a, b) => {
         const sa = repoStats[a.id], sb = repoStats[b.id];
@@ -748,7 +751,7 @@ export default function RepositoriesPage() {
       return bs - as;
     });
     return items;
-  }, [repos, repoStats, filterRisk, filterScanStatus, sortField, sortDir]);
+  }, [repos, repoStats, sortField, sortDir]);
 
   const hasFilters = !!filterLang || !!filterFramework || !!filterRisk || !!filterScanStatus || !!searchInput;
 
@@ -944,10 +947,11 @@ export default function RepositoriesPage() {
 
   const isEmpty = !loading && total === 0 && !hasFilters;
 
-  // Count of "extra" filters (Risk + Scan Status) — drives the badge
-  // on the collapsed "Filter" popover button so the user knows
-  // filters are active without opening the popover.
-  const extraFilterCount = (filterRisk ? 1 : 0) + (filterScanStatus ? 1 : 0);
+  // Count of the filters hidden behind the popover, so the user can
+  // see that filtering is in play without opening it. Risk moved out
+  // to the toolbar, where it is visible on its own.
+  const extraFilterCount =
+    (filterLang ? 1 : 0) + (filterFramework ? 1 : 0) + (filterScanStatus ? 1 : 0);
 
   return (
     <AppShell>
@@ -955,8 +959,8 @@ export default function RepositoriesPage() {
 
         {/* ═══ Toolbar ═══
             Single horizontal row carries every page-level control:
-            search · primary filters (Language/Framework) · collapsed
-            secondary filters (Risk/Status behind "Filter ▼") · clear ·
+            search · risk · collapsed secondary filters (Language /
+            Framework / Scan Status behind "Filter ▼") · clear ·
             view-toggle · Add Repository CTA on the far right.
 
             The page-level subtitle and the right-side count strip
@@ -1001,17 +1005,24 @@ export default function RepositoriesPage() {
                   className="input-dark pl-10 text-sm" />
               </div>
 
-              {/* Primary filters — kept visible because they're the
-                  most discoverable filtering axis (most users filter
-                  by language or framework first). */}
-              <select value={filterLang} onChange={(e) => { setFilterLang(e.target.value); setPage(1); }} className="select-dark text-xs">
-                <option value="">All Languages</option>
-                {facets.languages.map((l) => <option key={l} value={l}>{l}</option>)}
-              </select>
+              {/* The one promoted filter, because it answers the first
+                  question anyone asks of this page: which repositories
+                  are exposed.
 
-              <select value={filterFramework} onChange={(e) => { setFilterFramework(e.target.value); setPage(1); }} className="select-dark text-xs">
-                <option value="">All Frameworks</option>
-                {facets.frameworks.map((f) => <option key={f} value={f}>{f}</option>)}
+                  Language and Framework used to sit here. They are
+                  SCA/SAST axes — a secret lives in .env, CI YAML or
+                  .ssh/ whatever the app is written in — and the data
+                  bears that out: across a typical install the framework
+                  facet carries a couple of values and is empty for most
+                  repositories, because both are only populated once a
+                  scan has run. They are still available, one click
+                  further in. */}
+              <select value={filterRisk} onChange={(e) => { setFilterRisk(e.target.value as RiskLevel); setPage(1); }} className="select-dark text-xs">
+                <option value="">All Risk Levels</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="clean">Clean</option>
               </select>
 
               {/* Secondary filters collapsed into a popover.
@@ -1047,15 +1058,25 @@ export default function RepositoriesPage() {
                       }}
                     >
                       <div>
-                        <label className="text-[10px] uppercase tracking-wider font-medium text-slate-500 block mb-1.5">Risk Level</label>
-                        <select value={filterRisk} onChange={(e) => { setFilterRisk(e.target.value as RiskLevel); setPage(1); }} className="select-dark text-xs w-full">
-                          <option value="">All Risk Levels</option>
-                          <option value="critical">Critical</option>
-                          <option value="high">High</option>
-                          <option value="medium">Medium</option>
-                          <option value="clean">Clean</option>
+                        <label className="text-[10px] uppercase tracking-wider font-medium text-slate-500 block mb-1.5">Language</label>
+                        <select value={filterLang} onChange={(e) => { setFilterLang(e.target.value); setPage(1); }} className="select-dark text-xs w-full">
+                          <option value="">All Languages</option>
+                          {facets.languages.map((l) => <option key={l} value={l}>{l}</option>)}
                         </select>
                       </div>
+                      {/* Only offered when the install has any. With one
+                          or two values it is a list of one or two
+                          things, and an empty select is worse than an
+                          absent one. */}
+                      {facets.frameworks.length > 0 && (
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider font-medium text-slate-500 block mb-1.5">Framework</label>
+                          <select value={filterFramework} onChange={(e) => { setFilterFramework(e.target.value); setPage(1); }} className="select-dark text-xs w-full">
+                            <option value="">All Frameworks</option>
+                            {facets.frameworks.map((f) => <option key={f} value={f}>{f}</option>)}
+                          </select>
+                        </div>
+                      )}
                       <div>
                         <label className="text-[10px] uppercase tracking-wider font-medium text-slate-500 block mb-1.5">Scan Status</label>
                         <select value={filterScanStatus} onChange={(e) => { setFilterScanStatus(e.target.value); setPage(1); }} className="select-dark text-xs w-full">
@@ -1223,8 +1244,14 @@ export default function RepositoriesPage() {
                     </th>
                     <SortHeader label="Repository" field="name"      current={sortField} dir={sortDir} onSort={handleSort} className="text-left min-w-[160px]" />
                     <th className="px-3 py-2.5 text-[10px] font-semibold text-slate-500 uppercase tracking-widest text-left whitespace-nowrap">Source</th>
+                    {/* Framework was a column here. It is empty for
+                        most repositories — both stack facets are only
+                        populated once a scan has run — and a framework
+                        does not predict secret exposure: a credential
+                        sits in .env, CI YAML or .ssh/ whichever
+                        framework the app uses. Still filterable behind
+                        "Filter ▼" for anyone who wants it. */}
                     <th className="px-3 py-2.5 text-[10px] font-semibold text-slate-500 uppercase tracking-widest text-left whitespace-nowrap">Language</th>
-                    <th className="px-3 py-2.5 text-[10px] font-semibold text-slate-500 uppercase tracking-widest text-left whitespace-nowrap">Framework</th>
                     <SortHeader label="Secrets"    field="findings"  current={sortField} dir={sortDir} onSort={handleSort} className="text-center" />
                     <SortHeader label="Critical"   field="criticals" current={sortField} dir={sortDir} onSort={handleSort} className="text-center" />
                     <SortHeader label="Last Scan"  field="last_scan" current={sortField} dir={sortDir} onSort={handleSort} className="text-left" />

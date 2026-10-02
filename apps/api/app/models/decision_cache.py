@@ -39,6 +39,13 @@ class FindingDecisionCache(Base, UUIDMixin, TimestampMixin, TenantMixin):
     compensating_controls = Column(JSONB, default=list)
     ai_evidence_refs = Column(JSONB, default=list)
 
+    # When an `accepted_risk` decision lapses, copied from the finding
+    # at store time. The replay path checks it and treats a lapsed
+    # acceptance as a miss, so the finding resurfaces at the next scan
+    # instead of being re-closed forever. NULL on every other
+    # classification, and on an acceptance with no end date.
+    risk_accepted_until = Column(DateTime(timezone=True), nullable=True)
+
     # Decision source
     decided_by = Column(String(20), nullable=False)  # "ai" or "user"
     decided_by_user_id = Column(UUID(as_uuid=True), nullable=True)

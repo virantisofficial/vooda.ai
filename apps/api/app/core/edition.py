@@ -32,7 +32,13 @@ ENTERPRISE_FEATURES: dict[str, str] = {
     "audit_export": "Audit Export & Retention",
     "custom_detectors": "Custom Detectors",
     "schedules": "Scan Schedules",
-    "webhooks": "Inbound Webhooks",
+    # Inbound webhooks are deliberately NOT here. The rule this list
+    # follows — Community finds, verifies and triages; Enterprise
+    # carries the result out of Vooda — puts them on the Community
+    # side: a push event arriving from GitHub is scanning input, not a
+    # finding leaving for a tracker. Outbound notification webhooks are
+    # a different thing and stay gated, under `notifications` in
+    # ENTERPRISE_PROVIDER_FEATURES below.
     "ticketing": "Ticketing",
     "notifications": "Notification Channels",
     "scan_sources": "Scan Sources",

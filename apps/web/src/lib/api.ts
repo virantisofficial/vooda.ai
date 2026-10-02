@@ -158,6 +158,16 @@ export const triageFinding = (
   data: {
     action: string;
     comment?: string;
+    /** Required by `resolve` and `dismiss`, and rejected with 422 on
+     *  every other action. Which reasons are legal depends on which of
+     *  the two was sent; the server enforces the pairing that a
+     *  database CHECK constraint then guarantees. */
+    resolution_reason?: string;
+    /** The terms of an acceptable-risk dismissal: who is accountable,
+     *  and when the acceptance lapses (ISO 8601, must be future).
+     *  Rejected with 422 on any other action or reason. */
+    risk_owner?: string;
+    risk_accepted_until?: string;
     /** Provenance marker — set by SuggestionChips clicks to
      *  "suggestion_placeholder" / "suggestion_test_file" /
      *  "suggestion_git_history".  Threaded into the audit `via` field. */

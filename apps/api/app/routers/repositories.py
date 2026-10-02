@@ -596,6 +596,15 @@ async def list_repositories(
     search: Optional[str] = Query(None),
     language: Optional[str] = Query(None),
     framework: Optional[str] = Query(None),
+    # Risk and scan status used to be filtered in the browser, over
+    # whatever page happened to be loaded. Past 50 repositories that
+    # silently hid matches on later pages — and "show me the critical
+    # repositories" is the first question anyone asks of this list, so
+    # a partial answer is worse than none.
+    risk: Optional[str] = Query(
+        None, description="critical | high | medium | clean"),
+    scan_status: Optional[str] = Query(
+        None, description="completed | failed | running"),
     sort_by: str = Query("created_at"),
     sort_dir: str = Query("desc"),
     page: int = Query(1, ge=1),
@@ -649,6 +658,68 @@ async def list_repositories(
     # Framework filter (JSONB array contains)
     if framework:
         base_query = base_query.where(Repository.frameworks.contains([framework]))
+
+    # ── Risk level ───────────────────────────────────────────────
+    # Deliberately counts EVERY finding, not just open ones, because
+    # that is what GET /{id}/stats counts and what the Critical column
+    # shows. A filter that disagreed with the number beside it would be
+    # worse than no filter. Whether the badge itself should count only
+    # open findings is a separate question.
+    if risk:
+        from apps.api.app.models.finding import NormalizedFinding, Severity
+
+        def _sev_count(sev):
+            return (
+                select(func.count(NormalizedFinding.id))
+                .where(
+                    NormalizedFinding.repository_id == Repository.id,
+                    NormalizedFinding.tenant_id == user.tenant_id,
+                    NormalizedFinding.severity == sev,
+                )
+                .correlate(Repository)
+                .scalar_subquery()
+            )
+
+        total_findings = (
+            select(func.count(NormalizedFinding.id))
+            .where(
+                NormalizedFinding.repository_id == Repository.id,
+                NormalizedFinding.tenant_id == user.tenant_id,
+            )
+            .correlate(Repository)
+            .scalar_subquery()
+        )
+        criticals = _sev_count(Severity.CRITICAL)
+        highs = _sev_count(Severity.HIGH)
+
+        # Mirrors getRisk() in the repositories page: the first rung
+        # that matches wins, so each level excludes the ones above it.
+        if risk == "critical":
+            base_query = base_query.where(criticals > 0)
+        elif risk == "high":
+            base_query = base_query.where(criticals == 0, highs > 0)
+        elif risk == "medium":
+            base_query = base_query.where(
+                criticals == 0, highs == 0, total_findings > 0)
+        elif risk == "clean":
+            base_query = base_query.where(total_findings == 0)
+
+    # ── Scan status ──────────────────────────────────────────────
+    # The status of the LATEST scan, which is what the row shows.
+    # Ordered by created_at to match `_enrich_repo`'s own lookup.
+    if scan_status:
+        latest_status = (
+            select(ScanJob.status)
+            .where(
+                ScanJob.repository_id == Repository.id,
+                ScanJob.tenant_id == user.tenant_id,
+            )
+            .order_by(ScanJob.created_at.desc())
+            .limit(1)
+            .correlate(Repository)
+            .scalar_subquery()
+        )
+        base_query = base_query.where(latest_status == scan_status)
 
     # Count total matching rows
     count_q = select(func.count()).select_from(base_query.subquery())

@@ -225,6 +225,28 @@ class NormalizedFinding(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # closes one.
     ai_verdict = Column(String(20), nullable=True)
 
+    # ── Risk acceptance ──────────────────────────────────────────
+    # Only meaningful while `resolution_reason` is ACCEPTABLE_RISK.
+    # `risk_owner` is who is accountable for the exposure, which is
+    # not always `resolved_by` — the person who clicked. Deliberately
+    # separate from `assigned_to`, which says who is working it.
+    #
+    # `risk_accepted_until` is when the acceptance lapses. Enforcement
+    # is read-side: nothing flips the row on the date. The scan
+    # pipeline stops replaying a lapsed acceptance, so the finding
+    # resurfaces at the next scan with no cron and no state flip, and
+    # the row survives its own expiry for the audit trail. NULL means
+    # the acceptance does not expire on its own.
+    #
+    # Both are cleared whenever the row leaves a closing status, so a
+    # re-opened finding never carries the previous owner.
+    risk_owner = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    risk_accepted_until = Column(DateTime(timezone=True), nullable=True, index=True)
+
     is_suppressed = Column(Boolean, default=False)
     suppression_reason = Column(String(255), nullable=True)
 
@@ -441,6 +463,28 @@ class SecretIncident(Base, UUIDMixin, TimestampMixin, TenantMixin):
     # Advisory only. An AI verdict annotates an open finding; it never
     # closes one.
     ai_verdict = Column(String(20), nullable=True)
+
+    # ── Risk acceptance ──────────────────────────────────────────
+    # Only meaningful while `resolution_reason` is ACCEPTABLE_RISK.
+    # `risk_owner` is who is accountable for the exposure, which is
+    # not always `resolved_by` — the person who clicked. Deliberately
+    # separate from `assigned_to`, which says who is working it.
+    #
+    # `risk_accepted_until` is when the acceptance lapses. Enforcement
+    # is read-side: nothing flips the row on the date. The scan
+    # pipeline stops replaying a lapsed acceptance, so the finding
+    # resurfaces at the next scan with no cron and no state flip, and
+    # the row survives its own expiry for the audit trail. NULL means
+    # the acceptance does not expire on its own.
+    #
+    # Both are cleared whenever the row leaves a closing status, so a
+    # re-opened finding never carries the previous owner.
+    risk_owner = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    risk_accepted_until = Column(DateTime(timezone=True), nullable=True, index=True)
 
     last_validated_at = Column(DateTime(timezone=True), nullable=True)
 

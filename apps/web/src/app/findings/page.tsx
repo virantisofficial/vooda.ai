@@ -1,6 +1,8 @@
 "use client";
 import { validityOf, validityLabel } from "@/lib/validity";
-import { classificationLabel, statusLabel, statusShort, statusDetail, statusTone, statusTextTone } from "@/lib/findingState";
+import { classificationLabel, statusShort, statusDetail, statusTone, statusTextTone,
+         STATUS_CHOICES, REASON_LABELS, FILTERABLE_REASONS_FOR,
+         verdictLabel, verdictTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -29,13 +31,18 @@ const FINDING_BULK_ACTIONS: ReadonlyArray<{
   color: string;
   confirm?: boolean;
 }> = [
-  { action: "mark_tp",      label: "True Positive",      color: "bg-red-500/15 text-red-300 hover:bg-red-500/25 border-red-500/30" },
-  { action: "mark_fp",      label: "False Positive",     color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
-  { action: "mark_test",    label: "Test Credential",    color: "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 border-blue-500/30" },
-  { action: "accept_risk",  label: "Accepted Risk",      color: "bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 border-orange-500/30" },
-  { action: "mark_rotated", label: "Rotated / Revoked",  color: "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border-emerald-500/30", confirm: true },
-  { action: "reopen",       label: "Re-open",            color: "bg-yellow-500/15 text-yellow-300 hover:bg-yellow-500/25 border-yellow-500/30", confirm: true },
+  { action: "mark_tp",      label: "Triaging",            color: "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 border-blue-500/30" },
+  { action: "mark_rotated", label: "Resolved — Rotated",  color: "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border-emerald-500/30", confirm: true },
+  { action: "mark_fp",      label: "Dismissed — FP",      color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
+  { action: "mark_test",    label: "Dismissed — Test",    color: "bg-slate-500/15 text-slate-300 hover:bg-slate-500/25 border-slate-500/30" },
+  { action: "accept_risk",  label: "Dismissed — Accepted", color: "bg-orange-500/15 text-orange-300 hover:bg-orange-500/25 border-orange-500/30" },
+  { action: "reopen",       label: "Open",                color: "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border-amber-500/30", confirm: true },
 ];
+
+// Bulk closes go through the legacy actions above, which carry a fixed
+// reason each. Revoked, provider disabled and mitigating control are
+// reachable only one finding at a time until /findings/bulk-triage
+// accepts a resolution_reason of its own.
 import { brandScannerName, getScannerColor, isVoodaEngine } from "@/lib/branding";
 import { findingName } from "@/lib/titleUtils";
 import { useToast } from "@/components/ui/Toast";
@@ -213,7 +220,7 @@ function FindingsPageInner() {
   // Added 2026-05-14 alongside restoring the Confidence column —
   // see thread context for why the default-on / hide-via-View pattern
   // is the right choice for a commercial scanner serving varied apps.
-  type ColumnKey = "masked_value" | "severity" | "validity" | "status" | "confidence" | "found";
+  type ColumnKey = "masked_value" | "severity" | "validity" | "status" | "verdict" | "confidence" | "found";
   const ALL_COLUMNS: { key: ColumnKey; label: string; weight: number }[] = [
     { key: "masked_value", label: "Masked Value", weight: 14 },
     { key: "severity",     label: "Severity",     weight: 10 },
@@ -221,8 +228,15 @@ function FindingsPageInner() {
     // Widened for the lifecycle pair: the status pill plus its
     // reason needs more room than the single word it replaced,
     // which was truncating "False positive" to "Fals...".
-    { key: "status",       label: "Status",       weight: 20 },
-    { key: "confidence",   label: "Confidence",   weight: 12 },
+    { key: "status",       label: "Status",       weight: 18 },
+    // The model's verdict, between the decision and the confidence
+    // that qualifies it. It used to ride inside the Status cell as
+    // secondary text, which put a guess where a decision belongs.
+    { key: "verdict",      label: "AI Verdict",   weight: 12 },
+    // "Verdict confidence" in full elsewhere; the column sits directly
+    // beside AI Verdict, where the short form cannot be misread and the
+    // long one wraps the header onto three lines.
+    { key: "confidence",   label: "Verdict confidence", weight: 12 },
     { key: "found",        label: "Found",        weight: 10 },
   ];
   // Secret column is always visible; its weight is included in the
@@ -237,7 +251,7 @@ function FindingsPageInner() {
   // who customised other columns will need to re-tick them, which is
   // a fair tradeoff for a one-time correction.  Keep bumping the
   // suffix if future default changes hit the same migration scenario.
-  const LS_KEY_COLUMNS = "vooda_findings_visible_columns_v2";
+  const LS_KEY_COLUMNS = "vooda_findings_visible_columns_v3";
 
   const [visibleColumns, setVisibleColumns] = useState<Record<ColumnKey, boolean>>(() => {
     // Hydrate from localStorage on mount.  Tolerant of malformed
@@ -252,6 +266,7 @@ function FindingsPageInner() {
       severity: true,
       validity: true,
       status: true,
+      verdict: true,
       confidence: false,  // ← off by default
       found: true,
     };
@@ -269,6 +284,7 @@ function FindingsPageInner() {
         severity:     typeof parsed.severity     === "boolean" ? parsed.severity     : DEFAULTS.severity,
         validity:     typeof parsed.validity     === "boolean" ? parsed.validity     : DEFAULTS.validity,
         status:       typeof parsed.status       === "boolean" ? parsed.status       : DEFAULTS.status,
+        verdict:      typeof parsed.verdict      === "boolean" ? parsed.verdict      : DEFAULTS.verdict,
         confidence:   typeof parsed.confidence   === "boolean" ? parsed.confidence   : DEFAULTS.confidence,
         found:        typeof parsed.found        === "boolean" ? parsed.found        : DEFAULTS.found,
       };
@@ -924,10 +940,9 @@ function FindingsPageInner() {
           <select value={filters.status} onChange={(e) => { setFilters((f) => ({ ...f, status: e.target.value, resolution_reason: e.target.value === "resolved" || e.target.value === "dismissed" ? f.resolution_reason : "" })); setPage(1); }}
             className="select-dark">
             <option value="">All Statuses</option>
-            <option value="open">Open</option>
-            <option value="triaging">Triaging</option>
-            <option value="resolved">Resolved</option>
-            <option value="dismissed">Dismissed</option>
+            {STATUS_CHOICES.map((c) => (
+              <option key={c.status} value={c.status}>{c.label}</option>
+            ))}
           </select>
           {/* Reason only applies to the closing statuses, so it is shown
               when one is selected rather than offering combinations that
@@ -936,36 +951,32 @@ function FindingsPageInner() {
             <select value={filters.resolution_reason} onChange={(e) => { setFilters((f) => ({ ...f, resolution_reason: e.target.value })); setPage(1); }}
               className="select-dark">
               <option value="">All Reasons</option>
-              {filters.status === "resolved" ? (
-                <>
-                  <option value="rotated">Rotated</option>
-                  <option value="revoked">Revoked</option>
-                  <option value="provider_disabled">Provider Disabled</option>
-                </>
-              ) : (
-                <>
-                  <option value="false_positive">False Positive</option>
-                  <option value="test_credential">Test Credential</option>
-                  <option value="acceptable_risk">Acceptable Risk</option>
-                  <option value="mitigating_control">Mitigating Control</option>
-                  <option value="no_longer_present">No Longer Present</option>
-                </>
-              )}
+              {/* Every reason a row may carry, not the shorter list the
+                  triage control offers. Resolving no longer asks how a
+                  credential was neutralised and nobody can set
+                  `no_longer_present` by hand, but findings carry all of
+                  them and have to be findable. */}
+              {(FILTERABLE_REASONS_FOR[filters.status] || []).map((r) => (
+                <option key={r} value={r}>{REASON_LABELS[r]}</option>
+              ))}
             </select>
           )}
-          {/* Validity — is the credential still live? Its own axis,
-              independent of triage: a dismissed finding can still be
-              live, and an open one can be long dead. */}
-          <select value={filters.validation_status} onChange={(e) => { setFilters((f) => ({ ...f, validation_status: e.target.value })); setPage(1); }}
-            className="select-dark">
-            <option value="">Any Validity</option>
-            <option value="active">Live</option>
-            <option value="inactive">Revoked or Dead</option>
-            <option value="unknown">Not Checked</option>
-            <option value="unsupported">No Checker</option>
-            <option value="check_failed">Check Failed</option>
-          </select>
-          {/* The model's opinion, as its own axis — never a status. */}
+          {/* Validity had a dropdown here. Removed from the toolbar,
+              not from the product: the filter still works, and three
+              places set it — the dashboard's live-credentials card,
+              the rotation page, and the command palette's "View active
+              credentials". Arriving by any of them shows the removable
+              "Validity: Live" chip above, so the filter is still
+              visible and still clearable; there is simply no longer a
+              control for starting it from here.
+
+              The Validity COLUMN stays. Reading the answer is the
+              common case; filtering on it is the rare one. */}
+          {/* The model's opinion, as its own axis — never a status.
+              It briefly sat behind a "More" popover alongside a risk-
+              acceptance filter. With that one removed the popover held
+              a single control, and a button you press to reveal one
+              dropdown is worse than the dropdown. */}
           <select value={filters.ai_verdict} onChange={(e) => { setFilters((f) => ({ ...f, ai_verdict: e.target.value })); setPage(1); }}
             className="select-dark">
             <option value="">Any AI Verdict</option>
@@ -973,6 +984,7 @@ function FindingsPageInner() {
             <option value="likely_fp">Likely Not a Secret</option>
             <option value="unsure">Unsure</option>
           </select>
+
           {/* Project filter — scopes the list to one repository. Shares the
                `repository_id` filter that drill-through from a repository
                page already sets, so both entry points stay consistent. */}
@@ -1194,6 +1206,9 @@ function FindingsPageInner() {
                   {visibleColumns.status && (
                     <SortableHeader label="Status" field="status" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left whitespace-nowrap" style={{ width: columnWidths.status }} />
                   )}
+                  {visibleColumns.verdict && (
+                    <SortableHeader label="AI Verdict" field="ai_verdict" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left whitespace-nowrap" style={{ width: columnWidths.verdict }} />
+                  )}
                   {visibleColumns.confidence && (
                     <th className="px-3 py-2.5 text-[10px] font-semibold uppercase tracking-widest text-left" style={{ color: "#475569", width: columnWidths.confidence }}>Confidence</th>
                   )}
@@ -1216,6 +1231,7 @@ function FindingsPageInner() {
                       {visibleColumns.severity     && <td className="px-3 py-3"><Skeleton w={60} h={16} radius={4} /></td>}
                       {visibleColumns.validity     && <td className="px-3 py-3"><Skeleton w={40} h={12} /></td>}
                       {visibleColumns.status       && <td className="px-3 py-3"><Skeleton w={50} h={12} /></td>}
+                      {visibleColumns.verdict      && <td className="px-3 py-3"><Skeleton w={60} h={12} /></td>}
                       {visibleColumns.confidence   && <td className="px-3 py-3"><Skeleton w={50} h={12} /></td>}
                       {visibleColumns.found        && <td className="px-3 py-3"><Skeleton w={48} h={10} /></td>}
                     </tr>
@@ -1324,12 +1340,39 @@ function FindingsPageInner() {
                     )}
                     {visibleColumns.validity && (
                       <td className="px-3 py-3">
-                        {(() => { const vs = validityOf(f); const styles: Record<string, string> = { active: "bg-red-500/15 text-red-400 border-red-500/20", inactive: "bg-green-500/15 text-green-400 border-green-500/20", revoked: "bg-green-500/15 text-green-400 border-green-500/20", unknown: "bg-slate-500/10 text-slate-400 border-slate-500/20", not_validated: "bg-slate-500/5 text-slate-500 border-slate-500/10" }; const labels: Record<string, string> = { active: "Active", inactive: "Inactive", revoked: "Revoked", unknown: "Unknown", not_validated: "Unverified" }; return <span className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
+                        {(() => {
+                          const vs = validityOf(f);
+                          // A chip is a claim on the reader's attention,
+                          // so only the three states that carry a signal
+                          // get one. "No checker" and "Not checked" say
+                          // nothing happened — rendering those as a
+                          // bordered pill on every row, which is what
+                          // this did, turned the column into a wall of
+                          // identical grey boxes.
+                          const chip: Record<string, string> = {
+                            active: "bg-red-500/15 text-red-400 border-red-500/20",
+                            inactive: "bg-green-500/15 text-green-400 border-green-500/20",
+                            check_failed: "bg-amber-500/15 text-amber-400 border-amber-500/20",
+                          };
+                          // Words from lib/validity.ts. This carried its
+                          // own map with no entry for `unsupported` or
+                          // `check_failed`, so both printed the raw enum.
+                          const text = validityLabel(vs);
+                          return chip[vs] ? (
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded border font-medium ${chip[vs]}`}>{text}</span>
+                          ) : (
+                            <span className="text-[9px] text-slate-600" title={
+                              vs === "unsupported"
+                                ? "No service can be asked whether this credential still works"
+                                : "Not checked yet"
+                            }>{text}</span>
+                          );
+                        })()}
                       </td>
                     )}
                     {visibleColumns.status && (
                       <td className="px-3 py-3">
-                        <div className="flex items-center gap-1.5 min-w-0" title={statusLabel(f)}>
+                        <div className="flex items-center gap-1.5 min-w-0" title={statusShort(f) + (f.resolution_reason ? ` — ${REASON_LABELS[f.resolution_reason] || f.resolution_reason}` : "")}>
                           <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${statusTone(f).badge}`}>
                             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusTone(f).dot}`} />
                             {statusShort(f)}
@@ -1337,11 +1380,21 @@ function FindingsPageInner() {
                           {/* The reason is the useful half, but it is
                               long. Kept outside the pill so it can
                               truncate instead of shoving the next
-                              column off the row. */}
-                          {statusDetail(f) && (
-                            <span className="text-[10px] text-slate-500 truncate">{statusDetail(f)}</span>
+                              column off the row.  Only the reason —
+                              the verdict has its own column now. */}
+                          {f.resolution_reason && (
+                            <span className="text-[10px] text-slate-500 truncate">
+                              {REASON_LABELS[f.resolution_reason] || f.resolution_reason.replace(/_/g, " ")}
+                            </span>
                           )}
                         </div>
+                      </td>
+                    )}
+                    {visibleColumns.verdict && (
+                      <td className="px-3 py-3">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${verdictTone(f.ai_verdict)}`}>
+                          {verdictLabel(f.ai_verdict)}
+                        </span>
                       </td>
                     )}
                     {/* Confidence — restored 2026-05-14 as a default-on
@@ -1436,13 +1489,32 @@ function FindingsPageInner() {
                       )}
                       {visibleColumns.validity && (
                         <td className="px-3 py-2">
-                          {(() => { const vs = validityOf(sub); const labels: Record<string,string> = { active: "Active", inactive: "Inactive", not_validated: "Unverified" }; const styles: Record<string,string> = { active: "text-red-400", inactive: "text-green-400", not_validated: "text-slate-600" }; return <span className={`text-[8px] ${styles[vs] || styles.not_validated}`}>{labels[vs] || vs}</span>; })()}
+                          {(() => {
+                            const vs = validityOf(sub);
+                            const tone: Record<string, string> = {
+                              active: "text-red-400",
+                              inactive: "text-green-400",
+                              check_failed: "text-amber-400",
+                            };
+                            return <span className={`text-[8px] ${tone[vs] || "text-slate-600"}`}>{validityLabel(vs)}</span>;
+                          })()}
                         </td>
                       )}
                       {visibleColumns.status && (
                         <td className="px-3 py-2">
-                          <span className={`text-[9px] ${statusTextTone(sub)}`} title={statusLabel(sub)}>
-                            {statusShort(sub) === "Open" ? "Review" : statusShort(sub)}
+                          {/* The same word the parent row uses. This
+                              cell used to print "Review" for an open
+                              finding, so one table showed two names
+                              for one state. */}
+                          <span className={`text-[9px] ${statusTextTone(sub)}`} title={statusShort(sub)}>
+                            {statusShort(sub)}
+                          </span>
+                        </td>
+                      )}
+                      {visibleColumns.verdict && (
+                        <td className="px-3 py-2">
+                          <span className={`text-[9px] px-1 py-0.5 rounded whitespace-nowrap ${verdictTone(sub.ai_verdict)}`}>
+                            {verdictLabel(sub.ai_verdict)}
                           </span>
                         </td>
                       )}

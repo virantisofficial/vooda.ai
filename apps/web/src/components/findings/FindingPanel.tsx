@@ -1,6 +1,8 @@
 "use client";
-import { validityOf } from "@/lib/validity";
-import { statusLabel, statusTone, previewOf } from "@/lib/findingState";
+import { validityOf, validityLabel } from "@/lib/validity";
+import { statusShort, statusDetail, statusTone, previewLifecycle, lifecycleOf,
+         STATUS_CHOICES, REASONS_FOR, REASON_LABELS, RESOLVED_IMPLIES,
+         verdictLabel, verdictTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -13,7 +15,7 @@ import { brandScannerName, getScannerColor, isVoodaEngine } from "@/lib/branding
 import { findingName } from "@/lib/titleUtils";
 import { useToast } from "@/components/ui/Toast";
 import type { FindingDetail } from "@/types";
-import { providerConsole } from "@/lib/providerConsoles";
+import { providerConsole, providerLabel } from "@/lib/providerConsoles";
 
 interface Props {
   finding: FindingDetail;
@@ -21,19 +23,26 @@ interface Props {
   onUpdate: () => void;  // refresh after triage action
 }
 
-// Human-friendly label per triage action key — used in the post-
-// save toast so the user gets concrete confirmation of what just
-// committed. Keep in sync with the dropdown options below.
-const _ACTION_LABELS: Record<string, string> = {
-  reopen: "Needs Review",
-  mark_tp: "True Positive",
-  mark_rotated: "Rotated / Revoked",
-  mark_fp: "False Positive",
-  mark_test: "Test Credential",
-  accept_risk: "Accepted Risk",
+// SuggestionChips still speak the older action names. Each one maps
+// onto exactly one status + reason, so the chip and the dropdown stage
+// the same thing and the panel has a single pending shape to render.
+const _CHIP_ACTIONS: Record<string, { action: string; reason: string }> = {
+  mark_fp: { action: "dismiss", reason: "false_positive" },
+  mark_test: { action: "dismiss", reason: "test_credential" },
+  mark_rotated: { action: "resolve", reason: "rotated" },
+  accept_risk: { action: "dismiss", reason: "acceptable_risk" },
+  mark_tp: { action: "mark_tp", reason: "" },
+  reopen: { action: "reopen", reason: "" },
 };
-function _humanLabel(action: string): string {
-  return _ACTION_LABELS[action] || action;
+
+// What a staged change reads as in a toast or a tooltip: the status,
+// then the reason that justifies it. Both halves come from the shared
+// vocabulary so the confirmation matches the badge the user then sees.
+function _humanLabel(action: string, reason?: string | null): string {
+  const choice = STATUS_CHOICES.find((c) => c.action === action);
+  const head = choice ? choice.label : action;
+  const tail = reason ? REASON_LABELS[reason] || reason.replace(/_/g, " ") : "";
+  return tail ? `${head} — ${tail}` : head;
 }
 
 export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
@@ -61,7 +70,27 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   // Always cleared when the user manually picks from the dropdown
   // (the source is honestly "manual" at that point).
   const [pendingSource, setPendingSource] = useState<string | null>(null);
+  // Closing a finding needs a reason — the database rejects the write
+  // without one — so Resolved and Dismissed stage in two steps and the
+  // reason lives beside the action until Save sends both together.
+  const [pendingReason, setPendingReason] = useState<string | null>(null);
+  // Which closing status's reason list the dropdown is currently
+  // showing. Null means the dropdown is on its first step.
+  const [reasonStep, setReasonStep] = useState<string | null>(null);
+  // An acceptable-risk dismissal carries two more things: who is
+  // accountable, and when the acceptance lapses. Both optional at the
+  // API, but an acceptance with no end date never expires, which is
+  // the state this control exists to make visible.
+  const [riskOwner, setRiskOwner] = useState<string>("");
+  const [riskUntil, setRiskUntil] = useState<string>("");
   const { toast } = useToast();
+
+  // Which option the finding already sits on. Rows written before the
+  // lifecycle columns existed carry only a classification, so derive
+  // it the same way the badges do rather than showing nothing ticked.
+  const savedStatus =
+    ((finding as any).status || "").toLowerCase()
+    || lifecycleOf(finding.classification).status;
 
   // Discard pending state when the user navigates to a different
   // finding (panel re-used with a new prop). Without this reset, a
@@ -70,6 +99,10 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   useEffect(() => {
     setPendingAction(null);
     setPendingSource(null);
+    setPendingReason(null);
+    setReasonStep(null);
+    setRiskOwner("");
+    setRiskUntil("");
     setComment("");
   }, [finding.id]);
 
@@ -94,6 +127,11 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
         toast("success", `Credential is ${data.status} — ${data.details || "no longer working"}`);
       } else if (data?.status === "unsupported") {
         toast("info", data.message || "No verifier available for this provider");
+      } else if (data?.status === "unavailable") {
+        // The provider has a verifier; the secret could not be read
+        // back. Usually means the file changed or the clone is gone,
+        // and a re-scan is the fix — so say which, not "failed".
+        toast("warning", data.message || "The secret could not be read back for verification");
       } else {
         toast("info", data?.details || data?.message || "Verification returned no decisive result");
       }
@@ -150,12 +188,60 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   // SAME action twice clears the queue (acts as a discard). Picking
   // a DIFFERENT action replaces the queued one. Nothing hits the
   // API until the user clicks Save below.
-  const handleSelectStatus = (action: string) => {
-    setPendingAction((prev) => (prev === action ? null : action));
+  const handleSelectStatus = (action: string, needsReason: boolean) => {
     // Manual dropdown pick — clear any chip-source attribution so the
     // audit log doesn't lie about provenance.
     setPendingSource(null);
+
+    // Picking the staged status again discards it, which is how the
+    // control has always offered undo.
+    if (pendingAction === action && !needsReason) {
+      // Picking the staged status again discards it.
+      setPendingAction(null);
+      setPendingReason(null);
+      setStatusDropdownOpen(false);
+      return;
+    }
+
+    if (needsReason) {
+      // Step two. Nothing is staged yet: a close with no reason would
+      // be refused by the server, so the status alone is not a change
+      // the user can save.
+      setReasonStep(action);
+      return;
+    }
+
+    setPendingAction(action);
+    // Resolving no longer asks which of three ways the credential was
+    // neutralised — see RESOLVED_IMPLIES. The database still requires a
+    // reason on a closing status, so one is sent.
+    setPendingReason(action === "resolve" ? RESOLVED_IMPLIES : null);
     setStatusDropdownOpen(false);
+  };
+
+  // Step two of a closing status — this is the click that stages the
+  // change, because status and reason are only valid as a pair.
+  const handleSelectReason = (action: string, reason: string) => {
+    const same = pendingAction === action && pendingReason === reason;
+    setPendingAction(same ? null : action);
+    setPendingReason(same ? null : reason);
+    setPendingSource(null);
+    setReasonStep(null);
+    setStatusDropdownOpen(false);
+
+    // Re-picking acceptable risk on a finding that already carries an
+    // acceptance is how its terms get edited — extending the date, or
+    // handing it to someone else. Seed the fields from what is stored,
+    // or Save would send empty ones and quietly drop the owner and the
+    // end date the operator never meant to touch.
+    if (!same && reason === "acceptable_risk") {
+      setRiskOwner(finding.risk_owner || "");
+      setRiskUntil(
+        finding.risk_accepted_until
+          ? new Date(finding.risk_accepted_until).toISOString().slice(0, 10)
+          : "",
+      );
+    }
   };
 
   // SuggestionChip click — stages the suggested action the same way
@@ -164,7 +250,9 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   // analyst can edit before clicking Save.  Keeps the user in
   // control: nothing commits until Save is pressed.
   const handleSuggest = (action: string, signalId: string, reason: string) => {
-    setPendingAction(action);
+    const mapped = _CHIP_ACTIONS[action] || { action, reason: "" };
+    setPendingAction(mapped.action);
+    setPendingReason(mapped.reason || null);
     setPendingSource(signalId);
     // Only auto-fill comment when the user hasn't already typed
     // something — don't clobber in-progress text.
@@ -186,6 +274,18 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
       if (pendingAction) {
         await triageFinding(finding.id, {
           action: pendingAction,
+          // Only resolve and dismiss accept one; sending a reason with
+          // any other action is a 422.
+          resolution_reason: pendingReason || undefined,
+          // Likewise these two: the server refuses them on anything
+          // but an acceptable-risk dismissal, so they are sent only
+          // with one. The date input is local, so it is sent as an
+          // end-of-day UTC instant rather than midnight — an
+          // acceptance dated today should last today.
+          risk_owner: pendingReason === "acceptable_risk" && riskOwner
+            ? riskOwner : undefined,
+          risk_accepted_until: pendingReason === "acceptable_risk" && riskUntil
+            ? new Date(`${riskUntil}T23:59:59Z`).toISOString() : undefined,
           comment: trimmedComment || undefined,
           // pendingSource ⇒ this action originated from a
           // SuggestionChip click.  Threaded into audit metadata so
@@ -201,8 +301,11 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
         });
         setPendingAction(null);
         setPendingSource(null);
+        setPendingReason(null);
+        setRiskOwner("");
+        setRiskUntil("");
         setComment("");
-        toast("success", `Status updated → ${_humanLabel(pendingAction)}`);
+        toast("success", `Status updated → ${_humanLabel(pendingAction, pendingReason)}`);
       } else if (trimmedComment) {
         await addFindingComment(finding.id, trimmedComment);
         setComment("");
@@ -232,6 +335,10 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
   const handleClose = () => {
     setPendingAction(null);
     setPendingSource(null);
+    setPendingReason(null);
+    setReasonStep(null);
+    setRiskOwner("");
+    setRiskUntil("");
     setComment("");
     onClose();
   };
@@ -254,6 +361,42 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
 
         {/* Header */}
         <div className="px-5 py-4 border-b border-white/[0.06] shrink-0">
+          {/* A live acceptance, and a lapsed one. Shown before
+              anything else because it is the reason this finding looks
+              closed, and because nothing re-opens it on the date — the
+              next scan stops honouring it, which may be days away. */}
+          {finding.resolution_reason === "acceptable_risk" && (() => {
+            const until = finding.risk_accepted_until
+              ? new Date(finding.risk_accepted_until) : null;
+            const lapsed = !!until && until.getTime() <= Date.now();
+            const owner = users.find((u: any) => u.id === finding.risk_owner);
+            return (
+              <div className={`mb-3 rounded-lg border px-3 py-2 text-[11px] ${
+                lapsed
+                  ? "border-amber-500/40 bg-amber-500/[0.08] text-amber-200"
+                  : "border-orange-500/25 bg-orange-500/[0.05] text-slate-300"
+              }`}>
+                <span className="font-medium">
+                  {lapsed ? "Risk acceptance lapsed" : "Risk accepted"}
+                </span>
+                {owner && <span className="text-slate-400"> · owner {owner.full_name || owner.email}</span>}
+                {until ? (
+                  <span className="text-slate-400">
+                    {lapsed ? " · expired " : " · until "}
+                    {until.toLocaleDateString()}
+                  </span>
+                ) : (
+                  <span className="text-slate-400"> · no end date</span>
+                )}
+                {lapsed && (
+                  <p className="text-amber-200/70 mt-0.5">
+                    The next scan stops honouring it and this finding
+                    returns to the queue.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h3 className="text-base font-semibold text-white leading-snug">{findingName(finding.title, finding.vulnerability_category)}</h3>
@@ -273,7 +416,7 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                 )}
 <span className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full ${statusTone(finding).badge}`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${statusTone(finding).dot}`} />
-                  {statusLabel(finding)}
+                  {statusShort(finding)}
                 </span>
                 {(() => { const sm = (finding as any).source_metadata || {}; const p = sm.provider || ""; return p ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 border border-red-500/20 capitalize">{sm.secret_type?.replace(/_/g, " ") || p}</span> : finding.cwe ? <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.04] text-slate-400 border border-white/[0.06]">{finding.cwe}</span> : null; })()}
               </div>
@@ -423,8 +566,18 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
             const sm = (finding as any).source_metadata || {};
             const conf = finding.ai_confidence ?? finding.confidence ?? 0;
             const valStatus = validityOf(finding);
-            const valStyles: Record<string, string> = { active: "bg-red-500/15 text-red-400", inactive: "bg-green-500/15 text-green-400", revoked: "bg-green-500/15 text-green-400", unknown: "bg-slate-500/15 text-slate-400", not_validated: "bg-slate-500/10 text-slate-500" };
-            const valLabels: Record<string, string> = { active: "Active (Exposed!)", inactive: "Inactive", revoked: "Revoked", unknown: "Unknown", not_validated: "Not Validated" };
+            // Tones only. The words come from lib/validity.ts, which is
+            // the one place the five canonical states are spelled —
+            // this map used to carry its own and omitted `unsupported`
+            // and `check_failed`, so both fell through and rendered the
+            // raw enum value at the user.
+            const valStyles: Record<string, string> = {
+              active: "bg-red-500/15 text-red-400",
+              inactive: "bg-green-500/15 text-green-400",
+              unknown: "bg-slate-500/15 text-slate-400",
+              unsupported: "bg-slate-500/10 text-slate-500",
+              check_failed: "bg-amber-500/15 text-amber-400",
+            };
             const providerColors: Record<string, string> = { aws: "bg-orange-500", gcp: "bg-blue-500", azure: "bg-blue-600", github: "bg-slate-600", gitlab: "bg-orange-500", stripe: "bg-purple-500", slack: "bg-purple-600", unknown: "bg-slate-600" };
             const provider = sm.provider || "unknown";
             return (
@@ -475,33 +628,69 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                 </div>
               </div>
 
-              {/* Masked Value + Validation */}
+              {/* The two assessments, side by side: is it real, and is
+                  it still live. Those are the questions an analyst
+                  opens this drawer with, and the rest of the panel
+                  exists to support them.
+
+                  The masked value used to lead here. It identifies the
+                  finding — but the header already names it and gives
+                  its path, so by the time anyone reads this they know
+                  which secret they are looking at. It moves down with
+                  the rest of the provenance. */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
-                  <span className="text-[10px] text-slate-500 uppercase">Masked Value</span>
-                  <p className="font-mono text-sm text-red-400 mt-1 bg-black/20 px-2 py-1 rounded">{sm.masked_value || "****"}</p>
+                  <span className="text-[10px] text-slate-500 uppercase">AI Verdict</span>
+                  <div className="flex items-center gap-2.5 mt-1.5">
+                    <span className={`text-[11px] px-2 py-0.5 rounded font-medium shrink-0 ${verdictTone(finding.ai_verdict)}`}>
+                      {verdictLabel(finding.ai_verdict)}
+                    </span>
+                    {finding.ai_verdict ? (
+                      <>
+                        <div className="flex-1 bg-white/[0.06] rounded-full h-1.5 min-w-[32px]">
+                          <div className={`h-1.5 rounded-full ${conf > 0.7 ? "bg-green-400" : conf > 0.4 ? "bg-yellow-400" : "bg-red-400"}`}
+                            style={{ width: `${conf * 100}%` }} />
+                        </div>
+                        <span className="text-xs font-semibold text-slate-300 shrink-0 tabular-nums">
+                          {(conf * 100).toFixed(0)}%
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-slate-500">Not assessed yet</span>
+                    )}
+                  </div>
                 </div>
                 <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-[10px] text-slate-500 uppercase">Validation Status</span>
-                    {/* Manual re-verify — only show if provider is one
-                        the verifier dispatcher knows about. The button
-                        is always rendered for live findings; if no
-                        verifier exists the API returns "unsupported"
-                        and we toast that gracefully. */}
-                    {/* Re-verify button — colour bumped from slate-on-
-                        slate (nearly invisible) to cyan with a filled
-                        background so it actually reads as an action on
-                        the dark drawer.  Cyan is the conventional
-                        "refresh/check" colour and doesn't compete with
-                        the red/amber semantics used elsewhere for
-                        danger / pending. */}
+                    {/* Manual re-verify.
+                        Disabled, not hidden, when no verifier exists
+                        for this provider — an RSA or SSH key has no
+                        issuer to ask, so that is a permanent answer and
+                        the control should say so rather than disappear
+                        without explanation. The comment that used to
+                        sit here claimed this guard existed; it did not,
+                        and the button offered an action that could
+                        never succeed.
+
+                        `verifier_available` comes from the server,
+                        which owns the list of 250 verifiers, so a
+                        provider that gains one becomes clickable on the
+                        next load with no change here.
+
+                        Cyan rather than slate-on-slate so it reads as
+                        an action on the dark drawer, without competing
+                        with the red/amber danger semantics. */}
                     <button
                       type="button"
                       onClick={handleReverify}
-                      disabled={reverifying}
-                      title="Re-run live verification against the provider API"
-                      className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 border border-cyan-400/40 hover:bg-cyan-500/25 hover:text-cyan-100 hover:border-cyan-400/70 disabled:opacity-50 disabled:cursor-wait flex items-center gap-1 transition-colors"
+                      disabled={reverifying || (finding as any).verifier_available === false}
+                      title={
+                        (finding as any).verifier_available === false
+                          ? `No verifier exists for ${sm.provider || "this credential type"} — there is no provider API that can say whether it still works.`
+                          : "Re-run live verification against the provider API"
+                      }
+                      className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 border border-cyan-400/40 hover:bg-cyan-500/25 hover:text-cyan-100 hover:border-cyan-400/70 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-cyan-500/15 disabled:hover:text-cyan-300 disabled:hover:border-cyan-400/40 flex items-center gap-1 transition-colors"
                     >
                       {reverifying ? (
                         <>
@@ -517,13 +706,19 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                     </button>
                   </div>
                   <div className="mt-1">
-                    <span className={`text-xs px-2.5 py-1 rounded-md font-medium ${valStyles[valStatus] || valStyles.not_validated}`}>
-                      {valLabels[valStatus] || valStatus}
+                    <span className={`text-xs px-2.5 py-1 rounded-md font-medium ${valStyles[valStatus] || valStyles.unknown}`}>
+                      {validityLabel(valStatus)}
                     </span>
                     {sm.verified_at && (
                       <span className="text-[10px] text-slate-500 ml-2">
                         verified {new Date(sm.verified_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                       </span>
+                    )}
+                    {(finding as any).verifier_available === false && (
+                      <p className="text-[10px] text-slate-500 mt-1.5">
+                        No service can be asked whether this still works, so
+                        it will not resolve by re-checking.
+                      </p>
                     )}
                   </div>
                 </div>
@@ -709,28 +904,32 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
               )}
 
               {/* Detection Details */}
-              <div className="grid grid-cols-3 gap-3">
+              {/* What was found, and how. Provenance rather than
+                  judgement, so it sits under the assessments above. */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="col-span-2 bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
+                  <span className="text-[10px] text-slate-500 uppercase">Masked Value</span>
+                  <p className="font-mono text-sm text-red-400 mt-1 bg-black/20 px-2 py-1 rounded truncate" title={sm.masked_value || ""}>
+                    {sm.masked_value || "****"}
+                  </p>
+                </div>
                 <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
                   <span className="text-[10px] text-slate-500 uppercase">Detection</span>
+                  {/* Slate, not red. Red is this page's danger colour —
+                      the masked value, the severity, a live credential.
+                      Spending it on "which matcher fired" made the
+                      least important fact the loudest. */}
                   <p className="text-sm text-slate-300 mt-0.5">
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${sm.detection_method === "entropy" ? "bg-purple-500/15 text-purple-400" : "bg-red-500/15 text-red-400"}`}>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.05] text-slate-300">
                       {sm.detection_method || "regex"}
                     </span>
                   </p>
                 </div>
                 <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
                   <span className="text-[10px] text-slate-500 uppercase">Provider</span>
-                  <p className="text-sm text-slate-300 mt-0.5 capitalize">{provider}</p>
-                </div>
-                <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
-                  <span className="text-[10px] text-slate-500 uppercase">Confidence</span>
-                  <div className="flex items-center gap-2 mt-1">
-                    <div className="flex-1 bg-white/[0.06] rounded-full h-1.5">
-                      <div className={`h-1.5 rounded-full ${conf > 0.7 ? "bg-green-400" : conf > 0.4 ? "bg-yellow-400" : "bg-red-400"}`}
-                        style={{ width: `${conf * 100}%` }} />
-                    </div>
-                    <span className="text-xs font-semibold text-slate-300">{(conf * 100).toFixed(0)}%</span>
-                  </div>
+                  {/* providerLabel, not a CSS `capitalize`, which
+                      rendered "Ssh" and "Aws". */}
+                  <p className="text-sm text-slate-300 mt-0.5">{providerLabel(provider)}</p>
                 </div>
               </div>
 
@@ -769,10 +968,14 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
                 );
               })()}
 
-              {/* Secret Hash */}
-              <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
-                <span className="text-[10px] text-slate-500 uppercase">Secret Hash (SHA256)</span>
-                <p className="font-mono text-[10px] text-slate-400 mt-1">{sm.secret_hash || "—"}</p>
+              {/* Secret hash — the key that ties every occurrence of
+                  this credential together. Useful, rarely read, and it
+                  was taking a full bordered tile of the first screen. */}
+              <div className="flex items-baseline gap-2 px-1">
+                <span className="text-[10px] text-slate-600 uppercase shrink-0">SHA256</span>
+                <span className="font-mono text-[10px] text-slate-500 truncate" title={sm.secret_hash || ""}>
+                  {sm.secret_hash || "—"}
+                </span>
               </div>
 
               {/* ── Vooda Radar (inline in Overview) ── */}
@@ -1086,6 +1289,64 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
         {/* Action bar — fixed at bottom */}
         <div className="px-5 py-3 border-t border-white/[0.06] shrink-0 space-y-2.5" style={{ background: "rgba(8,11,28,0.97)" }}>
 
+          {/* Acceptance details — only while an acceptable-risk
+              dismissal is staged. Kept out of the dropdown so the
+              status control stays one decision wide; these are the
+              terms of that decision, and they commit with it on Save.
+
+              Neither field is required by the API, but an acceptance
+              with no end date never lapses, which is exactly the
+              state this row exists to make visible. */}
+          {pendingReason === "acceptable_risk" && (
+            <div className="rounded-lg border border-orange-500/25 bg-orange-500/[0.05] p-2.5 space-y-2">
+              <p className="text-[10px] text-orange-300/90 uppercase tracking-wide">
+                Terms of this acceptance
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                <label className="flex-1 min-w-[150px]">
+                  <span className="text-[10px] text-slate-500 block mb-0.5">
+                    Accountable owner
+                  </span>
+                  <select
+                    value={riskOwner}
+                    onChange={(e) => setRiskOwner(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="select-dark text-xs w-full"
+                  >
+                    <option value="">Not recorded</option>
+                    {users.map((u: any) => (
+                      <option key={u.id} value={u.id}>{u.full_name || u.email}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex-1 min-w-[150px]">
+                  <span className="text-[10px] text-slate-500 block mb-0.5">
+                    Accepted until
+                  </span>
+                  <input
+                    type="date"
+                    value={riskUntil}
+                    min={new Date(Date.now() + 86400000).toISOString().slice(0, 10)}
+                    onChange={(e) => setRiskUntil(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="input-dark text-xs w-full"
+                  />
+                </label>
+              </div>
+              {!riskUntil ? (
+                <p className="text-[10px] text-slate-500">
+                  Without a date this acceptance never lapses and nothing
+                  will ask again.
+                </p>
+              ) : new Date(`${riskUntil}T23:59:59Z`).getTime() <= Date.now() ? (
+                <p className="text-[10px] text-amber-400">
+                  That date has passed. An acceptance has to end in the
+                  future, or it stops applying the moment it is saved.
+                </p>
+              ) : null}
+            </div>
+          )}
+
           {/* Comment input */}
           <textarea
             value={comment}
@@ -1102,52 +1363,51 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
           {/* Bottom bar: Dropdown + Save + Close — single row */}
           <div className="flex items-center gap-2">
 
-            {/* Status dropdown */}
-            {/* When `pendingAction` is set, the trigger shows what
-                the status WILL become on Save (with an amber tint +
-                "Pending →" prefix), not the current saved value.
-                This keeps the user oriented while the change is
-                still revertible. */}
+            {/* Status control — two steps, because a closing status
+                and its reason are only valid as a pair.  Step one
+                picks Open / Triaging / Resolved / Dismissed; the two
+                closing statuses then ask why.
+
+                The control shows status only.  It used to list five
+                verdicts, which put "False Positive" and "True
+                Positive" — the model's vocabulary — in the place
+                where a person records a decision.  The AI's opinion
+                now sits beside its confidence score in Detection
+                Details, where it reads as evidence rather than as
+                state somebody set. */}
             <div className="relative">
               {(() => {
-                // Effective classification for display: pending if set,
-                // else the saved value. Used by the colour + label
-                // logic below.
-                const cls = pendingAction
-                  ? ({
-                      mark_tp: "confirmed_true_positive",
-                      mark_rotated: "rotated",
-                      mark_fp: "confirmed_false_positive",
-                      mark_test: "test_credential",
-                      accept_risk: "accepted_risk",
-                      reopen: "needs_review",
-                    } as Record<string, string>)[pendingAction] || finding.classification
-                  : finding.classification;
+                // Previews the pending pair, so the trigger shows what
+                // Save will commit rather than the saved value.
+                const choice = STATUS_CHOICES.find((c) => c.action === pendingAction);
+                const preview = previewLifecycle(finding, choice?.status, pendingReason);
+                const { badge: colorBg, dot: colorDot } = statusTone(preview);
+                const label = statusShort(preview);
+                // Resolved carries an implied reason that the operator
+                // never chose, so showing it would put words in their
+                // mouth. Dismissal reasons are chosen, and shown.
+                const detail = preview.status === "resolved" ? "" : statusDetail(preview);
 
-                // `cls` is the PENDING classification while an action is
-                // awaiting the server, so the badge previews the result.
-                const preview = previewOf(finding, cls);
-                const colorBg = statusTone(preview).badge;
-                const colorDot = statusTone(preview).dot;
-                const label = statusLabel(preview);
-
-                // When pending, override with a dashed border + amber
-                // ring so the unsaved state is visually distinct.
+                // Dashed amber border marks the change as unsaved.
                 const pendingHint = pendingAction
                   ? "border-amber-500/60 ring-1 ring-amber-500/30 [border-style:dashed]"
                   : "";
 
                 return (
                   <button
-                    onClick={() => setStatusDropdownOpen(!statusDropdownOpen)}
+                    onClick={() => {
+                      setStatusDropdownOpen(!statusDropdownOpen);
+                      setReasonStep(null);
+                    }}
                     disabled={!!actionLoading}
                     title={pendingAction ? "Unsaved change — click Save to commit, or pick the same option again to discard" : "Change finding status"}
                     className={`flex items-center gap-2 px-3 h-[34px] rounded-lg text-xs font-medium border transition-all min-w-[200px] ${colorBg} ${pendingHint}`}
                   >
                     <span className={`w-2 h-2 rounded-full shrink-0 ${colorDot} ${pendingAction ? "animate-pulse" : ""}`} />
-                    <span className="flex-1 text-left">
+                    <span className="flex-1 text-left truncate">
                       {pendingAction && <span className="text-amber-400 font-semibold mr-1">Pending →</span>}
                       {label}
+                      {detail && <span className="opacity-60"> — {detail}</span>}
                     </span>
                     <svg className={`w-3.5 h-3.5 transition-transform ${statusDropdownOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -1159,95 +1419,105 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
               {/* Dropdown menu */}
               {statusDropdownOpen && (
                 <>
-                  <div className="fixed inset-0 z-10" onClick={() => setStatusDropdownOpen(false)} />
-                  <div className="absolute bottom-full left-0 mb-1 z-20 w-52 py-1 rounded-lg border border-white/[0.1] shadow-xl" style={{ background: "rgba(8,11,28,0.95)",  }}>
-                    {/* Triage decisions only — 5 options, never 6.
-                        "Needs Review" used to be a conditional 6th
-                        entry which made the dropdown shape change
-                        based on current state.  That's confusing UX
-                        (every comparable vendor — Snyk, GitHub,
-                        GitLab — uses needs_review as the implicit
-                        default and exposes Re-open as a separate
-                        action elsewhere).  Re-open is now a ghost
-                        button next to Save in the bottom action
-                        bar — only renders when classification ≠
-                        needs_review. */}
-                    {[
-                      { action: "mark_tp", label: "True Positive", color: "text-red-400", dot: "bg-red-400", desc: "Confirmed real secret" },
-                      { action: "mark_rotated", label: "Rotated / Revoked", color: "text-green-400", dot: "bg-green-400", desc: "Secret has been rotated or revoked" },
-                      { action: "mark_fp", label: "False Positive", color: "text-slate-400", dot: "bg-slate-400", desc: "Not a real secret" },
-                      { action: "mark_test", label: "Test Credential", color: "text-blue-400", dot: "bg-blue-400", desc: "Intentional test/mock credential" },
-                      { action: "accept_risk", label: "Accepted Risk", color: "text-orange-400", dot: "bg-orange-400", desc: "Known exposure, team accepts it" },
-                    ].map((opt) => {
-                      // Two distinct visual states:
-                      //   isPending — user just picked this option but
-                      //     hasn't clicked Save yet. Amber border.
-                      //   isSavedActive — this option matches what's
-                      //     currently persisted in the DB. Subtle bg.
-                      const isPending = pendingAction === opt.action;
-                      const isSavedActive = !pendingAction && (
-                        (opt.action === "mark_tp" && finding.classification.includes("true_positive"))
-                        || (opt.action === "mark_rotated" && (finding.classification === "rotated" || finding.classification === "revoked" || finding.classification === "resolved"))
-                        || (opt.action === "mark_fp" && finding.classification.includes("false_positive"))
-                        || (opt.action === "mark_test" && finding.classification === "test_credential")
-                        || (opt.action === "accept_risk" && finding.classification === "accepted_risk")
-                      );
+                  <div className="fixed inset-0 z-10" onClick={() => { setStatusDropdownOpen(false); setReasonStep(null); }} />
+                  <div className="absolute bottom-full left-0 mb-1 z-20 w-64 py-1 rounded-lg border border-white/[0.1] shadow-xl" style={{ background: "rgba(8,11,28,0.95)" }}>
 
-                      return (
+                    {/* Step two — the reason list for the closing
+                        status the user just picked. Shown instead of
+                        the status list, not under it, so there is only
+                        ever one thing to click next. */}
+                    {reasonStep ? (
+                      <>
                         <button
-                          key={opt.action}
-                          onClick={() => handleSelectStatus(opt.action)}
-                          disabled={!!actionLoading}
-                          className={`w-full text-left px-3 py-2 hover:bg-white/[0.04] transition-colors flex items-center gap-2.5 ${
-                            isPending ? "bg-amber-500/[0.08] ring-1 ring-amber-500/30" :
-                            isSavedActive ? "bg-white/[0.03]" : ""
-                          }`}
+                          onClick={() => setReasonStep(null)}
+                          className="w-full text-left px-3 py-1.5 flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
                         >
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${opt.dot} ${isPending ? "animate-pulse" : ""}`} />
-                          <div className="flex-1 min-w-0">
-                            <span className={`text-xs font-medium ${opt.color}`}>
-                              {opt.label}
-                              {isPending && <span className="ml-1 text-[9px] text-amber-400 font-semibold">(unsaved)</span>}
-                            </span>
-                            <span className="text-[9px] text-slate-600 block">{opt.desc}</span>
-                          </div>
-                          {(isPending || isSavedActive) && (
-                            <svg className={`w-3.5 h-3.5 shrink-0 ${isPending ? "text-amber-400" : opt.color}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                          )}
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                          </svg>
+                          Back
                         </button>
-                      );
-                    })}
+                        <p className="px-3 pb-1.5 text-[10px] text-slate-500 uppercase tracking-wide border-b border-white/[0.06]">
+                          Why dismissed?
+                        </p>
+                        {(REASONS_FOR.dismissed || []).map((opt) => {
+                          const isPending = pendingAction === reasonStep && pendingReason === opt.reason;
+                          const isSaved = !pendingAction
+                            && (finding as any).resolution_reason === opt.reason;
+                          return (
+                            <button
+                              key={opt.reason}
+                              onClick={() => handleSelectReason(reasonStep, opt.reason)}
+                              disabled={!!actionLoading}
+                              className={`w-full text-left px-3 py-2 hover:bg-white/[0.04] transition-colors flex items-center gap-2.5 ${
+                                isPending ? "bg-amber-500/[0.08] ring-1 ring-amber-500/30" :
+                                isSaved ? "bg-white/[0.03]" : ""
+                              }`}
+                            >
+                              <div className="flex-1 min-w-0">
+                                <span className="text-xs font-medium text-slate-200">
+                                  {REASON_LABELS[opt.reason]}
+                                  {isPending && <span className="ml-1 text-[9px] text-amber-400 font-semibold">(unsaved)</span>}
+                                </span>
+                                <span className="text-[9px] text-slate-600 block">{opt.desc}</span>
+                              </div>
+                              {(isPending || isSaved) && (
+                                <svg className={`w-3.5 h-3.5 shrink-0 ${isPending ? "text-amber-400" : "text-slate-400"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </>
+                    ) : (
+                      /* Step one — the four statuses, in lifecycle
+                         order. Open is in the list rather than a
+                         separate button: it is a status like the other
+                         three, and a re-open is just a move back to
+                         it. */
+                      STATUS_CHOICES.map((opt) => {
+                        const tone = statusTone({ status: opt.status, resolution_reason: null });
+                        const isPending = pendingAction === opt.action;
+                        const isSaved = !pendingAction && savedStatus === opt.status;
+                        return (
+                          <button
+                            key={opt.action}
+                            onClick={() => handleSelectStatus(opt.action, opt.needsReason)}
+                            disabled={!!actionLoading}
+                            className={`w-full text-left px-3 py-2 hover:bg-white/[0.04] transition-colors flex items-center gap-2.5 ${
+                              isPending ? "bg-amber-500/[0.08] ring-1 ring-amber-500/30" :
+                              isSaved ? "bg-white/[0.03]" : ""
+                            }`}
+                          >
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${tone.dot} ${isPending ? "animate-pulse" : ""}`} />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs font-medium text-slate-200">
+                                {opt.label}
+                                {isPending && pendingReason && (
+                                  <span className="text-slate-400"> — {REASON_LABELS[pendingReason]}</span>
+                                )}
+                                {isPending && <span className="ml-1 text-[9px] text-amber-400 font-semibold">(unsaved)</span>}
+                              </span>
+                              <span className="text-[9px] text-slate-600 block">{opt.desc}</span>
+                            </div>
+                            {opt.needsReason ? (
+                              <svg className="w-3.5 h-3.5 shrink-0 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                            ) : (isPending || isSaved) && (
+                              <svg className={`w-3.5 h-3.5 shrink-0 ${isPending ? "text-amber-400" : "text-slate-400"}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 </>
               )}
             </div>
-
-            {/* Re-open — separate ghost button, only visible when
-                the finding is NOT already in needs_review.  Replaces
-                the conditional "Needs Review" dropdown entry that
-                used to make the dropdown shape change based on
-                state.  Stages pendingAction="reopen" — same pending
-                visual + same Save commits both action and comment. */}
-            {finding.classification !== "needs_review" && (
-              <button
-                type="button"
-                onClick={() => setPendingAction((prev) => (prev === "reopen" ? null : "reopen"))}
-                disabled={!!actionLoading}
-                title="Reset this finding to Needs Review (re-opens for triage)"
-                className={`px-2.5 h-[34px] rounded-lg text-xs font-medium border transition-all disabled:opacity-30 disabled:cursor-not-allowed shrink-0 inline-flex items-center gap-1.5 ${
-                  pendingAction === "reopen"
-                    ? "bg-yellow-500/15 text-yellow-300 border-yellow-500/40 ring-1 ring-yellow-500/30"
-                    : "text-yellow-400/80 border-yellow-400/20 hover:bg-yellow-400/10 hover:text-yellow-300"
-                }`}
-              >
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                {pendingAction === "reopen" ? "Pending Re-open" : "Re-open"}
-              </button>
-            )}
 
             {/* Save — commits pending status change AND/OR comment.
                 Enabled when EITHER a status change is pending OR
@@ -1258,8 +1528,8 @@ export default function FindingPanel({ finding, onClose, onUpdate }: Props) {
               onClick={handleSave}
               disabled={(!pendingAction && !comment.trim()) || !!actionLoading}
               title={
-                pendingAction && comment.trim() ? `Save status change to "${_humanLabel(pendingAction)}" with comment` :
-                pendingAction ? `Save status change to "${_humanLabel(pendingAction)}"` :
+                pendingAction && comment.trim() ? `Save status change to "${_humanLabel(pendingAction, pendingReason)}" with comment` :
+                pendingAction ? `Save status change to "${_humanLabel(pendingAction, pendingReason)}"` :
                 comment.trim() ? "Save comment" :
                 "Pick a status or write a comment to enable Save"
               }

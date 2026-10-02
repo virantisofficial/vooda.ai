@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 import structlog
 
 from apps.api.app.core.database import get_db
-from apps.api.app.core.edition import require_enterprise
 from apps.api.app.core.security import get_current_user
 from apps.api.app.models.user import User
 from apps.api.app.models.integration import IntegrationConfig
@@ -150,7 +149,7 @@ async def get_webhook_config(
     return {"webhooks": webhooks}
 
 
-@router.put("/{provider}/config", dependencies=[Depends(require_enterprise("webhooks"))])
+@router.put("/{provider}/config")
 async def update_webhook_config(
     provider: str,
     body: WebhookConfigUpdate,
@@ -268,7 +267,7 @@ async def delete_webhook_config(
     return {"status": "ok", "provider": provider, "removed": True}
 
 
-@router.post("/{provider}/test", dependencies=[Depends(require_enterprise("webhooks"))])
+@router.post("/{provider}/test")
 async def test_webhook(
     provider: str,
     user: User = Depends(get_current_user),

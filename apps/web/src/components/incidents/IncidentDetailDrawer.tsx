@@ -1,6 +1,7 @@
 "use client";
-import { validityOf } from "@/lib/validity";
-import { statusLabel, statusTone, previewOf } from "@/lib/findingState";
+import { validityOf, validityLabel } from "@/lib/validity";
+import { statusShort, statusDetail, statusTone, previewOf,
+         REASON_LABELS, verdictLabel, verdictTone } from "@/lib/findingState";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -66,6 +67,12 @@ interface IncidentLite {
   occurrence_count: number;
   classification: string;
   review_status: string;
+  //: The lifecycle pair, which the badges and the Status tile read.
+  //: Paired by a CHECK constraint, so the two are only read together.
+  status?: string | null;
+  resolution_reason?: string | null;
+  //: What the model thought, advisory only — never the state.
+  ai_verdict?: string | null;
   validation_status: string | null;
   last_validated_at: string | null;
   rotation_status: string | null;
@@ -183,13 +190,24 @@ const ACTION_TO_PATCH: Record<string, {
   accept_risk:  { classification: "accepted_risk",           review_status: "confirmed" },
 };
 
+// What each action reads as, in the status vocabulary the findings
+// screens use. The payloads in ACTION_TO_PATCH are untouched — the
+// server already mirrors every classification onto its status and
+// reason, so this renames what the operator sees without changing
+// what is written.
+//
+// Three reasons a finding can carry — revoked, provider disabled and
+// mitigating control — are missing here because the incident PATCH
+// takes a classification rather than a reason, and no classification
+// maps to them. Reaching them from an incident needs the endpoint to
+// accept a reason of its own.
 const HUMAN_LABEL: Record<string, string> = {
-  reopen: "Needs Review",
-  mark_tp: "True Positive",
-  mark_rotated: "Rotated / Revoked",
-  mark_fp: "False Positive",
-  mark_test: "Test Credential",
-  accept_risk: "Accepted Risk",
+  reopen: "Open",
+  mark_tp: "Triaging",
+  mark_rotated: "Resolved — Rotated",
+  mark_fp: "Dismissed — False positive",
+  mark_test: "Dismissed — Test credential",
+  accept_risk: "Dismissed — Acceptable risk",
 };
 
 function fmtAge(iso: string | null | undefined): string {
@@ -609,7 +627,12 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
   const _preview = previewOf(data, effectiveCls);
   const triggerBg = statusTone(_preview).badge;
   const triggerDot = statusTone(_preview).dot;
-  const triggerLabel = statusLabel(_preview);
+  // Status, then the reason that justifies it — never the model's
+  // verdict, which lives in the AI Verdict tile and not on a control
+  // that records decisions.
+  const _triggerDetail = statusDetail(_preview);
+  const triggerLabel = statusShort(_preview)
+    + (_triggerDetail ? ` — ${_triggerDetail}` : "");
 
   const pendingHint = pendingAction
     ? "border-amber-500/60 ring-1 ring-amber-500/30 [border-style:dashed]"
@@ -905,19 +928,17 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                 const iconLetter = (data.secret_type || data.title || "?")[0]?.toUpperCase() || "?";
 
                 const valStatus = validityOf(data);
+                // Tones only — the words come from lib/validity.ts.
+                // This carried its own labels and had no entry for
+                // `unsupported` or `check_failed`, so both fell through
+                // and showed the raw enum value, the same way the
+                // findings panel did.
                 const valStyles: Record<string, string> = {
                   active: "bg-red-500/15 text-red-400",
                   inactive: "bg-green-500/15 text-green-400",
-                  revoked: "bg-green-500/15 text-green-400",
                   unknown: "bg-slate-500/15 text-slate-400",
-                  not_validated: "bg-slate-500/10 text-slate-500",
-                };
-                const valLabels: Record<string, string> = {
-                  active: "Active (Exposed!)",
-                  inactive: "Inactive",
-                  revoked: "Revoked",
-                  unknown: "Unknown",
-                  not_validated: "Not Validated",
+                  unsupported: "bg-slate-500/10 text-slate-500",
+                  check_failed: "bg-amber-500/15 text-amber-400",
                 };
 
                 const conf = data.ai_confidence ?? 0;
@@ -987,8 +1008,8 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                           </button>
                         </div>
                         <div className="mt-1">
-                          <span className={`text-xs px-2.5 py-1 rounded-md font-medium ${valStyles[valStatus] || valStyles.not_validated}`}>
-                            {valLabels[valStatus] || valStatus}
+                          <span className={`text-xs px-2.5 py-1 rounded-md font-medium ${valStyles[valStatus] || valStyles.unknown}`}>
+                            {validityLabel(valStatus)}
                           </span>
                           {data.last_validated_at ? (
                             <span className="text-[10px] text-slate-500 ml-2">
@@ -1003,19 +1024,23 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                       </div>
                     </div>
 
-                    {/* Classification + Review Status + Confidence —
-                        grid-cols-3, same as FindingPanel's secondary
-                        row. Confidence renders the same coloured bar. */}
-                    <div className="grid grid-cols-3 gap-3">
+                    {/* Status, then the model's assessment, then the
+                        internal review flag — same order of importance
+                        the findings panel uses. */}
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                       <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
-                        <span className="text-[10px] text-slate-500 uppercase">Classification</span>
-                        <p className={`text-xs font-medium mt-1 capitalize ${
-                          cls.includes("true_positive") ? "text-red-400" :
-                          cls.includes("false_positive") ? "text-green-400" :
-                          cls === "accepted_risk" ? "text-orange-400" :
-                          "text-yellow-400"
-                        }`}>
-                          {(data.classification || "needs review").replace(/_/g, " ")}
+                        {/* Status, not classification. The old tile
+                            coloured every false positive green, which
+                            claimed safety for something nobody had
+                            reviewed. */}
+                        <span className="text-[10px] text-slate-500 uppercase">Status</span>
+                        <p className="text-xs font-medium mt-1 text-slate-200">
+                          {statusShort(data)}
+                          {data.resolution_reason && (
+                            <span className="text-slate-400">
+                              {" — "}{REASON_LABELS[data.resolution_reason] || data.resolution_reason.replace(/_/g, " ")}
+                            </span>
+                          )}
                         </p>
                       </div>
                       <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
@@ -1024,18 +1049,28 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                           {(data.review_status || "unreviewed").replace(/_/g, " ")}
                         </p>
                       </div>
-                      <div className="bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
-                        <span className="text-[10px] text-slate-500 uppercase">Confidence</span>
-                        {data.ai_confidence != null ? (
-                          <div className="mt-1 flex items-center gap-2">
-                            <div className="flex-1 h-1.5 bg-white/[0.05] rounded-full overflow-hidden">
-                              <div className={`h-full ${confBarColor} transition-all`} style={{ width: `${confPct}%` }} />
-                            </div>
-                            <span className="text-xs font-medium text-slate-200">{confPct}%</span>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-500 mt-1">—</p>
-                        )}
+                      <div className="col-span-2 bg-white/[0.02] rounded-lg p-3 border border-white/[0.04]">
+                        {/* The model's opinion and the confidence that
+                            qualifies it are one statement, so they get
+                            one tile — advisory, and never the
+                            incident's state. */}
+                        <span className="text-[10px] text-slate-500 uppercase">AI Verdict</span>
+                        <div className="flex items-center gap-2.5 mt-1.5">
+                          <span className={`text-[11px] px-2 py-0.5 rounded font-medium shrink-0 ${verdictTone(data.ai_verdict)}`}>
+                            {verdictLabel(data.ai_verdict)}
+                          </span>
+                          {data.ai_confidence != null ? (
+                            <>
+                              <div className="flex-1 h-1.5 bg-white/[0.05] rounded-full overflow-hidden min-w-[40px]">
+                                <div className={`h-full ${confBarColor} transition-all`} style={{ width: `${confPct}%` }} />
+                              </div>
+                              <span className="text-xs font-semibold text-slate-300 shrink-0 tabular-nums">{confPct}%</span>
+                              <span className="text-[10px] text-slate-500 shrink-0">confident</span>
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-slate-500">No model has looked at this yet</span>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -1368,33 +1403,34 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                     className="absolute bottom-full left-0 mb-1 z-20 w-52 py-1 rounded-lg border border-white/[0.1] shadow-xl"
                     style={{ background: "rgba(8,11,28,0.95)" }}
                   >
-                    {/* Triage decisions only — 5 options, never 6.
-                        "Needs Review" was a conditional 6th entry
-                        which made the dropdown shape change based
-                        on state (confusing UX).  Re-open is now a
-                        separate ghost button next to Save in the
-                        bottom action bar — only renders when
-                        classification ≠ needs_review.  Matches the
-                        Findings drawer 1:1. */}
+                    {/* The four statuses, in lifecycle order, with
+                        the reason spelled out where one applies. Open
+                        is an option like the rest: a re-open is only a
+                        move back to it, and giving it its own button
+                        made the same decision reachable two ways.
+
+                        An incident cannot yet be closed as revoked,
+                        provider disabled or by a mitigating control —
+                        see HUMAN_LABEL for why. */}
                     {[
-                      { action: "mark_tp", label: "True Positive", color: "text-red-400", dot: "bg-red-400", desc: "Confirmed real secret" },
-                      { action: "mark_rotated", label: "Rotated / Revoked", color: "text-green-400", dot: "bg-green-400", desc: "Secret has been rotated or revoked" },
-                      { action: "mark_fp", label: "False Positive", color: "text-slate-400", dot: "bg-slate-400", desc: "Not a real secret" },
-                      { action: "mark_test", label: "Test Credential", color: "text-blue-400", dot: "bg-blue-400", desc: "Intentional test/mock credential" },
-                      { action: "accept_risk", label: "Accepted Risk", color: "text-orange-400", dot: "bg-orange-400", desc: "Known exposure, team accepts it" },
+                      { action: "reopen", label: "Open", color: "text-amber-400", dot: "bg-amber-400", desc: "Back in the queue, nobody has decided" },
+                      { action: "mark_tp", label: "Triaging", color: "text-blue-400", dot: "bg-blue-400", desc: "Real secret, remediation in progress" },
+                      { action: "mark_rotated", label: "Resolved — Rotated", color: "text-green-400", dot: "bg-green-400", desc: "A new credential was issued" },
+                      { action: "mark_fp", label: "Dismissed — False positive", color: "text-slate-400", dot: "bg-slate-400", desc: "Not a credential at all" },
+                      { action: "mark_test", label: "Dismissed — Test credential", color: "text-slate-400", dot: "bg-slate-400", desc: "A fake value, intentionally committed" },
+                      { action: "accept_risk", label: "Dismissed — Acceptable risk", color: "text-orange-400", dot: "bg-orange-400", desc: "Real, exposed, and signed off anyway" },
                     ].map((opt) => {
                       const isPending = pendingAction === opt.action;
-                      // Active = matches the saved state.  needs_review
-                      // doesn't appear in the dropdown (it's the
-                      // default/inbox state, not a triage decision)
-                      // so there's no isSavedActive row for it.
-                      const isSavedActive = !pendingAction && (
-                        (opt.action === "mark_tp" && data.classification.includes("true_positive"))
-                        || (opt.action === "mark_rotated" && (data.classification === "rotated" || data.classification === "revoked" || data.classification === "resolved"))
-                        || (opt.action === "mark_fp" && data.classification.includes("false_positive"))
-                        || (opt.action === "mark_test" && data.classification === "test_credential")
-                        || (opt.action === "accept_risk" && data.classification === "accepted_risk")
-                      );
+                      // Active = the option that put the incident in
+                      // the state it is in. Matched on the lifecycle
+                      // pair the API now returns, not on substrings of
+                      // the legacy classification, which could tick two
+                      // rows at once (every "rotated" also satisfied
+                      // the resolved test).
+                      const _patch = ACTION_TO_PATCH[opt.action] || {};
+                      const isSavedActive = !pendingAction
+                        && !!data.classification
+                        && data.classification === _patch.classification;
 
                       return (
                         <button
@@ -1426,31 +1462,6 @@ export function IncidentDetailDrawer({ incidentId, onClose, onMutate }: Props) {
                 </>
               )}
             </div>
-
-            {/* Re-open — separate ghost button, only visible when
-                the incident is NOT already in needs_review.  Stages
-                pendingAction="reopen" — the same dropdown trigger
-                shows the pending amber state, and Save commits
-                action + comment together.  Matches the Findings
-                drawer 1:1 (gap #5 from the commercial-grade audit). */}
-            {data && data.classification !== "needs_review" && (
-              <button
-                type="button"
-                onClick={() => setPendingAction((prev) => (prev === "reopen" ? null : "reopen"))}
-                disabled={saving}
-                title="Reset this incident to Needs Review (re-opens for triage)"
-                className={`px-2.5 h-[34px] rounded-lg text-xs font-medium border transition-all disabled:opacity-30 disabled:cursor-not-allowed shrink-0 inline-flex items-center gap-1.5 ${
-                  pendingAction === "reopen"
-                    ? "bg-yellow-500/15 text-yellow-300 border-yellow-500/40 ring-1 ring-yellow-500/30"
-                    : "text-yellow-400/80 border-yellow-400/20 hover:bg-yellow-400/10 hover:text-yellow-300"
-                }`}
-              >
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                {pendingAction === "reopen" ? "Pending Re-open" : "Re-open"}
-              </button>
-            )}
 
             {/* Save — same enable rule + amber-glow as FindingPanel.
                 Commits pendingAction + comment in one PATCH. */}

@@ -214,6 +214,15 @@ async def list_findings(
     # bypassed — the user is intentionally looking at one repo, even if
     # that repo is archived (repo-detail page needs this).
     include_archived_sources: bool = Query(False),
+    risk_expired: Optional[bool] = Query(
+        None,
+        description=(
+            "true returns only findings dismissed as an acceptable risk "
+            "whose acceptance has lapsed. Nothing re-opens them on the "
+            "date — the next scan does — so this is how an operator sees "
+            "them before that happens."
+        ),
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -271,6 +280,24 @@ async def list_findings(
         from sqlalchemy import literal_column
         conditions.append(
             NormalizedFinding.validation_status == _validity(validation_status).value
+        )
+
+    # ── Lapsed risk acceptances ────────────────────────────────────
+    # An acceptance with no end date never lapses, so NULL is excluded
+    # from both sides rather than counted as "not expired" — a finding
+    # that was never an acceptable-risk dismissal is not an unexpired
+    # acceptance, it is not an acceptance at all.
+    if risk_expired is not None:
+        from datetime import datetime as _dt, timezone as _tz
+        _now = _dt.now(_tz.utc)
+        conditions.append(
+            NormalizedFinding.resolution_reason == "acceptable_risk"
+        )
+        conditions.append(NormalizedFinding.risk_accepted_until.isnot(None))
+        conditions.append(
+            NormalizedFinding.risk_accepted_until <= _now
+            if risk_expired
+            else NormalizedFinding.risk_accepted_until > _now
         )
 
     # ── Archive filter ─────────────────────────────────────────────
@@ -503,9 +530,18 @@ async def get_finding(
         val = src_active.scalar()
         is_archived_parent = val is False
 
+    # Whether Re-verify could reach a provider for this finding. The
+    # panel used to render the button unconditionally and let the user
+    # discover from a toast that no verifier exists — for an RSA key or
+    # an SSH key that is a permanent answer, so the button was offering
+    # an action that could never succeed.
+    from services.secret_verification.verifier import can_verify as _can_verify
+    verifier_available = _can_verify(finding.source_metadata or {})
+
     finding_dict = {
         **{c.name: getattr(finding, c.name) for c in finding.__table__.columns},
         "is_archived_parent": is_archived_parent,
+        "verifier_available": verifier_available,
         "evidence": [
             {"type": e.evidence_type, "file": e.file_path, "summary": e.summary, "content": e.content}
             for e in evidence_result.scalars().all()
@@ -552,6 +588,50 @@ async def triage_finding(
                 "expected_version": body.expected_version,
             },
         )
+
+    from datetime import datetime, timezone
+
+    # ── Risk acceptance ──────────────────────────────────────────
+    # Only an acceptable-risk dismissal carries an owner and an end
+    # date. Accepting them on any other action would store a risk
+    # acceptance against a finding nobody accepted the risk of.
+    _accepting_risk = (
+        body.action == "accept_risk"
+        or (body.action == "dismiss" and body.resolution_reason == "acceptable_risk")
+    )
+    if (body.risk_owner or body.risk_accepted_until) and not _accepting_risk:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "risk_owner and risk_accepted_until apply only to an "
+                "acceptable_risk dismissal."
+            ),
+        )
+    if body.risk_accepted_until is not None:
+        _until = body.risk_accepted_until
+        if _until.tzinfo is None:
+            _until = _until.replace(tzinfo=timezone.utc)
+        if _until <= datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "risk_accepted_until must be in the future; an acceptance "
+                    "that has already lapsed would close the finding and "
+                    "immediately stop applying."
+                ),
+            )
+    if body.risk_owner is not None:
+        _owner = (await db.execute(
+            select(User.id).where(
+                User.id == body.risk_owner,
+                User.tenant_id == user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if _owner is None:
+            raise HTTPException(
+                status_code=422,
+                detail="risk_owner is not a user in this workspace.",
+            )
 
     action_map = {
         "mark_fp": Classification.CONFIRMED_FALSE_POSITIVE,
@@ -621,6 +701,12 @@ async def triage_finding(
             finding.resolution_reason = explicit_reason.value
             if body.comment and not finding.resolution_note:
                 finding.resolution_note = body.comment
+        # After the reason is final, because mirror_lifecycle clears
+        # these whenever the row is not an acceptable-risk dismissal —
+        # which is what stops a re-open carrying the old owner.
+        if _accepting_risk and finding.resolution_reason == "acceptable_risk":
+            finding.risk_owner = body.risk_owner
+            finding.risk_accepted_until = body.risk_accepted_until
     finding.review_status = ReviewStatus.REVIEWED
 
     # ── Case-B: cascade triage UP to the parent incident ──
@@ -945,16 +1031,51 @@ async def verify_finding_credential(
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
 
-    sm = finding.source_metadata or finding.raw_data or {}
+    sm = finding.source_metadata or {}
 
-    from services.secret_verification.verifier import verify_finding as _verify, SUPPORTED_PROVIDERS
+    from services.secret_verification.verifier import (
+        verify_finding_with_pairing as _verify, can_verify,
+    )
     provider = (sm.get("provider") or "").lower()
-    if provider not in SUPPORTED_PROVIDERS:
+    if not can_verify(sm):
         return {"status": "unsupported", "message": f"No verifier for provider: {provider}"}
 
-    verification = await _verify(sm)
+    # Put the secret back, for the length of this call.
+    #
+    # It is not in the row: the scan pipeline strips it before writing,
+    # so every verifier that needed it has been answering "Raw secret
+    # value not available for verification" since the feature shipped.
+    # Re-read it from the clone instead — nothing is stored, and the
+    # value never leaves this function.
+    from services.secret_verification.recovery import (
+        recover_secret_value, RecoveryUnavailable, repo_clone_root,
+    )
+    try:
+        raw_value = recover_secret_value(
+            repository_id=finding.repository_id,
+            file_path=finding.file_path or "",
+            secret_hash=sm.get("secret_hash") or "",
+            detection_method=sm.get("detection_method") or "",
+        )
+    except RecoveryUnavailable as exc:
+        # A real answer, not a failure to be retried blindly: the file
+        # moved, the clone is gone, or the secret is no longer there.
+        return {"status": "unavailable", "message": str(exc), "provider": provider}
+
+    verification = await _verify(
+        {**sm, "_raw_value": raw_value},
+        # Half of a credential pair is verified together with its
+        # partner, which is found by scanning the same file.
+        repo_root=repo_clone_root(finding.repository_id),
+        file_path=finding.file_path or "",
+        line_start=finding.line_start or 0,
+    )
     if verification:
+        # From `sm`, never from the dict handed to the verifier: that
+        # one carries the recovered secret, and this is what gets
+        # written to the row and returned to the browser.
         updated_sm = dict(sm)
+        updated_sm.pop("_raw_value", None)
         updated_sm["validation_status"] = _validity(verification.status).value
         updated_sm["verification_details"] = verification.details
         updated_sm["verification_permissions"] = verification.permissions
