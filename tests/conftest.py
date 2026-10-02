@@ -54,16 +54,35 @@ def _database_of(url: str) -> str:
     return re.split(r"[?]", url.rpartition("/")[2])[0]
 
 
-def _ensure_database(admin_url: str, name: str) -> None:
-    """CREATE DATABASE if it is not there yet.
+def _ensure_database(admin_url: str, name: str) -> bool:
+    """CREATE DATABASE if it is not there yet. False if we could not.
 
     Connects to `postgres` rather than the target, since you cannot
     create a database from inside itself.
-    """
-    import psycopg2
-    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-    conn = psycopg2.connect(_with_database(admin_url, "postgres"))
+    Returns rather than raises when the driver is absent or the server
+    is unreachable. Not every job that runs pytest here has a database:
+    the verifier safety audit installs pytest alone and runs one
+    standalone file, and an unconditional `import psycopg2` at import
+    time failed collection before a single test was gathered.
+
+    The REDIRECT below is not conditional on this. Pointing the suite
+    at `<database>_test` is the safety property — it is what stops a
+    run writing to a deployment's own database — and it costs nothing
+    to apply. Only the CREATE is skipped, so a test that genuinely
+    needs the database fails on its own connection attempt, loudly,
+    instead of quietly succeeding against the wrong one.
+    """
+    try:
+        import psycopg2
+        from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+    except ImportError:
+        return False
+
+    try:
+        conn = psycopg2.connect(_with_database(admin_url, "postgres"))
+    except Exception:
+        return False
     try:
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         with conn.cursor() as cur:
@@ -72,16 +91,22 @@ def _ensure_database(admin_url: str, name: str) -> None:
                 cur.execute(f'CREATE DATABASE "{name}"')
     finally:
         conn.close()
+    return True
 
+
+#: Whether the test database exists and can be reached. The session
+#: fixture skips its schema rebuild when it cannot.
+_DATABASE_READY = False
 
 if not _OPT_OUT:
     _live_sync = os.environ.get("DATABASE_URL_SYNC") or _DEFAULT_SYNC
     _live_async = os.environ.get("DATABASE_URL") or _DEFAULT_ASYNC
     _test_name = f"{_database_of(_live_sync)}_test"
 
-    _ensure_database(_live_sync, _test_name)
+    _DATABASE_READY = _ensure_database(_live_sync, _test_name)
 
-    # Before any import of Settings, so the engine that
+    # Unconditional, and deliberately so — see _ensure_database. Before
+    # any import of Settings, so the engine that
     # apps.api.app.core.database builds at module scope points here.
     os.environ["DATABASE_URL_SYNC"] = _with_database(_live_sync, _test_name)
     os.environ["DATABASE_URL"] = _with_database(_live_async, _test_name)
@@ -109,7 +134,9 @@ def _schema_and_tenant():
     seeded tenant and whatever the fixtures provision, so there is
     nothing here to preserve.
     """
-    if _OPT_OUT:
+    if _OPT_OUT or not _DATABASE_READY:
+        # No database to prepare. Tests that need one will fail when
+        # they try to use it, which is the right place to find out.
         yield
         return
 

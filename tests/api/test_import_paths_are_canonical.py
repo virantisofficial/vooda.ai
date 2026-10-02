@@ -64,3 +64,34 @@ def test_the_canonical_path_is_the_one_that_resolves():
     # this environment is not the one the product ships in.
     import importlib.util
     assert importlib.util.find_spec("apps.api.app.core.config") is not None
+
+
+def test_the_suite_collects_without_a_database():
+    """Not every job that runs pytest here has one.
+
+    The verifier safety audit installs pytest alone and runs a single
+    standalone file. conftest.py imported psycopg2 at module scope to
+    create the test database, so collection died with ModuleNotFoundError
+    before a test was gathered — and the failure named psycopg2, not the
+    job's missing dependency, which is a long way from the cause.
+
+    The redirect to `<database>_test` must still happen regardless: it
+    is what stops a run writing to a deployment's own database, and
+    making it conditional on the driver being importable would mean the
+    one environment that cannot create the test database is also the one
+    pointed at the real one.
+    """
+    import pathlib
+    src = pathlib.Path("tests/conftest.py").read_text(encoding="utf-8")
+
+    # The import is inside a try, not at module scope.
+    body = src[src.index("def _ensure_database"):src.index("_DATABASE_READY = False")]
+    assert "try:\n        import psycopg2" in body
+    assert "except ImportError:\n        return False" in body
+
+    # And the redirect is not guarded by it.
+    tail = src[src.index("if not _OPT_OUT:"):src.index("import pytest")]
+    assert 'os.environ["DATABASE_URL_SYNC"] = _with_database' in tail
+    assert "if _DATABASE_READY" not in tail, (
+        "the redirect must apply whether or not the database could be made"
+    )
