@@ -40,3 +40,58 @@ export function providerConsole(provider?: string, secretType?: string): Provide
   if (!byType) return undefined;
   return byType[(secretType || "").toLowerCase()] || byType._default;
 }
+
+
+/**
+ * Display name for a provider slug.
+ *
+ * Providers are stored lowercase (`ssh`, `aws`, `pkcs8`), and the panel
+ * used a CSS `capitalize`, which rendered "Ssh" and "Aws" — close
+ * enough to read, wrong enough to look like a defect. Acronyms are
+ * uppercased, multi-word slugs are split, and anything unknown falls
+ * back to title case.
+ */
+const _ACRONYMS = new Set([
+  "aws", "gcp", "ssh", "rsa", "dsa", "ec", "pgp", "jwt", "api", "cdn",
+  "ftp", "smtp", "imap", "ldap", "sql", "url", "uri", "ai", "ml", "id",
+  "jdbc", "odbc", "npm", "cli", "sdk", "iam", "sso", "saml", "oidc",
+  "hmac", "otp", "vpn", "dns", "s3", "ec2", "rds", "sns", "sqs", "kms",
+]);
+
+const _NAMES: Record<string, string> = {
+  pkcs8: "PKCS#8",
+  pkcs12: "PKCS#12",
+  openssh: "OpenSSH",
+  github: "GitHub",
+  gitlab: "GitLab",
+  postgresql: "PostgreSQL",
+  mysql: "MySQL",
+  mongodb: "MongoDB",
+  mongo: "MongoDB",
+  clickhouse: "ClickHouse",
+  azure_ad: "Azure AD",
+  sendgrid: "SendGrid",
+  pagerduty: "PagerDuty",
+  youtube: "YouTube",
+  linkedin: "LinkedIn",
+  paypal: "PayPal",
+  dockerhub: "Docker Hub",
+  docker: "Docker",
+  npmjs: "npm",
+  generic: "Not identified",
+  unknown: "Not identified",
+};
+
+export function providerLabel(provider?: string | null): string {
+  const slug = (provider || "").trim().toLowerCase();
+  if (!slug) return "Not identified";
+  if (_NAMES[slug]) return _NAMES[slug];
+  return slug
+    .split(/[_\-.]/)
+    .filter(Boolean)
+    .map((part) =>
+      _ACRONYMS.has(part)
+        ? part.toUpperCase()
+        : part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}

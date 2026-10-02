@@ -8816,7 +8816,15 @@ async def _verify_scan_findings(scan_job_id: str, tenant_id: str):
                             # over-rate event. Correctness > quota.
                             await _rl_acquire(provider)
                             try:
-                                verification = await verifier_fn(enriched)
+                                # Same guard the manual re-verify path
+                                # applies: a rejection cannot be blamed
+                                # on this credential when half the
+                                # request was read off a nearby line.
+                                from services.secret_verification.verifier import (
+                                    apply_pairing_attribution,
+                                )
+                                verification = apply_pairing_attribution(
+                                    await verifier_fn(enriched), enriched)
                                 paired_count += 1
                                 logger.info("paired_verification",
                                     pair_key=pair_key,

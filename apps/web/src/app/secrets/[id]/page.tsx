@@ -1,5 +1,5 @@
 "use client";
-import { validityOf } from "@/lib/validity";
+import { validityOf, validityLabel } from "@/lib/validity";
 // SPDX-FileCopyrightText: 2026 Virantis
 // SPDX-License-Identifier: LicenseRef-Vooda-Community-1.0
 
@@ -32,7 +32,16 @@ interface SecretDetail {
 }
 
 const SEV = { critical: "bg-red-500/15 text-red-400", high: "bg-orange-500/15 text-orange-400", medium: "bg-yellow-500/15 text-yellow-400", low: "bg-slate-500/15 text-slate-400" };
-const VAL = { active: "bg-red-500/15 text-red-400", inactive: "bg-green-500/15 text-green-400", revoked: "bg-green-500/15 text-green-400", unknown: "bg-slate-500/15 text-slate-400", not_validated: "bg-slate-500/10 text-slate-500" };
+// Tones only — the words come from lib/validity.ts. Keys are the five
+// canonical states; `revoked` and `not_validated` are legacy spellings
+// that `validity()` already folds into `inactive` and `unknown`.
+const VAL: Record<string, string> = {
+  active: "bg-red-500/15 text-red-400",
+  inactive: "bg-green-500/15 text-green-400",
+  unknown: "bg-slate-500/15 text-slate-400",
+  unsupported: "bg-slate-500/10 text-slate-500",
+  check_failed: "bg-amber-500/15 text-amber-400",
+};
 
 export default function SecretDetailPage() {
   const { id } = useParams();
@@ -90,7 +99,11 @@ export default function SecretDetailPage() {
             <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Validation & Status</h3>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between"><span className="text-slate-500">Validation Status</span>
-                <span className={`px-2 py-0.5 rounded text-xs font-medium ${valClass}`}>{valStatus.replace(/_/g, " ")}</span>
+                {/* The shared label. This printed the enum with its
+                    underscores swapped for spaces — "check failed",
+                    "unsupported" — which is the machine's word, not a
+                    sentence anyone wrote. */}
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${valClass}`}>{validityLabel(valStatus)}</span>
               </div>
               <div className="flex justify-between"><span className="text-slate-500">Validated At</span><span className="text-white">{sm.validated_at || "Never"}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Classification</span><span className="text-white">{finding.classification?.replace(/_/g, " ") || "Unreviewed"}</span></div>

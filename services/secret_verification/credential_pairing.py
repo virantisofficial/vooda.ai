@@ -57,8 +57,20 @@ class CredentialPair:
 # Key format: (primary_provider, partner_roles_expected)
 KNOWN_PAIRS: list[CredentialPair] = [
     CredentialPair(
-        primary_secret_type="aws_access_key_id",
-        partner_secret_types=["aws_secret_access_key", "aws_secret"],
+        # `aws_access_key`, because that is what VOODA-SEC-AWS-001
+        # ("AWS Access Key ID") actually emits. This read
+        # `aws_access_key_id` — a name no rule has ever produced — so
+        # the membership test in the scan task was never true and
+        # `aws_paired` has never run. An AWS access key found next to
+        # its secret was reported unverifiable either way.
+        primary_secret_type="aws_access_key",
+        # Three spellings reach the same value: `aws_secret_key` from
+        # the two SDK/assignment rules, `aws_secret_access_key` from the
+        # contextual and credentials-file rules, and `aws_secret` from
+        # the inline regex below.
+        partner_secret_types=[
+            "aws_secret_access_key", "aws_secret_key", "aws_secret",
+        ],
         verifier_key="aws_paired",
         partner_inline_regex={
             # AWS secret keys are 40-char base64 — search for them near an AWS
@@ -75,28 +87,43 @@ KNOWN_PAIRS: list[CredentialPair] = [
         },
     ),
     CredentialPair(
-        primary_secret_type="azure_client_id",
-        partner_secret_types=["azure_client_secret", "azure_tenant_id"],
+        # The secret is the half that gets detected — VOODA-SEC-AZ-002,
+        # "Azure AD Client Secret". The client id and tenant are plain
+        # UUIDs; on their own they are configuration, not credentials,
+        # so no rule detects them and none should. They are read out of
+        # the file beside the secret instead.
+        primary_secret_type="azure_ad_secret",
+        partner_secret_types=["azure_client_id", "azure_tenant_id"],
         verifier_key="azure_ad_paired",
         partner_inline_regex={
-            "azure_client_secret": r'(?i)(?:client_?secret|azure_?client_?secret|AZURE_?CLIENT_?SECRET)[\s:="\']+([A-Za-z0-9_.~-]{34,80})',
+            # `appId` is what `az ad sp create-for-rbac` prints, and is
+            # how the client id usually appears beside a secret.
+            "azure_client_id": r'(?i)(?:client_?id|azure_?client_?id|app_?id)[\s:="\']+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
             "azure_tenant_id": r'(?i)(?:tenant_?id|azure_?tenant_?id|AZURE_?TENANT_?ID)[\s:="\']+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
         },
     ),
     CredentialPair(
-        primary_secret_type="paypal_client_id",
-        partner_secret_types=["paypal_client_secret"],
+        # VOODA-SEC-PAYPAL-001 detects the client secret; nothing
+        # detects a client id, which on its own is public.
+        primary_secret_type="paypal_client_secret",
+        partner_secret_types=["paypal_client_id"],
         verifier_key="paypal_paired",
         partner_inline_regex={
-            "paypal_client_secret": r'(?i)(?:paypal_?client_?secret|PAYPAL_?CLIENT_?SECRET)[\s:="\']+([A-Z0-9_-]{60,90})',
+            # PayPal client ids start with A and run ~80 chars.
+            "paypal_client_id": r'(?i)(?:paypal_?client_?id|PAYPAL_?CLIENT_?ID)[\s:="\']+([A-Za-z0-9_-]{40,90})',
         },
     ),
     CredentialPair(
-        primary_secret_type="mongodb_atlas_public_key",
-        partner_secret_types=["mongodb_atlas_private_key"],
+        # VOODA-SEC-MONGODB-ATLAS-001 detects the private key — the
+        # half that is a secret. The public key is an identifier.
+        primary_secret_type="mongodb_atlas_private_key",
+        partner_secret_types=["mongodb_atlas_public_key"],
         verifier_key="mongodb_atlas_paired",
         partner_inline_regex={
-            "mongodb_atlas_private_key": r'(?i)(?:mongo|atlas)_?(?:private|priv)_?(?:key|api_key)[\s:="\']+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
+            # Atlas public keys are short lowercase strings, far too
+            # generic to match unanchored — so the key name has to be
+            # on the line.
+            "mongodb_atlas_public_key": r'(?i)(?:mongo|atlas)_?(?:public|pub)_?(?:key|api_key)[\s:="\']+([a-z]{8})\b',
         },
     ),
     CredentialPair(
@@ -108,12 +135,18 @@ KNOWN_PAIRS: list[CredentialPair] = [
         },
     ),
     CredentialPair(
-        primary_secret_type="snowflake_account",
-        partner_secret_types=["snowflake_user", "snowflake_password"],
+        # VOODA-SEC-SNOWFLAKE-003 fires on an assignment to
+        # snowflake_password, _account or _token, so the detected value
+        # is whichever of those was on the line. Only the password can
+        # complete a login, and the rule cannot say which it matched —
+        # which is precisely why nothing here may report "inactive"
+        # without attribution.
+        primary_secret_type="snowflake_credentials",
+        partner_secret_types=["snowflake_account", "snowflake_user"],
         verifier_key="snowflake_paired",
         partner_inline_regex={
+            "snowflake_account": r'(?i)(?:snowflake_?account|SNOWFLAKE_?ACCOUNT)[\s:="\']+([A-Za-z0-9_-]{3,64})',
             "snowflake_user": r'(?i)(?:snowflake_?user|SNOWFLAKE_?USER)[\s:="\']+([A-Za-z0-9_]+)',
-            "snowflake_password": r'(?i)(?:snowflake_?password|SNOWFLAKE_?PWD?)[\s:="\']+([^\s"\'\r\n]{8,64})',
         },
     ),
     CredentialPair(
@@ -180,7 +213,13 @@ def find_partner_credential(
                 if value:
                     partners[f_type] = value
 
-    # 3. For partners still missing, scan the file content directly
+    # 3. For partners still missing, scan the file content directly.
+    #
+    # Everything found here is inferred, not detected: a regex picked a
+    # value off a nearby line because it looked right. Recorded so a
+    # rejection from the provider is not reported as "this credential
+    # is dead" when the guess is just as likely to be what it disliked.
+    inferred: list[str] = []
     still_missing = [pt for pt in pair_spec.partner_secret_types if pt not in partners]
     if still_missing and pair_spec.partner_inline_regex:
         full_path = _resolve_file_path(primary_file_path, repo_root)
@@ -199,9 +238,11 @@ def find_partner_credential(
                 if m:
                     # Group 1 is the value
                     partners[pt] = m.group(1)
+                    inferred.append(pt)
 
     if partners:
         partners["_pair_key"] = pair_spec.verifier_key
+        partners["_inferred_partners"] = inferred
         return partners
     return None
 
@@ -255,4 +296,8 @@ def enrich_source_metadata_with_pair(
             continue
         enriched[k] = v
     enriched["_pair_key"] = partners.get("_pair_key")
+    # Which of those values were guessed off a nearby line rather than
+    # detected. `apply_pairing_attribution` reads this to decide whether
+    # a rejection can be blamed on the credential Vooda actually found.
+    enriched["_inferred_partners"] = partners.get("_inferred_partners") or []
     return enriched

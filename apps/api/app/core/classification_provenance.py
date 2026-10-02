@@ -183,6 +183,17 @@ def mirror_lifecycle(finding, classification, *, actor=None, note=None) -> None:
         finding.resolved_at = None
         finding.resolved_by = None
 
+    # A risk acceptance belongs to the dismissal that recorded it. Any
+    # other outcome — re-opened, or closed for a different reason —
+    # leaves an owner standing behind a decision nobody is making any
+    # more, so clear it. setattr-guarded because the Core-UPDATE
+    # writers pass objects that may not carry these columns.
+    if mapped.reason is None or mapped.reason.value != "acceptable_risk":
+        if hasattr(finding, "risk_owner"):
+            finding.risk_owner = None
+        if hasattr(finding, "risk_accepted_until"):
+            finding.risk_accepted_until = None
+
 
 def _changed_to_established(obj, is_new: bool) -> bool:
     if not requires_provenance(getattr(obj, "classification", None)):

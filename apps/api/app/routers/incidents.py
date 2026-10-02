@@ -83,6 +83,19 @@ class IncidentOut(BaseModel):
     occurrence_count: int
     classification: str
     review_status: str
+    # Lifecycle pair. Absent here until now, which left every incident
+    # badge in the UI falling back to the legacy classification and
+    # rendering as open-amber whatever its real state — the helpers key
+    # their colour and label on `status`, and the field never arrived.
+    status: Optional[str] = None
+    resolution_reason: Optional[str] = None
+    resolution_note: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[UUID] = None
+    # Advisory only, and shown beside the confidence score rather than
+    # among the statuses: a verdict is the model's opinion of an open
+    # incident, never a decision anybody recorded.
+    ai_verdict: Optional[str] = None
     validation_status: Optional[str] = None
     last_validated_at: Optional[datetime] = None
     rotation_status: Optional[str] = None
@@ -141,7 +154,13 @@ class IncidentDetail(IncidentOut):
 @router.get("")
 async def list_incidents(
     severity_max: Optional[str] = Query(None, description="critical | high | medium | low | info"),
-    classification: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, description="open | triaging | resolved | dismissed"),
+    resolution_reason: Optional[str] = Query(None),
+    ai_verdict: Optional[str] = Query(None, description="likely_tp | likely_fp | unsure"),
+    classification: Optional[str] = Query(
+        None, deprecated=True,
+        description="Legacy. Use status + resolution_reason.",
+    ),
     review_status: Optional[str] = Query(None),
     validation_status: Optional[str] = Query(None),
     rotation_status: Optional[str] = Query(None),
@@ -190,6 +209,16 @@ async def list_incidents(
 
     if severity_max:
         base.append(SecretIncident.severity_max == severity_max)
+    # The lifecycle pair, matching the findings list. Offered before
+    # `classification` because that one takes an exact legacy enum
+    # value and the UI's own options did not spell any of them — a
+    # filter that silently returned nothing at all.
+    if status:
+        base.append(SecretIncident.status == status)
+    if resolution_reason:
+        base.append(SecretIncident.resolution_reason == resolution_reason)
+    if ai_verdict:
+        base.append(SecretIncident.ai_verdict == ai_verdict)
     if classification:
         base.append(SecretIncident.classification == classification)
     if review_status:
@@ -356,7 +385,7 @@ async def get_incident(
     # JSONB and the conditional logic (default-False on missing keys,
     # all-vs-any semantics) is cleaner in Python.
     sm_list: list[dict] = [
-        (o.source_metadata or o.raw_data or {}) for o in occurrences
+        (o.source_metadata or {}) for o in occurrences
     ]
     base["signals"] = {
         "is_placeholder": (
@@ -646,13 +675,15 @@ async def verify_incident_credential(
         # not a user error — but we still respond gracefully.
         return {"status": "error", "message": "Incident has no occurrences to verify against."}
 
-    sm = occurrence.source_metadata or occurrence.raw_data or {}
+    sm = occurrence.source_metadata or {}
 
-    from services.secret_verification.verifier import verify_finding as _verify, SUPPORTED_PROVIDERS
+    from services.secret_verification.verifier import (
+        verify_finding_with_pairing as _verify, can_verify,
+    )
     from apps.api.app.core.audit import log_audit
 
     provider = (sm.get("provider") or "").lower()
-    if provider not in SUPPORTED_PROVIDERS:
+    if not can_verify(sm):
         # No verifier ships for this provider yet — incident-level
         # validation_status is left untouched.  Audit log records the
         # attempt so the History tab shows the user tried.
@@ -670,7 +701,32 @@ async def verify_incident_credential(
         await db.commit()
         return {"status": "unsupported", "message": f"No verifier for provider: {provider}"}
 
-    verification = await _verify(sm)
+    # Put the secret back for the length of this call. It is not on the
+    # row — the scan pipeline strips it — so without this the verifier
+    # has nothing to send and reports "Raw secret value not available",
+    # which is what every incident re-verify has been doing. Recovered
+    # from the clone, never stored, never returned.
+    from services.secret_verification.recovery import (
+        recover_secret_value, RecoveryUnavailable, repo_clone_root,
+    )
+    try:
+        raw_value = recover_secret_value(
+            repository_id=occurrence.repository_id,
+            file_path=occurrence.file_path or "",
+            secret_hash=sm.get("secret_hash") or "",
+            detection_method=sm.get("detection_method") or "",
+        )
+    except RecoveryUnavailable as exc:
+        return {"status": "unavailable", "message": str(exc), "provider": provider}
+
+    verification = await _verify(
+        {**sm, "_raw_value": raw_value},
+        # Half of a credential pair is verified together with its
+        # partner, which is found by scanning the same file.
+        repo_root=repo_clone_root(occurrence.repository_id),
+        file_path=occurrence.file_path or "",
+        line_start=occurrence.line_start or 0,
+    )
     if not verification:
         return {"status": "error", "message": "Verification failed"}
 
@@ -701,7 +757,7 @@ async def verify_incident_credential(
     prev_validation_status = incident.validation_status
 
     for occ in all_occ_q.scalars().all():
-        merged = dict(occ.source_metadata or occ.raw_data or {})
+        merged = dict(occ.source_metadata or {})
         merged["validation_status"] = _validity(verification.status).value
         merged["verification_details"] = verification.details
         merged["verification_permissions"] = verification.permissions
@@ -1564,7 +1620,9 @@ async def bulk_triage_incidents(
 @router.get("/export/csv")
 async def export_incidents_csv(
     severity_max: Optional[str] = Query(None),
-    classification: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    resolution_reason: Optional[str] = Query(None),
+    classification: Optional[str] = Query(None, deprecated=True),
     review_status: Optional[str] = Query(None),
     validation_status: Optional[str] = Query(None),
     rotation_status: Optional[str] = Query(None),
@@ -1601,6 +1659,12 @@ async def export_incidents_csv(
 
     if severity_max:
         base.append(SecretIncident.severity_max == severity_max)
+    # Mirrors the list endpoint, so the file matches the screen the
+    # user exported it from.
+    if status:
+        base.append(SecretIncident.status == status)
+    if resolution_reason:
+        base.append(SecretIncident.resolution_reason == resolution_reason)
     if classification:
         base.append(SecretIncident.classification == classification)
     if review_status:
@@ -1629,9 +1693,14 @@ async def export_incidents_csv(
     writer.writerow([f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"])
     writer.writerow([f"Total incidents: {len(incidents)}"])
     writer.writerow([])
+    # Status and Resolution Reason lead, because they are what the
+    # reviewer is being asked about. Classification stays for anyone
+    # whose saved spreadsheet keys off it, and AI Verdict is labelled
+    # as the model's own so nobody reads it as a decision.
     writer.writerow([
         "ID", "Title", "Secret Type", "Masked Value", "Severity",
-        "Occurrence Count", "Classification", "Review Status",
+        "Occurrence Count", "Status", "Resolution Reason",
+        "AI Verdict", "Classification", "Review Status",
         "Validation Status", "Rotation Status", "Rotated At",
         "First Seen", "Last Seen",
     ])
@@ -1643,6 +1712,9 @@ async def export_incidents_csv(
             inc.masked_value or "",
             inc.severity_max or "",
             inc.occurrence_count or 0,
+            inc.status or "",
+            inc.resolution_reason or "",
+            inc.ai_verdict or "",
             inc.classification or "",
             inc.review_status or "",
             inc.validation_status or "",

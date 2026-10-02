@@ -99,19 +99,47 @@ def _schema_and_tenant():
     for a schema that is rebuilt from those same models anyway. A
     migration that does not match its model is caught by the migration
     tests, which is where that belongs.
+
+    Dropped first, because `create_all` skips a table that already
+    exists and so never adds a column to one. The test database
+    survives between runs, so a model that gained a column left every
+    later run querying a table without it — reported as
+    `UndefinedColumnError` from inside unrelated tests, which is a long
+    way from the model change that caused it. The database holds one
+    seeded tenant and whatever the fixtures provision, so there is
+    nothing here to preserve.
     """
     if _OPT_OUT:
         yield
         return
 
-    from sqlalchemy import create_engine, select
+    from sqlalchemy import create_engine, select, text as sa_text
     from sqlalchemy.orm import Session
 
     from apps.api.app.core.config import settings
     from apps.api.app.core.database import Base
     import apps.api.app.models  # noqa: F401 — registers every table
 
+    # Belt and braces. The drop below is destructive, and the only
+    # thing standing between it and a real deployment is the rewrite at
+    # the top of this file. If that ever stops working, fail loudly
+    # here rather than emptying somebody's database.
+    _target = _database_of(settings.DATABASE_URL_SYNC)
+    assert _target.endswith("_test"), (
+        f"refusing to rebuild the schema of {_target!r}: the suite only "
+        "ever owns a database whose name ends in _test"
+    )
+
     engine = create_engine(settings.DATABASE_URL_SYNC)
+    # The schema, not `drop_all`. Two tables reference each other —
+    # repositories.ticketing_integration_id and
+    # integration_configs.repository_id — so there is no order to drop
+    # them in and SQLAlchemy raises CircularDependencyError. Dropping
+    # the schema also clears the enum types, which `drop_all` leaves
+    # behind and `create_all` then collides with.
+    with engine.begin() as conn:
+        conn.execute(sa_text("DROP SCHEMA public CASCADE"))
+        conn.execute(sa_text("CREATE SCHEMA public"))
     Base.metadata.create_all(engine)
 
     from apps.api.app.models.user import Tenant

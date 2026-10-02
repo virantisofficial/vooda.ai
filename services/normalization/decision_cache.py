@@ -75,6 +75,28 @@ async def lookup_cache(
     cached = cache_r.scalar_one_or_none()
 
     if cached:
+        # An acceptance that has lapsed stops applying. Treated as an
+        # invalidation rather than a hit, so the finding goes through
+        # normal triage and comes back open at the next scan — no cron,
+        # no state flip, and the cache row survives for the audit
+        # trail. Re-dating the acceptance re-arms it.
+        if (
+            cached.classification == "accepted_risk"
+            and cached.risk_accepted_until is not None
+            and cached.risk_accepted_until <= datetime.now(timezone.utc)
+        ):
+            result.invalidated = True
+            result.invalidation_reason = (
+                f"Risk acceptance lapsed on "
+                f"{cached.risk_accepted_until.isoformat()}"
+            )
+            logger.info(
+                "cache_invalidated_risk_acceptance_lapsed",
+                stability_id=stability_id,
+                expired_at=cached.risk_accepted_until.isoformat(),
+            )
+            return result
+
         # Check if code has changed
         if cached.code_hash == code_hash:
             # EXACT MATCH — same code, same location
@@ -136,6 +158,11 @@ async def store_in_cache(
     ai_evidence_refs: list,
     decided_by: str,  # "ai" or "user"
     decided_by_user_id: Optional[UUID] = None,
+    # When an `accepted_risk` decision lapses. The replay path refuses
+    # a hit whose acceptance has passed, which is the whole of the
+    # expiry's enforcement — without it the cache would keep re-closing
+    # the finding and the end date would be decoration.
+    risk_accepted_until=None,
     source_scan_job_id: Optional[UUID] = None,
     # Source-scan finding scope. Either `repository_id` or
     # `scan_source_id` should be set (not both, not neither). Added
@@ -185,6 +212,7 @@ async def store_in_cache(
             existing.ai_evidence_refs = ai_evidence_refs
             existing.decided_by = decided_by
             existing.decided_by_user_id = decided_by_user_id
+            existing.risk_accepted_until = risk_accepted_until
             existing.source_scan_job_id = source_scan_job_id
             existing.code_hash = code_hash
             existing.pattern_hash = pattern_hash
@@ -208,6 +236,7 @@ async def store_in_cache(
             ai_evidence_refs=ai_evidence_refs,
             decided_by=decided_by,
             decided_by_user_id=decided_by_user_id,
+            risk_accepted_until=risk_accepted_until,
             source_scan_job_id=source_scan_job_id,
             code_hash=code_hash,
             pattern_hash=pattern_hash,
@@ -261,6 +290,7 @@ async def store_user_decision_in_cache(
         ai_evidence_refs=finding.ai_evidence_refs or [],
         decided_by="user",
         decided_by_user_id=user_id,
+        risk_accepted_until=getattr(finding, "risk_accepted_until", None),
         rule_id=finding.scanner_rule_id,
         file_path=finding.file_path,
         function_name=finding.function_name,

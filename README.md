@@ -184,8 +184,8 @@ Findings then carry `not_validated` instead of live/inactive. Detection and tria
 Both editions are self-hosted — you run Vooda on your own infrastructure either way. **Enterprise** is the same software under a commercial licence, with more: the complete set of source connectors, secret-manager coverage with rotation write-back, fresh signatures the day they ship, and a support line with an SLA.
 
 > **If you are upgrading from an earlier release.** Some capabilities now
-> require a commercial licence: non-git scan sources, scan schedules, inbound
-> webhooks, notification channels, ticketing and the full audit log. They
+> require a commercial licence: non-git scan sources, scan schedules,
+> notification channels, ticketing and the full audit log. They
 > are shown in the
 > interface with an **Enterprise** badge rather than removed, so you can see
 > what a licence adds. Anything you had already configured stays readable and
@@ -209,9 +209,9 @@ Both editions are self-hosted — you run Vooda on your own infrastructure eithe
 | Audit export & retention enforcement | — | ✅ |
 | Org-specific custom detectors | — | ✅ |
 | Migrate from another scanner — import findings **and triage history** | — | ✅ |
-| Scan triggers | on demand, CLI, CI, pre-push hook | ✅ adds schedules and inbound webhooks |
+| Scan triggers | on demand, CLI, CI, pre-push hook, inbound webhooks | ✅ adds schedules |
 | In-app notifications | ✅ | ✅ |
-| Alerts out — Slack, Teams, email, PagerDuty, webhook | — | ✅ |
+| Alerts out — Slack, Teams, email, PagerDuty, outbound webhook | — | ✅ |
 | Tickets — Jira, ServiceNow, custom tracker | — | ✅ |
 | Secret-manager coverage & rotation write-back — Vault, AWS, Azure, GCP, CyberArk | — | ✅ |
 | **Detection & signature updates** | published here **monthly** (~30 days behind) | **continuous** — new detectors the day they ship |
@@ -226,7 +226,8 @@ Three honest asterisks on the community edition:
 - **Migrating from another scanner is an Enterprise service.** Community imports findings from your own CI and CLI runs. Bringing a *different* scanner's history across — GitHub Advanced Security, GitGuardian, GitLab Secret Detection, TruffleHog — including every verdict your team recorded there, is Enterprise. Keeping those decisions is what stops a migration re-opening thousands of findings your team already settled.
 - **Community scans your code.** Git repositories, with the whole engine behind it — every detector, live verification and AI triage. The connectors that reach anywhere else are Enterprise: issue tracking (Jira, ServiceNow, Azure DevOps), cloud storage (Amazon S3, Azure Blob, Google Cloud Storage), CI / build surfaces (container registries, CI/CD logs, container images), team chat (Slack, Teams, Mattermost), wikis (Confluence, Notion, SharePoint), and secret-manager coverage with rotation write-back (HashiCorp Vault, AWS, Azure, GCP, CyberArk).
 
-- **Community tells you in the app.** Findings, the dashboard and the notification bell all work, including the signal that says triage could not run. Carrying an alert *out* of Vooda — into Slack, Teams, email, PagerDuty, a webhook, or a ticket in Jira or ServiceNow — is Enterprise.
+- **Community tells you in the app.** Findings, the dashboard and the notification bell all work, including the signal that says triage could not run. Carrying an alert *out* of Vooda — into Slack, Teams, email, PagerDuty, an outbound webhook, or a ticket in Jira or ServiceNow — is Enterprise.
+- **Inbound webhooks are Community.** A push or pull-request event arriving from GitHub, GitLab or Bitbucket is scanning input, not a finding leaving — so wiring Vooda into your repository works on either edition. What Enterprise adds on top is *scheduled* scanning, which runs with nothing to trigger it.
 - **Detection updates land monthly.** You get the same rules and signatures Enterprise gets — just on a ~30-day lag, not the continuous feed. A `git pull` always brings you to the latest community release; the engine itself never lags.
 - **Support is the community forum.** [Discussions](../../discussions) and [Issues](../../issues), answered best-effort by us and other users — no guaranteed response time, no phone number. That's what Enterprise is for.
 

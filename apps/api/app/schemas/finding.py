@@ -41,6 +41,11 @@ class FindingListItem(BaseModel):
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[UUID] = None
     ai_verdict: Optional[str] = None
+    # Risk acceptance. Who is accountable, and when the acceptance
+    # lapses — a reader that cannot see the date cannot tell a live
+    # acceptance from one that expired months ago.
+    risk_owner: Optional[UUID] = None
+    risk_accepted_until: Optional[datetime] = None
     source_metadata: Optional[dict] = None
     # See _none_tags_to_empty in FindingDetail — same DB column nullable
     # vs schema list-required mismatch applies to the list endpoint too.
@@ -137,6 +142,11 @@ class FindingDetail(BaseModel):
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[UUID] = None
     ai_verdict: Optional[str] = None
+    # Risk acceptance. Who is accountable, and when the acceptance
+    # lapses — a reader that cannot see the date cannot tell a live
+    # acceptance from one that expired months ago.
+    risk_owner: Optional[UUID] = None
+    risk_accepted_until: Optional[datetime] = None
     source_metadata: Optional[dict] = None
     sink_metadata: Optional[dict] = None
 
@@ -211,6 +221,25 @@ class TriageRequest(BaseModel):
             "resolve: rotated | revoked | provider_disabled. "
             "dismiss: false_positive | test_credential | acceptable_risk "
             "| mitigating_control | no_longer_present."
+        ),
+    )
+    # ── Risk acceptance ────────────────────────────────────────
+    # Only accepted alongside an `acceptable_risk` dismissal. Who is
+    # accountable for the exposure, and when the acceptance lapses.
+    #
+    # The expiry is what stops an acceptance being permanent by
+    # default. Enforcement is read-side — nothing flips the finding on
+    # the date — so a lapsed acceptance simply stops being replayed
+    # onto new occurrences and the finding resurfaces at the next scan.
+    risk_owner: Optional[UUID] = Field(
+        None,
+        description="User accountable for the exposure. `acceptable_risk` only.",
+    )
+    risk_accepted_until: Optional[datetime] = Field(
+        None,
+        description=(
+            "When the acceptance lapses; must be in the future. "
+            "`acceptable_risk` only. Omit for an acceptance with no end date."
         ),
     )
     # Provenance marker — when the action came from a SuggestionChip

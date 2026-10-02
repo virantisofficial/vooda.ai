@@ -326,19 +326,38 @@ def test_custom_detectors_do_not_execute_in_community(edition, expected):
 # ── inbound webhooks: Vooda listening on your behalf ─────────────────
 
 
-def test_configuring_an_inbound_webhook_is_gated():
-    """Schedules and inbound webhooks are one capability in two hats.
+def test_configuring_an_inbound_webhook_is_open_in_community():
+    """Inbound webhooks were Enterprise, on the argument that they are
+    schedules in another hat — Vooda starting a scan nobody asked for.
 
-    Both are Vooda starting a scan nobody asked for at that moment, so
-    gating one and not the other made the boundary arbitrary. Community
-    still automates through the CLI, a CI pipeline key and the pre-push
-    hook — what it does not get is Vooda listening for pushes.
+    That reading was dropped. The rule ENTERPRISE_FEATURES actually
+    follows is where the data goes: Community finds, verifies and
+    triages; Enterprise carries the result OUT of Vooda, into a tracker
+    or a system a team watches. A push event arriving from GitHub is
+    scanning input, not a finding leaving — it belongs on the Community
+    side, and a scanner nobody can wire into their repository is a
+    scanner that gets run once.
+
+    Outbound notification webhooks are a different thing and stay
+    gated, under `notifications`.
     """
     from apps.api.app.routers import webhooks
-    src = inspect.getsource(webhooks)
-    assert src.count('require_enterprise("webhooks")') >= 2, (
-        "both the config write and the test-ping should carry the guard"
+    from apps.api.app.core.edition import ENTERPRISE_FEATURES
+    assert "webhooks" not in ENTERPRISE_FEATURES
+    assert "require_enterprise" not in inspect.getsource(webhooks), (
+        "the badge comes from ENTERPRISE_FEATURES, so a leftover guard "
+        "would refuse a tile the UI now shows as available"
     )
+
+
+def test_outbound_notification_webhooks_are_still_gated():
+    """The two are easy to confuse. Ungating the inbound receiver must
+    not quietly ungate the channel that posts findings outward."""
+    from apps.api.app.core.edition import (
+        ENTERPRISE_PROVIDER_FEATURES, provider_enabled,
+    )
+    assert ENTERPRISE_PROVIDER_FEATURES["webhook"] == "notifications"
+    assert provider_enabled("webhook") is False
 
 
 def test_the_receiver_itself_is_never_gated():
@@ -474,21 +493,12 @@ def test_every_gated_provider_names_a_real_feature():
 
 
 def test_removing_a_webhook_stays_open_in_community():
-    """Creating one is Enterprise; undoing one is not.
-
-    A tenant that downgrades, or that was configured before the gate,
-    would otherwise hold a stored secret they can neither repair nor
-    clear, with the provider still posting to an endpoint that ignores
-    it. The same reasoning as the access-control escape hatch: a gate
-    that traps someone is not an upsell.
-    """
+    """It was the escape hatch on a gate that no longer exists, and it
+    outlives it: nothing about deleting a webhook config should ever
+    depend on the edition."""
     from apps.api.app.routers import webhooks
-    src = inspect.getsource(webhooks.delete_webhook_config)
-    assert "require_enterprise" not in src
-
-    # And the gate is still on the half that creates.
-    assert 'require_enterprise("webhooks")' in inspect.getsource(
-        webhooks).split("def delete_webhook_config")[0]
+    assert "require_enterprise" not in inspect.getsource(
+        webhooks.delete_webhook_config)
 
 
 # ── scan sources: non-git scanning ───────────────────────────────────
@@ -533,3 +543,43 @@ def test_a_stored_source_stops_scanning_in_community():
     # Checked before any work, so nothing is fetched or stored.
     head = src[:src.index("import apps.api.app.models")]
     assert "feature_enabled" in head
+
+
+def test_the_documentation_agrees_with_the_feature_map():
+    """The README and the scanning guide tell a buyer what a licence
+    adds. A capability listed as Enterprise there but open in
+    ENTERPRISE_FEATURES is a promise the software does not keep.
+
+    Checks the specific claims rather than scanning the prose: a guard
+    that flags any sentence containing both "webhook" and "enterprise"
+    also flags the sentence explaining that inbound webhooks are NOT
+    Enterprise, and a test that cries wolf gets deleted.
+    """
+    import pathlib
+    readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+
+    # The claims that were true before the gate came off.
+    for stale in (
+        "adds schedules and inbound webhooks",
+        "scan schedules, inbound\n> webhooks",
+    ):
+        assert stale not in readme, f"README still says: {stale}"
+
+    # And the row that replaced them.
+    assert "pre-push hook, inbound webhooks" in readme
+
+    # The API image ships README.md but not docs/, so the guide is
+    # checked from a full checkout and skipped in the container rather
+    # than failing on a file that was never there.
+    guide = pathlib.Path("docs/scanning.md")
+    if guide.exists():
+        text = guide.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.lower().startswith("| **push webhook**") or \
+               line.lower().startswith("| **pull request webhook**"):
+                assert "(Enterprise)" not in line, line.strip()
+
+    # The capabilities still gated are still described as gated.
+    from apps.api.app.core.edition import ENTERPRISE_FEATURES
+    assert "schedules" in ENTERPRISE_FEATURES
+    assert "scan schedules" in readme.lower()
