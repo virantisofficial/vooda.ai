@@ -611,10 +611,16 @@ function AIModelsFullSection() {
   // settle rather than firing on every click, and it fails silently: a
   // background check should not throw a banner at someone still
   // looking around.
+  //
+  // Only a selection the operator made counts. Opening a saved config
+  // or finishing discovery sets model_id too, and neither should spend
+  // a request on the operator's account unasked.
   const RECHECK_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+  const modelPickedByUser = useRef(false);
   useEffect(() => {
     const id = form.model_id;
     if (!id || !(keyValidated || editingId)) return;
+    if (!modelPickedByUser.current) return;
     if (verifyingAll || probingModel) return;
     const t = setTimeout(() => { probeOne(id, { silent: true }); }, 800);
     return () => clearTimeout(t);
@@ -736,7 +742,7 @@ function AIModelsFullSection() {
   };
 
   const renderModelCard = (m: any) => (
-                    <button key={m.model_id} onClick={() => { setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); applyDeclaredConfig(m); }}
+                    <button key={m.model_id} onClick={() => { modelPickedByUser.current = true; setForm((f) => ({ ...f, model_id: m.model_id, name: (!f.name || f.name === f.model_id) ? m.model_id : f.name })); setSelectedModelParam(m.parameter_size || null); applyAutoConfig(form.provider, m.model_id, form.prompt_strategy, m.parameter_size); applyDeclaredConfig(m); }}
                       className={`w-full text-left p-3 rounded-lg border transition-all ${
                         form.model_id === m.model_id
                           ? "border-red-500/30 bg-red-500/5"
@@ -809,19 +815,9 @@ function AIModelsFullSection() {
         // Verdicts already on record — free, and the badges are there
         // before the customer has finished reading the list.
         loadCachedProbes(providerId);
-        if (!opts?.preserveSelection) {
-          // First model that can actually triage, not first in the list.
-          // Rows come back sorted by id, so whichever name happens to
-          // sort first was being selected — which put a video model in
-          // the form, red-ringed as the current choice, while sitting
-          // in the section for models that cannot be used.
-          const firstModel =
-            data.models.find((m: any) => m.suitability === "candidate")
-            || data.models[0];
-          setForm((f) => ({ ...f, model_id: firstModel.model_id, name: f.name || firstModel.model_id }));
-          setSelectedModelParam(firstModel.parameter_size || null);
-          applyAutoConfig(providerId, firstModel.model_id, form.prompt_strategy, firstModel.parameter_size);
-        }
+        // No model is pre-selected. Selecting one starts a readiness
+        // check — a real, billed request — so the choice, and the
+        // request, wait for the operator to pick from the list.
       }
     } catch (e: any) {
       setDiscoverStatus({ status: "error", message: e.response?.data?.message || "Failed to validate key" });
@@ -1015,6 +1011,7 @@ function AIModelsFullSection() {
     setKeyValidated(false);
     setProbeResults({});
     setShowProbeDetail(false);
+    modelPickedByUser.current = false;
     setEditingId(null);
     setShowAdvanced(false);
     setSelectedModelParam(null);
@@ -1532,7 +1529,7 @@ function AIModelsFullSection() {
               </p>
               <label className="text-xs text-slate-500 mb-1.5 block">Model ID</label>
               <input value={form.model_id}
-                onChange={(e) => setForm((f) => ({ ...f, model_id: e.target.value, name: f.name || e.target.value }))}
+                onChange={(e) => { modelPickedByUser.current = true; setForm((f) => ({ ...f, model_id: e.target.value, name: f.name || e.target.value })); }}
                 placeholder="e.g. llama3, mistral, codellama, gpt-4o"
                 className="input-dark" />
               {editingId && (
