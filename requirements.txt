@@ -11,7 +11,7 @@ alembic==1.19.2
 greenlet==3.5.5
 
 # Redis / Celery
-redis==5.2.1
+redis==8.1.0
 celery[redis]==5.6.3
 
 # Rate limiting (Sprint 1 of API-key audit).  slowapi is the de-facto
